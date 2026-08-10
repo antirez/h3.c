@@ -1,5 +1,6 @@
 #include "h3_internal.h"
 #include "h3_audio_vae.h"
+#include "h3_checkpoint.h"
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
@@ -188,6 +189,39 @@ static char *h3_prepared_key(const char *conditioning,
         return NULL;
     }
     return key.text;
+}
+
+static uint64_t h3_checkpoint_run_signature(
+        const char *conditioning, const char *model_dir,
+        const h3_params *params, int render_width, int render_height) {
+    /* Compatibility describes sampler state, not the Metal implementation
+     * selected for its next forward pass. Normalize diagnostic kernels while
+     * keeping prompt, model, seed, shape, schedule, RoPE, and semantic quality
+     * controls strict. */
+    h3_params normalized = *params;
+    normalized.use_slower_bf16_mlp = 0;
+    normalized.use_slower_bf16_qkv = 0;
+    normalized.use_slower_bf16_attention_output = 0;
+    normalized.use_slower_row_major_attention_output = 0;
+    normalized.use_slower_unfused_int8_inputs = 0;
+    normalized.use_slower_unfused_qkv_rope = 0;
+    normalized.use_slower_scalar_qkv_rms = 0;
+    normalized.use_slower_uncached_int8_scales = 0;
+    normalized.use_slower_dynamic_fc1_k = 0;
+    normalized.use_slower_grouped_quantizer = 0;
+    char *prepared = h3_prepared_key(
+        conditioning, &normalized, render_width, render_height);
+    if (!prepared) return 0;
+    h3_key key = {0};
+    int ok = h3_key_append(
+        &key,
+        "checkpoint-schema=1|%s|model=%zu:%s|seed=%llu|denoise-reuse=%d",
+        prepared, strlen(model_dir), model_dir,
+        (unsigned long long)params->seed, params->denoise_reuse);
+    free(prepared);
+    uint64_t signature = ok ? h3_checkpoint_signature(key.text) : 0;
+    free(key.text);
+    return signature;
 }
 
 static int h3_text_embedding_copy(h3_text_embedding *destination,
@@ -561,6 +595,45 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "denoising preview requires a frame callback");
         return 0;
     }
+    if (!isfinite(params->checkpoint_after_seconds) ||
+        params->checkpoint_after_seconds < 0.0) {
+        h3_set_error(ctx, "checkpoint seconds must be finite and non-negative");
+        return 0;
+    }
+    if (params->checkpoint_after_step < 0 ||
+        params->checkpoint_after_step >= params->steps) {
+        h3_set_error(ctx,
+            "checkpoint step must be zero or smaller than denoising steps");
+        return 0;
+    }
+    if (params->checkpoint_after_seconds > 0.0 &&
+        params->checkpoint_after_step > 0) {
+        h3_set_error(ctx,
+            "checkpoint seconds and checkpoint step are mutually exclusive");
+        return 0;
+    }
+    int checkpoint_requested = params->checkpoint_after_seconds > 0.0 ||
+                               params->checkpoint_after_step > 0;
+    if (params->checkpoint_path && !*params->checkpoint_path) {
+        h3_set_error(ctx, "checkpoint path must not be empty");
+        return 0;
+    }
+    if (checkpoint_requested !=
+        (params->checkpoint_path && *params->checkpoint_path)) {
+        h3_set_error(ctx,
+            "checkpoint threshold and checkpoint path must be set together");
+        return 0;
+    }
+    if (params->resume_path && !*params->resume_path) {
+        h3_set_error(ctx, "resume checkpoint path must not be empty");
+        return 0;
+    }
+    if ((checkpoint_requested || params->resume_path) &&
+        (params->denoise_reuse != 1 || params->core_reuse != 1)) {
+        h3_set_error(ctx,
+            "progressive checkpointing currently requires reuse 1 and core reuse 1");
+        return 0;
+    }
     if (params->core_reuse > 1 && params->denoise_reuse > 1) {
         h3_set_error(ctx, "core reuse and denoiser reuse cannot be combined");
         return 0;
@@ -862,6 +935,9 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_temporal_shape temporal = h3_temporal(params->frames);
     int latent_w, latent_h;
     h3_latent_canvas(render_width, render_height, &latent_w, &latent_h);
+    size_t video_count = (size_t)24 * (size_t)temporal.video_t *
+                         (size_t)latent_h * (size_t)latent_w;
+    size_t audio_count = (size_t)32 * 2 * (size_t)temporal.audio_t;
     h3_tokenizer *tokenizer = NULL;
     uint32_t *ids = NULL;
     size_t token_count = 0;
@@ -895,6 +971,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_live_preview live_preview;
     memset(&live_preview, 0, sizeof(live_preview));
     float *video = NULL, *audio = NULL;
+    float *draft_video = NULL, *draft_audio = NULL;
     h3_video_frames frames;
     memset(&frames, 0, sizeof(frames));
     h3_audio_waveform waveform;
@@ -908,6 +985,12 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     int conditioned = 0;
     int dit_is_cached = 0;
     int decoder_is_cached = 0;
+    uint64_t checkpoint_signature = 0;
+    int resumed_from_step = 0;
+    int checkpointed = 0;
+    double prior_denoise_seconds = 0.0;
+    h3_dit_progressive progressive = {0};
+    char detail[512];
     char *tokenizer_path = h3_path(ctx->model_dir, ref2va ?
         "Ref2VA/tokenizer/tokenizer.json" : "FL2VA/tokenizer/tokenizer.json");
     char *text_path = h3_path(ctx->model_dir, ref2va ?
@@ -935,6 +1018,45 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "out of memory constructing prepared-model cache key");
         goto cleanup;
     }
+    int progressive_requested = params->resume_path ||
+        params->checkpoint_after_seconds > 0.0 ||
+        params->checkpoint_after_step > 0;
+    if (progressive_requested) {
+        checkpoint_signature = h3_checkpoint_run_signature(
+            conditioning_key, ctx->model_dir, params,
+            render_width, render_height);
+        if (!checkpoint_signature) {
+            h3_set_error(ctx, "cannot construct checkpoint signature");
+            goto cleanup;
+        }
+    }
+    if (params->resume_path) {
+        h3_checkpoint_info expected = {
+            checkpoint_signature, params->seed, (uint32_t)params->steps, 0,
+            (uint32_t)render_width, (uint32_t)render_height,
+            (uint32_t)temporal.frame_count,
+            (uint64_t)video_count, (uint64_t)audio_count, 0.0
+        };
+        h3_checkpoint_info actual;
+        h3_progress_emit(&progress, "checkpoint load", 0, 1);
+        if (progress.cancelled) goto cleanup;
+        if (!h3_checkpoint_load(
+                params->resume_path, &expected, &actual, &video, &audio,
+                detail, sizeof(detail))) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        resumed_from_step = (int)actual.next_step;
+        prior_denoise_seconds = actual.denoise_seconds;
+        if (params->checkpoint_after_step > 0 &&
+            params->checkpoint_after_step <= resumed_from_step) {
+            h3_set_error(ctx,
+                "checkpoint step must be greater than the resumed step");
+            goto cleanup;
+        }
+        h3_progress_emit(&progress, "checkpoint load", 1, 1);
+        if (progress.cancelled) goto cleanup;
+    }
     h3_key decoder_cache_key = {0};
     if (!h3_key_append(&decoder_cache_key, "%s|%dx%d", vae_path,
                        latent_h, latent_w)) {
@@ -958,7 +1080,6 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     }
     conditioning_hit = ctx->cache_enabled && ctx->conditioning_key &&
         !strcmp(ctx->conditioning_key, conditioning_key);
-    char detail[512];
     if (conditioning_hit) {
         size_t cached_reference_count = 0;
         if (!h3_conditioning_cache_load(
@@ -1546,24 +1667,33 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         live_preview.output_height = params->height;
         if (progress.cancelled) goto cleanup;
     }
-    size_t video_count = h3_dit_video_elements(dit);
-    size_t audio_count = h3_dit_audio_elements(dit);
-    video = malloc(video_count * sizeof(*video));
-    audio = malloc(audio_count * sizeof(*audio));
-    if (!video || !audio) {
-        h3_set_error(ctx, "out of memory allocating joint H3 noise");
+    if (h3_dit_video_elements(dit) != video_count ||
+        h3_dit_audio_elements(dit) != audio_count) {
+        h3_set_error(ctx, "prepared DiT latent shape is inconsistent");
         goto cleanup;
     }
-    /* The released server initializes each modality from a separate generator
-     * carrying the same requested seed. */
-    h3_rng video_rng, audio_rng;
-    h3_rng_seed(&video_rng, params->seed);
-    h3_rng_seed(&audio_rng, params->seed);
-    h3_rng_fill_normal(&video_rng, video, video_count);
-    h3_rng_fill_normal(&audio_rng, audio, audio_count);
-    if (!h3_dit_denoise_euler_preview(
+    if (!params->resume_path) {
+        video = malloc(video_count * sizeof(*video));
+        audio = malloc(audio_count * sizeof(*audio));
+        if (!video || !audio) {
+            h3_set_error(ctx, "out of memory allocating joint H3 noise");
+            goto cleanup;
+        }
+        /* The released server initializes each modality from a separate
+         * generator carrying the same requested seed. */
+        h3_rng video_rng, audio_rng;
+        h3_rng_seed(&video_rng, params->seed);
+        h3_rng_seed(&audio_rng, params->seed);
+        h3_rng_fill_normal(&video_rng, video, video_count);
+        h3_rng_fill_normal(&audio_rng, audio, audio_count);
+    }
+    progressive.start_step = resumed_from_step;
+    progressive.stop_after_seconds = params->checkpoint_after_seconds;
+    progressive.stop_after_step = params->checkpoint_after_step;
+    if (!h3_dit_denoise_euler_progressive(
             dit, video, audio, params->denoise_reuse,
             h3_dit_progress_bridge, &progress,
+            &progressive,
             preview_decoder ? h3_deliver_denoise_preview : NULL,
             preview_decoder ? &live_preview : NULL,
             detail, sizeof(detail))) {
@@ -1576,9 +1706,52 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         goto cleanup;
     }
+    if (progress.cancelled) goto cleanup;
+    if (progressive.stopped) {
+        h3_checkpoint_info info = {
+            checkpoint_signature, params->seed, (uint32_t)params->steps,
+            (uint32_t)progressive.completed_steps,
+            (uint32_t)render_width, (uint32_t)render_height,
+            (uint32_t)temporal.frame_count,
+            (uint64_t)video_count, (uint64_t)audio_count,
+            prior_denoise_seconds + progressive.elapsed_seconds
+        };
+        h3_progress_emit(&progress, "checkpoint save", 0, 1);
+        if (progress.cancelled) goto cleanup;
+        if (!h3_checkpoint_save(params->checkpoint_path, &info, video, audio,
+                                detail, sizeof(detail))) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        checkpointed = 1;
+        h3_progress_emit(&progress, "checkpoint save", 1, 1);
+        if (progress.cancelled) goto cleanup;
+        draft_video = malloc(video_count * sizeof(*draft_video));
+        draft_audio = malloc(audio_count * sizeof(*draft_audio));
+        if (!draft_video || !draft_audio) {
+            h3_set_error(ctx, "out of memory allocating projected draft");
+            goto cleanup;
+        }
+        h3_progress_emit(&progress, "draft projection", 0, 1);
+        if (progress.cancelled) goto cleanup;
+        if (!h3_dit_project_draft_to_zero(
+                dit, progressive.completed_steps,
+                video, video_count, audio, audio_count,
+                draft_video, draft_audio, detail, sizeof(detail))) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        free(video);
+        free(audio);
+        video = draft_video;
+        audio = draft_audio;
+        draft_video = NULL;
+        draft_audio = NULL;
+        h3_progress_emit(&progress, "draft projection", 1, 1);
+        if (progress.cancelled) goto cleanup;
+    }
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
-    if (progress.cancelled) goto cleanup;
     h3_progress_emit(&progress, "audio VAE", 0, 7);
     if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
                              temporal.audio_t, h3_audio_vae_progress_bridge,
@@ -1676,6 +1849,13 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     result->fps = H3_FPS;
     result->sample_rate = waveform.sample_rate;
     result->seed = params->seed;
+    result->denoise_steps_completed = progressive.completed_steps;
+    result->denoise_steps_total = params->steps;
+    result->checkpointed = checkpointed;
+    result->resumed_from_step = resumed_from_step;
+    result->denoise_seconds = progressive.elapsed_seconds;
+    result->cumulative_denoise_seconds =
+        prior_denoise_seconds + progressive.elapsed_seconds;
 
 cleanup:
     free(conditioning_key);
@@ -1708,7 +1888,7 @@ cleanup:
     h3_layout_free(&layout);
     if (!dit_is_cached) h3_dit_free(dit);
     if (!decoder_is_cached) h3_video_vae_decoder_free(preview_decoder);
-    free(video); free(audio); free(rgb8);
+    free(video); free(audio); free(draft_video); free(draft_audio); free(rgb8);
     h3_video_frames_free(&frames);
     h3_audio_waveform_free(&waveform);
     return result;

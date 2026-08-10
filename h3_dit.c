@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
     TEXT_DIM = 5120,
@@ -81,6 +82,7 @@ struct h3_dit {
     unsigned core_reuse_interval;
     unsigned core_forward_count;
     int core_residual_ready;
+    int last_velocity_step;
     unsigned active_block_count;
     uint8_t block_active[H3_DIT_BLOCKS];
     h3_layout layout;
@@ -1380,6 +1382,7 @@ static h3_dit *load_dit(const char *weight_directory,
         fail(error, error_size, "out of memory creating DiT model");
         return NULL;
     }
+    dit->last_velocity_step = -1;
     dit->fused_mlp = getenv("H3_DISABLE_FUSED_MLP") == NULL;
     /* The released final heads are F32, but their inputs are already BF16.
      * Converting these small weights once selects the Iris-derived tiled
@@ -2136,7 +2139,51 @@ int h3_dit_reset_run(h3_dit *dit,
     }
     dit->core_forward_count = 0;
     dit->core_residual_ready = 0;
+    dit->last_velocity_step = -1;
     return 1;
+}
+
+static int read_output_velocity(h3_dit *dit,
+                                float *video_velocity,
+                                float *audio_velocity,
+                                char *error, size_t error_size) {
+    size_t video_row_elements = (size_t)dit->video_rows * VIDEO_PATCH;
+    size_t audio_row_elements = (size_t)dit->audio_rows * AUDIO_CHANNELS;
+    uint16_t *video_out = malloc(video_row_elements * sizeof(*video_out));
+    uint16_t *audio_out = malloc(audio_row_elements * sizeof(*audio_out));
+    float *video_f32 = malloc(video_row_elements * sizeof(*video_f32));
+    float *audio_f32 = malloc(audio_row_elements * sizeof(*audio_f32));
+    if (!video_out || !audio_out || !video_f32 || !audio_f32) {
+        fail(error, error_size, "out of memory reading DiT velocity");
+        free(video_out); free(audio_out);
+        free(video_f32); free(audio_f32);
+        return 0;
+    }
+    int ok = h3_gpu_tensor_read_bf16(
+                 dit->video_output_bf16, video_out, video_row_elements) &&
+             h3_gpu_tensor_read_bf16(
+                 dit->audio_output_bf16, audio_out, audio_row_elements);
+    if (!ok) fail(error, error_size, "cannot read DiT output velocity");
+    if (ok) {
+        for (size_t index = 0; index < video_row_elements; index++) {
+            uint32_t bits = (uint32_t)video_out[index] << 16;
+            memcpy(&video_f32[index], &bits, sizeof(bits));
+        }
+        for (size_t index = 0; index < audio_row_elements; index++) {
+            uint32_t bits = (uint32_t)audio_out[index] << 16;
+            memcpy(&audio_f32[index], &bits, sizeof(bits));
+        }
+        ok = h3_dit_unpatchify_video(
+                 video_f32, VIDEO_CHANNELS, dit->latent_t, dit->latent_h,
+                 dit->latent_w, video_velocity, h3_dit_video_elements(dit)) &&
+             h3_dit_unpack_audio(
+                 audio_f32, AUDIO_CHANNELS, dit->audio_t, audio_velocity,
+                 h3_dit_audio_elements(dit));
+        if (!ok) fail(error, error_size, "cannot unpack DiT output velocity");
+    }
+    free(video_out); free(audio_out);
+    free(video_f32); free(audio_f32);
+    return ok;
 }
 
 int h3_dit_forward(h3_dit *dit, int step,
@@ -2153,17 +2200,12 @@ int h3_dit_forward(h3_dit *dit, int step,
     size_t audio_row_elements = (size_t)dit->audio_rows * AUDIO_CHANNELS;
     float *video_rows = malloc(video_row_elements * sizeof(*video_rows));
     float *audio_rows = malloc(audio_row_elements * sizeof(*audio_rows));
-    uint16_t *video_out = malloc(video_row_elements * sizeof(*video_out));
-    uint16_t *audio_out = malloc(audio_row_elements * sizeof(*audio_out));
-    float *video_f32 = malloc(video_row_elements * sizeof(*video_f32));
-    float *audio_f32 = malloc(audio_row_elements * sizeof(*audio_f32));
-    if (!video_rows || !audio_rows || !video_out || !audio_out ||
-        !video_f32 || !audio_f32) {
+    if (!video_rows || !audio_rows) {
         fail(error, error_size, "out of memory packing DiT latents");
-        free(video_rows); free(audio_rows); free(video_out); free(audio_out);
-        free(video_f32); free(audio_f32);
+        free(video_rows); free(audio_rows);
         return 0;
     }
+    dit->last_velocity_step = -1;
     int ok = h3_dit_patchify_video(video_latent, VIDEO_CHANNELS,
         dit->latent_t, dit->latent_h, dit->latent_w, video_rows,
         video_row_elements) &&
@@ -2179,29 +2221,66 @@ int h3_dit_forward(h3_dit *dit, int step,
             audio_rows, audio_row_elements);
     if (!ok) fail(error, error_size, "cannot pack/write DiT input latents");
     if (ok) ok = encode_forward(dit, step, 1, 1, 0, error, error_size);
-    if (ok) ok = h3_gpu_tensor_read_bf16(dit->video_output_bf16, video_out,
-                                         video_row_elements) &&
-                 h3_gpu_tensor_read_bf16(dit->audio_output_bf16, audio_out,
-                                         audio_row_elements);
-    if (!ok && (!error || !*error)) fail(error, error_size, "cannot read DiT output");
-    if (ok) {
-        for (size_t index = 0; index < video_row_elements; index++) {
-            uint32_t bits = (uint32_t)video_out[index] << 16;
-            memcpy(&video_f32[index], &bits, sizeof(bits));
-        }
-        for (size_t index = 0; index < audio_row_elements; index++) {
-            uint32_t bits = (uint32_t)audio_out[index] << 16;
-            memcpy(&audio_f32[index], &bits, sizeof(bits));
-        }
+    if (ok) ok = read_output_velocity(
+        dit, video_velocity, audio_velocity, error, error_size);
+    if (ok) dit->last_velocity_step = step;
+    free(video_rows); free(audio_rows);
+    return ok;
+}
+
+int h3_dit_project_draft_to_zero(
+                   h3_dit *dit, int completed_steps,
+                   const float *video_latent, size_t video_elements,
+                   const float *audio_latent, size_t audio_elements,
+                   float *video_draft, float *audio_draft,
+                   char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!dit) {
+        fail(error, error_size, "invalid DiT draft projection arguments");
+        return 0;
     }
-    if (ok) ok = h3_dit_unpatchify_video(video_f32, VIDEO_CHANNELS,
-        dit->latent_t, dit->latent_h, dit->latent_w, video_velocity,
-        h3_dit_video_elements(dit)) &&
-        h3_dit_unpack_audio(audio_f32, AUDIO_CHANNELS, dit->audio_t,
-                            audio_velocity, h3_dit_audio_elements(dit));
-    if (!ok && (!error || !*error)) fail(error, error_size, "cannot unpack DiT output");
-    free(video_rows); free(audio_rows); free(video_out); free(audio_out);
-    free(video_f32); free(audio_f32);
+    size_t expected_video = h3_dit_video_elements(dit);
+    size_t expected_audio = h3_dit_audio_elements(dit);
+    if (completed_steps <= 0 ||
+        completed_steps >= dit->sigmas.steps ||
+        dit->last_velocity_step != completed_steps - 1 ||
+        !video_latent || video_elements != expected_video ||
+        !audio_latent || audio_elements != expected_audio ||
+        !video_draft || !audio_draft) {
+        fail(error, error_size, "invalid DiT draft projection arguments");
+        return 0;
+    }
+    float *video_velocity = malloc(video_elements * sizeof(*video_velocity));
+    float *audio_velocity = malloc(audio_elements * sizeof(*audio_velocity));
+    if (!video_velocity || !audio_velocity) {
+        fail(error, error_size, "out of memory projecting DiT draft");
+        free(video_velocity);
+        free(audio_velocity);
+        return 0;
+    }
+    int ok = read_output_velocity(
+        dit, video_velocity, audio_velocity, error, error_size);
+    if (ok) {
+        /* The stopped state is x_next = x + (sigma - sigma_next) * v.
+         * Extending that same data-ward velocity by sigma_next reaches the
+         * display-only zero-sigma estimate without mutating x_next. */
+        if (video_draft != video_latent)
+            memcpy(video_draft, video_latent,
+                   video_elements * sizeof(*video_draft));
+        if (audio_draft != audio_latent)
+            memcpy(audio_draft, audio_latent,
+                   audio_elements * sizeof(*audio_draft));
+        ok = h3_euler_velocity_step(
+                 video_draft, video_velocity, video_elements,
+                 dit->sigmas.video[completed_steps], 0.0f) &&
+             h3_euler_velocity_step(
+                 audio_draft, audio_velocity, audio_elements,
+                 dit->sigmas.audio[completed_steps], 0.0f);
+        if (!ok) fail(error, error_size,
+                      "cannot project DiT draft to sigma zero");
+    }
+    free(video_velocity);
+    free(audio_velocity);
     return ok;
 }
 
@@ -2284,6 +2363,20 @@ static int gpu_sampler_requested(const h3_dit *dit) {
     return h3_gpu_is_m5(dit->gpu);
 }
 
+static double monotonic_seconds(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0.0;
+    return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+static int progressive_should_stop(const h3_dit_progressive *control,
+                                   int completed_steps, double elapsed) {
+    return (control->stop_after_seconds > 0.0 &&
+            elapsed >= control->stop_after_seconds) ||
+           (control->stop_after_step > 0 &&
+            completed_steps >= control->stop_after_step);
+}
+
 static unsigned gpu_sampler_window(void) {
     const char *value = getenv("H3_GPU_SAMPLER_WINDOW");
     if (!value || !*value) return 1;
@@ -2313,6 +2406,7 @@ static int ensure_previous_velocities(h3_dit *dit, char *error,
 static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                              float *audio_latent, int reuse_interval,
                              h3_dit_progress progress, void *progress_opaque,
+                             h3_dit_progressive *control,
                              h3_dit_preview preview, void *preview_opaque,
                              char *error, size_t error_size) {
     uint8_t selected[H3_MAX_STEPS] = {0};
@@ -2330,6 +2424,13 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     if (reuse_interval > 1 && getenv("H3_PROFILE"))
         fprintf(stderr, "h3: %s GPU reuse schedule has %d evaluations\n",
                 custom_count > 0 ? "custom" : "selected", selected_count);
+    int start_step = control->start_step;
+    int checkpoint_enabled = control->stop_after_seconds > 0.0 ||
+                             control->stop_after_step > 0;
+    double began = monotonic_seconds();
+    control->completed_steps = start_step;
+    control->stopped = 0;
+    control->elapsed_seconds = 0.0;
     unsigned window = gpu_sampler_window();
     int disable_command_split = window == 1 &&
                                 getenv("H3_DIT_COMMAND_BLOCKS") == NULL;
@@ -2370,7 +2471,9 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     int previous_evaluated = -1;
     unsigned pending_evaluations = 0;
     int command_active = 0;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    int completed_steps = start_step;
+    dit->last_velocity_step = -1;
+    for (int step = start_step; step < dit->sigmas.steps && ok; step++) {
         report(progress, progress_opaque, "denoise enqueue", step,
                dit->sigmas.steps);
         if (!command_active) {
@@ -2397,6 +2500,7 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                                         error, error_size);
             if (ok) {
                 last_evaluated = step;
+                dit->last_velocity_step = step;
                 pending_evaluations++;
             }
         }
@@ -2426,8 +2530,9 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 dit->audio_output_bf16, previous_audio, (uint32_t)audio_count,
                 dit->sigmas.audio[step] - dit->sigmas.audio[step + 1],
                 audio_ratio), error, error_size, "GPU audio Euler step");
-        if (ok && (evaluate || preview)) {
-            int finish = preview || step + 1 == dit->sigmas.steps ||
+        if (ok && (evaluate || preview || checkpoint_enabled)) {
+            int finish = preview || checkpoint_enabled ||
+                         step + 1 == dit->sigmas.steps ||
                          (window && pending_evaluations >= window);
             ok = gpu_op(dit, finish ? h3_gpu_submit(dit->gpu)
                                     : h3_gpu_continue(dit->gpu),
@@ -2456,8 +2561,18 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 ok = 0;
             }
         }
-        if (ok) report(progress, progress_opaque, "denoise enqueue", step + 1,
-                       dit->sigmas.steps);
+        if (ok) {
+            completed_steps = step + 1;
+            report(progress, progress_opaque, "denoise enqueue",
+                   completed_steps, dit->sigmas.steps);
+            double elapsed = monotonic_seconds() - began;
+            if (checkpoint_enabled &&
+                progressive_should_stop(control, completed_steps, elapsed) &&
+                completed_steps < dit->sigmas.steps) {
+                control->stopped = 1;
+                break;
+            }
+        }
     }
     if (ok && command_active)
         ok = gpu_op(dit, h3_gpu_submit(dit->gpu), error, error_size,
@@ -2478,7 +2593,9 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
         fail(error, error_size, "cannot unpack GPU Euler latents");
     free(video_rows);
     free(audio_rows);
-    if (ok) report(progress, progress_opaque, "denoise", dit->sigmas.steps,
+    control->completed_steps = completed_steps;
+    control->elapsed_seconds = monotonic_seconds() - began;
+    if (ok) report(progress, progress_opaque, "denoise", completed_steps,
                    dit->sigmas.steps);
     h3_gpu_profile_mark(dit->gpu, "GPU Euler denoise");
     return ok;
@@ -2558,22 +2675,39 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
-int h3_dit_denoise_euler_preview(
+int h3_dit_denoise_euler_progressive(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_progressive *control,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!dit || !video_latent || !audio_latent || reuse_interval < 1 ||
+    if (!dit || !video_latent || !audio_latent || !control ||
+        reuse_interval < 1 ||
         reuse_interval > 32 ||
-        dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule)) {
+        dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule) ||
+        control->start_step < 0 ||
+        control->start_step >= dit->sigmas.steps ||
+        !isfinite(control->stop_after_seconds) ||
+        control->stop_after_seconds < 0.0 ||
+        control->stop_after_step < 0 ||
+        control->stop_after_step >= dit->sigmas.steps ||
+        (control->stop_after_step > 0 &&
+         control->stop_after_step <= control->start_step) ||
+        (control->stop_after_seconds > 0.0 &&
+         control->stop_after_step > 0) ||
+        ((control->start_step > 0 ||
+          control->stop_after_seconds > 0.0 ||
+          control->stop_after_step > 0) &&
+         (reuse_interval != 1 || dit->core_reuse_interval != 1))) {
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
     if (gpu_sampler_requested(dit))
         return denoise_euler_gpu(dit, video_latent, audio_latent,
                                  reuse_interval, progress, progress_opaque,
+                                 control,
                                  preview, preview_opaque,
                                  error, error_size);
     uint8_t selected[H3_MAX_STEPS] = {0};
@@ -2591,6 +2725,13 @@ int h3_dit_denoise_euler_preview(
     if (reuse_interval > 1 && getenv("H3_PROFILE"))
         fprintf(stderr, "h3: %s reuse schedule has %d evaluations\n",
                 custom_count > 0 ? "custom" : "selected", selected_count);
+    int start_step = control->start_step;
+    int checkpoint_enabled = control->stop_after_seconds > 0.0 ||
+                             control->stop_after_step > 0;
+    double began = monotonic_seconds();
+    control->completed_steps = start_step;
+    control->stopped = 0;
+    control->elapsed_seconds = 0.0;
     size_t video_count = h3_dit_video_elements(dit);
     size_t audio_count = h3_dit_audio_elements(dit);
     float *video_velocity = malloc(video_count * sizeof(*video_velocity));
@@ -2618,7 +2759,8 @@ int h3_dit_denoise_euler_preview(
     int ok = 1;
     int last_evaluated = -1;
     int previous_evaluated = -1;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    int completed_steps = start_step;
+    for (int step = start_step; step < dit->sigmas.steps && ok; step++) {
         report(progress, progress_opaque, "denoise", step, dit->sigmas.steps);
         int evaluate = selected[step];
         if (evaluate) {
@@ -2670,8 +2812,18 @@ int h3_dit_denoise_euler_preview(
                  step + 1);
             ok = 0;
         }
-        if (ok) report(progress, progress_opaque, "denoise", step + 1,
-                       dit->sigmas.steps);
+        if (ok) {
+            completed_steps = step + 1;
+            report(progress, progress_opaque, "denoise", completed_steps,
+                   dit->sigmas.steps);
+            double elapsed = monotonic_seconds() - began;
+            if (checkpoint_enabled &&
+                progressive_should_stop(control, completed_steps, elapsed) &&
+                completed_steps < dit->sigmas.steps) {
+                control->stopped = 1;
+                break;
+            }
+        }
     }
     free(video_velocity);
     free(audio_velocity);
@@ -2679,8 +2831,23 @@ int h3_dit_denoise_euler_preview(
     free(previous_video);
     free(last_audio);
     free(previous_audio);
+    control->completed_steps = completed_steps;
+    control->elapsed_seconds = monotonic_seconds() - began;
     h3_gpu_profile_mark(dit->gpu, "Euler denoise");
     return ok;
+}
+
+int h3_dit_denoise_euler_preview(
+                         h3_dit *dit, float *video_latent,
+                         float *audio_latent, int reuse_interval,
+                         h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_preview preview, void *preview_opaque,
+                         char *error, size_t error_size) {
+    h3_dit_progressive control = {0};
+    return h3_dit_denoise_euler_progressive(
+        dit, video_latent, audio_latent, reuse_interval,
+        progress, progress_opaque, &control, preview, preview_opaque,
+        error, error_size);
 }
 
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,

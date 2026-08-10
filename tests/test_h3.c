@@ -1,14 +1,17 @@
+#include "h3_checkpoint.h"
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
 #include "h3_terminal.h"
 
+#include <fcntl.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int tests_run;
@@ -72,6 +75,10 @@ static void test_schedule(void) {
     h3_params defaults = H3_PARAMS_DEFAULT;
     CHECK(defaults.steps == 20);
     CHECK(defaults.use_reference_rope == 0);
+    CHECK(defaults.checkpoint_after_seconds == 0.0);
+    CHECK(defaults.checkpoint_after_step == 0);
+    CHECK(defaults.checkpoint_path == NULL);
+    CHECK(defaults.resume_path == NULL);
 
     h3_sigma_schedule schedule;
     CHECK(h3_schedule_build(20, &schedule));
@@ -322,6 +329,17 @@ static void test_rng_and_solver(void) {
     float euler[] = {1.0f, 3.0f};
     CHECK(h3_euler_velocity_step(euler, velocity, 2, 0.75f, 0.25f));
     CHECK(euler[0] == 2.0f && euler[1] == 1.0f);
+    /* Projecting a copy of a stopped Euler state must equal extending the
+     * same velocity directly to zero, while the checkpoint stays unchanged. */
+    float projected[] = {euler[0], euler[1]};
+    float direct_to_zero[] = {1.0f, 3.0f};
+    CHECK(h3_euler_velocity_step(
+        projected, velocity, 2, 0.25f, 0.0f));
+    CHECK(h3_euler_velocity_step(
+        direct_to_zero, velocity, 2, 0.75f, 0.0f));
+    CHECK(projected[0] == direct_to_zero[0]);
+    CHECK(projected[1] == direct_to_zero[1]);
+    CHECK(euler[0] == 2.0f && euler[1] == 1.0f);
     CHECK(!h3_euler_velocity_step(euler, velocity, 2, 0.25f, 0.25f));
 }
 
@@ -373,6 +391,166 @@ static void test_dit_row_conversions(void) {
     CHECK(memcmp(audio, unpacked, sizeof(audio)) == 0);
 }
 
+static void test_checkpoint_roundtrip(void) {
+    char path[] = "/tmp/h3_checkpoint_XXXXXX";
+    int descriptor = mkstemp(path);
+    CHECK(descriptor >= 0);
+    CHECK(close(descriptor) == 0);
+    CHECK(unlink(path) == 0);
+
+    const float video[] = {1.0f, -2.0f, 3.5f, 0.0f, 9.25f};
+    const float replacement[] = {8.0f, 7.0f, 6.0f, 5.0f, 4.0f};
+    const float audio[] = {-0.5f, 4.0f, 7.0f};
+    h3_checkpoint_info info = {
+        h3_checkpoint_signature("prompt-and-model-key"), 42, 10, 4,
+        512, 512, 362,
+        sizeof(video) / sizeof(*video), sizeof(audio) / sizeof(*audio), 12.75
+    };
+    char error[256];
+    CHECK(h3_checkpoint_signature("") ==
+          UINT64_C(14695981039346656037));
+    CHECK(info.signature != 0);
+    CHECK(info.signature != h3_checkpoint_signature("different-key"));
+    CHECK(h3_checkpoint_save(path, &info, video, audio,
+                             error, sizeof(error)));
+    struct stat status;
+    CHECK(stat(path, &status) == 0);
+    CHECK((status.st_mode & 077) == 0);
+
+    h3_checkpoint_info expected = info;
+    expected.next_step = 0;
+    expected.denoise_seconds = 0.0;
+    h3_checkpoint_info actual;
+    float *loaded_video = NULL;
+    float *loaded_audio = NULL;
+    CHECK(h3_checkpoint_load(path, &expected, &actual,
+                             &loaded_video, &loaded_audio,
+                             error, sizeof(error)));
+    CHECK(actual.next_step == 4);
+    CHECK(actual.denoise_seconds == 12.75);
+    CHECK(memcmp(loaded_video, video, sizeof(video)) == 0);
+    CHECK(memcmp(loaded_audio, audio, sizeof(audio)) == 0);
+    free(loaded_video);
+    free(loaded_audio);
+
+    /* Saving again atomically replaces the previous complete artifact. */
+    info.next_step = 5;
+    info.denoise_seconds = 14.0;
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    CHECK(h3_checkpoint_load(path, &expected, &actual,
+                             &loaded_video, &loaded_audio,
+                             error, sizeof(error)));
+    CHECK(actual.next_step == 5);
+    CHECK(actual.denoise_seconds == 14.0);
+    CHECK(memcmp(loaded_video, replacement, sizeof(replacement)) == 0);
+    free(loaded_video);
+    free(loaded_audio);
+
+    expected.signature ^= UINT64_C(1);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "does not match") != NULL);
+    expected.signature = info.signature;
+
+    expected.seed++;
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "does not match") != NULL);
+    expected.seed = info.seed;
+
+    /* The checksum covers metadata as well as the latent payload. */
+    descriptor = open(path, O_WRONLY);
+    CHECK(descriptor >= 0);
+    CHECK(lseek(descriptor, 36, SEEK_SET) == 36);
+    const unsigned char changed_step = 6;
+    CHECK(write(descriptor, &changed_step, 1) == 1);
+    CHECK(close(descriptor) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "checksum") != NULL);
+
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    descriptor = open(path, O_WRONLY);
+    CHECK(descriptor >= 0);
+    CHECK(lseek(descriptor, -1, SEEK_END) >= 0);
+    const unsigned char corrupt = 0xff;
+    CHECK(write(descriptor, &corrupt, 1) == 1);
+    CHECK(close(descriptor) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "checksum") != NULL);
+
+    /* Exact-size checks reject both incomplete and trailing payload bytes. */
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    CHECK(stat(path, &status) == 0);
+    CHECK(truncate(path, status.st_size - 1) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "size is inconsistent") != NULL);
+
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    descriptor = open(path, O_WRONLY | O_APPEND);
+    CHECK(descriptor >= 0);
+    CHECK(write(descriptor, &corrupt, 1) == 1);
+    CHECK(close(descriptor) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "size is inconsistent") != NULL);
+
+    /* Reject format and metadata boundaries before allocating payloads. */
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    descriptor = open(path, O_WRONLY);
+    CHECK(descriptor >= 0);
+    const unsigned char bad_magic = 'X';
+    CHECK(write(descriptor, &bad_magic, 1) == 1);
+    CHECK(close(descriptor) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "unsupported") != NULL);
+
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    descriptor = open(path, O_WRONLY);
+    CHECK(descriptor >= 0);
+    CHECK(lseek(descriptor, 36, SEEK_SET) == 36);
+    const unsigned char zero_step[4] = {0, 0, 0, 0};
+    CHECK(write(descriptor, zero_step, sizeof(zero_step)) ==
+          (ssize_t)sizeof(zero_step));
+    CHECK(close(descriptor) == 0);
+    CHECK(!h3_checkpoint_load(path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "metadata is invalid") != NULL);
+
+    /* O_NOFOLLOW keeps a valid artifact from being loaded through a symlink. */
+    CHECK(h3_checkpoint_save(path, &info, replacement, audio,
+                             error, sizeof(error)));
+    char link_path[] = "/tmp/h3_checkpoint_link_XXXXXX";
+    descriptor = mkstemp(link_path);
+    CHECK(descriptor >= 0);
+    CHECK(close(descriptor) == 0);
+    CHECK(unlink(link_path) == 0);
+    CHECK(symlink(path, link_path) == 0);
+    CHECK(!h3_checkpoint_load(link_path, &expected, &actual,
+                              &loaded_video, &loaded_audio,
+                              error, sizeof(error)));
+    CHECK(strstr(error, "cannot open") != NULL);
+    CHECK(unlink(link_path) == 0);
+    CHECK(unlink(path) == 0);
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -407,6 +585,7 @@ int main(void) {
     test_rng_and_solver();
     test_rgb_resize();
     test_dit_row_conversions();
+    test_checkpoint_roundtrip();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

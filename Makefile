@@ -8,7 +8,8 @@ FRAMEWORKS := -framework Foundation -framework Metal \
 	-framework Accelerate
 LDLIBS := $(FRAMEWORKS) -licucore -lm
 
-LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
+LIB_C := h3.c h3_checkpoint.c h3_host.c h3_safetensors.c h3_weights.c \
+	h3_text_encoder.c \
 	h3_dit_schedule.c h3_dit.c
 
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \

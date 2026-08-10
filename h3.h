@@ -120,6 +120,17 @@ typedef struct {
     int use_slower_grouped_quantizer;
     /* Decode and deliver one representative frame after every Euler step. */
     int preview_denoise;
+    /* Pause after the first completed denoising transition whose elapsed wall
+     * time reaches this threshold, save both modality latents, and decode a
+     * display-only sigma-zero projection as the draft. Zero disables it. */
+    double checkpoint_after_seconds;
+    /* Pause immediately after this exact number of completed denoising
+     * transitions. Must be smaller than steps. Zero disables it. */
+    int checkpoint_after_step;
+    const char *checkpoint_path;
+    /* Restore a compatible checkpoint and continue at its next transition.
+     * The original prompt and generation options remain required. */
+    const char *resume_path;
     h3_frame_callback on_frame;
     h3_progress_callback on_progress;
     void *callback_opaque;
@@ -128,7 +139,11 @@ typedef struct {
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    1, H3_DEFAULT_DIT_LAYERS, 1, \
+    0, 0, 0, 0, 0, \
+    0, 0, 0, 0, 0, \
+    0, 0, 0, 0, 0, 0, \
+    0.0, 0, NULL, NULL, NULL, NULL, NULL \
 }
 
 typedef struct {
@@ -164,6 +179,12 @@ struct h3_result {
     int fps;
     int sample_rate;
     uint64_t seed;
+    int denoise_steps_completed;
+    int denoise_steps_total;
+    int checkpointed;
+    int resumed_from_step;
+    double denoise_seconds;
+    double cumulative_denoise_seconds;
 };
 
 /* Load model metadata and initialize the Metal device. Weights remain unmapped. */

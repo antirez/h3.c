@@ -55,6 +55,10 @@ static void usage(const char *program) {
         "      --ref-audio PATH    Append an ordered standalone audio clip\n"
         "      --frames-dir PATH  Write generated frames as PPM files\n"
         "      --show             Display a frame after every denoising step (M5)\n"
+        "      --checkpoint-after-seconds N  Pause after denoise wall-time threshold\n"
+        "      --checkpoint-after-step N  Pause after exactly N denoise steps\n"
+        "      --checkpoint PATH  Save latents and decode sigma-zero draft\n"
+        "      --resume PATH      Continue a compatible progressive checkpoint\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase Metal timing and allocation data\n"
         "      --info             Inspect model/device without mapping weights\n"
@@ -89,6 +93,17 @@ static int frames_from_seconds(const char *value) {
         exit(2);
     }
     return (int)rounded;
+}
+
+static double parse_positive_seconds(const char *value, const char *label) {
+    char *end = NULL;
+    errno = 0;
+    double seconds = strtod(value, &end);
+    if (errno || !end || *end || !isfinite(seconds) || seconds <= 0.0) {
+        fprintf(stderr, "h3: invalid %s: %s\n", label, value);
+        exit(2);
+    }
+    return seconds;
 }
 
 static uint64_t parse_u64(const char *value, const char *label) {
@@ -249,6 +264,8 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
+           OPT_CHECKPOINT_AFTER_SECONDS, OPT_CHECKPOINT_AFTER_STEP,
+           OPT_CHECKPOINT, OPT_RESUME,
            OPT_PROFILE, OPT_INFO };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
@@ -298,6 +315,12 @@ int main(int argc, char **argv) {
         {"ref-audio", required_argument, NULL, OPT_REF_AUDIO},
         {"frames-dir", required_argument, NULL, OPT_FRAMES_DIR},
         {"show", no_argument, NULL, OPT_SHOW},
+        {"checkpoint-after-seconds", required_argument, NULL,
+         OPT_CHECKPOINT_AFTER_SECONDS},
+        {"checkpoint-after-step", required_argument, NULL,
+         OPT_CHECKPOINT_AFTER_STEP},
+        {"checkpoint", required_argument, NULL, OPT_CHECKPOINT},
+        {"resume", required_argument, NULL, OPT_RESUME},
         {"zoom", required_argument, NULL, OPT_ZOOM},
         {"profile", no_argument, NULL, OPT_PROFILE},
         {"info", no_argument, NULL, OPT_INFO},
@@ -449,6 +472,16 @@ int main(int argc, char **argv) {
             }
             case OPT_FRAMES_DIR: cli.frames_dir = optarg; break;
             case OPT_SHOW: show = 1; break;
+            case OPT_CHECKPOINT_AFTER_SECONDS:
+                params.checkpoint_after_seconds = parse_positive_seconds(
+                    optarg, "checkpoint seconds");
+                break;
+            case OPT_CHECKPOINT_AFTER_STEP:
+                params.checkpoint_after_step = parse_int(
+                    optarg, "checkpoint step");
+                break;
+            case OPT_CHECKPOINT: params.checkpoint_path = optarg; break;
+            case OPT_RESUME: params.resume_path = optarg; break;
             case OPT_ZOOM:
                 if (!h3_terminal_set_zoom(parse_int(optarg, "zoom"))) {
                     fprintf(stderr, "h3: --zoom must be at least 1\n");
@@ -466,6 +499,12 @@ int main(int argc, char **argv) {
     }
     if (frames_given && seconds_given) {
         fprintf(stderr, "h3: --seconds and --frames are mutually exclusive\n");
+        return 2;
+    }
+    if (!prompt && (params.checkpoint_after_seconds > 0.0 ||
+                    params.checkpoint_after_step > 0 ||
+                    params.checkpoint_path || params.resume_path)) {
+        fprintf(stderr, "h3: checkpoint options require --prompt\n");
         return 2;
     }
     if (prompt && params.steps >= 2 && params.steps <= 7 &&
@@ -512,6 +551,24 @@ int main(int argc, char **argv) {
             fprintf(stderr, "h3: %s\n", h3_last_error(ctx));
             h3_free(ctx);
             return 1;
+        }
+        if (result->checkpointed) {
+            fprintf(stderr,
+                "h3: sigma-zero draft checkpointed at step %d/%d; %.2f "
+                "denoise seconds this session (%.2f cumulative) -> %s\n",
+                result->denoise_steps_completed, result->denoise_steps_total,
+                result->denoise_seconds,
+                result->cumulative_denoise_seconds, params.checkpoint_path);
+        } else if (result->resumed_from_step > 0) {
+            fprintf(stderr,
+                "h3: resumed at step %d/%d and completed step %d/%d\n",
+                result->resumed_from_step, result->denoise_steps_total,
+                result->denoise_steps_completed, result->denoise_steps_total);
+        } else if (params.checkpoint_after_seconds > 0.0 ||
+                   params.checkpoint_after_step > 0) {
+            fprintf(stderr,
+                "h3: denoising completed before the checkpoint threshold; "
+                "no checkpoint was written\n");
         }
         h3_result_free(result);
         if (output && *output) fprintf(stderr, "h3: wrote %s\n", output);

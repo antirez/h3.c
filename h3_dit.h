@@ -17,6 +17,21 @@ typedef int (*h3_dit_preview)(int completed_steps, int total_steps,
                               const float *video_latent,
                               size_t video_elements, void *opaque);
 
+typedef struct {
+    /* Input: first schedule transition to execute. Zero starts a new run. */
+    int start_step;
+    /* Input: pause at the first completed transition at or after this many
+     * wall-clock seconds. Zero disables pausing. */
+    double stop_after_seconds;
+    /* Input: pause after this exact number of completed transitions. Zero
+     * disables pausing. */
+    int stop_after_step;
+    /* Outputs filled even when the schedule reaches its normal end. */
+    int completed_steps;
+    int stopped;
+    double elapsed_seconds;
+} h3_dit_progressive;
+
 /* Load a text-only FL2VA transformer. Text refinement and AdaLN precomputation
  * happen before the persistent 37 GiB core is mapped, keeping phase residency
  * bounded on 128 GiB machines. */
@@ -87,6 +102,16 @@ int h3_dit_reset_run(h3_dit *dit,
 size_t h3_dit_video_elements(const h3_dit *dit);
 size_t h3_dit_audio_elements(const h3_dit *dit);
 
+/* Build a display-only sigma-zero estimate from a stopped Euler state and the
+ * last computed data-ward velocity. The checkpoint latents are read-only and
+ * remain suitable for exact schedule continuation. */
+int h3_dit_project_draft_to_zero(
+                   h3_dit *dit, int completed_steps,
+                   const float *video_latent, size_t video_elements,
+                   const float *audio_latent, size_t audio_elements,
+                   float *video_draft, float *audio_draft,
+                   char *error, size_t error_size);
+
 /* One raw data-ward velocity evaluation. Input/output video layout is
  * [24,T,H,W], audio is [32,2,T], all F32 on the host boundary. */
 int h3_dit_forward(h3_dit *dit, int step,
@@ -113,6 +138,18 @@ int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_preview preview, void *preview_opaque,
+                         char *error, size_t error_size);
+
+/* Resumable full-evaluation Euler path. A nonzero start_step,
+ * stop_after_seconds, or stop_after_step requires both denoiser and prepared
+ * core reuse intervals to be 1; accelerated history is not part of the v1
+ * checkpoint contract. */
+int h3_dit_denoise_euler_progressive(
+                         h3_dit *dit, float *video_latent,
+                         float *audio_latent, int reuse_interval,
+                         h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_progressive *control,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size);
 

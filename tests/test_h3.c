@@ -325,6 +325,17 @@ static void test_rng_and_solver(void) {
     float euler[] = {1.0f, 3.0f};
     CHECK(h3_euler_velocity_step(euler, velocity, 2, 0.75f, 0.25f));
     CHECK(euler[0] == 2.0f && euler[1] == 1.0f);
+    /* Projecting a copy of a stopped Euler state must equal extending the
+     * same velocity directly to zero, while the checkpoint stays unchanged. */
+    float projected[] = {euler[0], euler[1]};
+    float direct_to_zero[] = {1.0f, 3.0f};
+    CHECK(h3_euler_velocity_step(
+        projected, velocity, 2, 0.25f, 0.0f));
+    CHECK(h3_euler_velocity_step(
+        direct_to_zero, velocity, 2, 0.75f, 0.0f));
+    CHECK(projected[0] == direct_to_zero[0]);
+    CHECK(projected[1] == direct_to_zero[1]);
+    CHECK(euler[0] == 2.0f && euler[1] == 1.0f);
     CHECK(!h3_euler_velocity_step(euler, velocity, 2, 0.25f, 0.25f));
 }
 

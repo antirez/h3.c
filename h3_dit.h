@@ -102,6 +102,16 @@ int h3_dit_reset_run(h3_dit *dit,
 size_t h3_dit_video_elements(const h3_dit *dit);
 size_t h3_dit_audio_elements(const h3_dit *dit);
 
+/* Build a display-only sigma-zero estimate from a stopped Euler state and the
+ * last computed data-ward velocity. The checkpoint latents are read-only and
+ * remain suitable for exact schedule continuation. */
+int h3_dit_project_draft_to_zero(
+                   h3_dit *dit, int completed_steps,
+                   const float *video_latent, size_t video_elements,
+                   const float *audio_latent, size_t audio_elements,
+                   float *video_draft, float *audio_draft,
+                   char *error, size_t error_size);
+
 /* One raw data-ward velocity evaluation. Input/output video layout is
  * [24,T,H,W], audio is [32,2,T], all F32 on the host boundary. */
 int h3_dit_forward(h3_dit *dit, int step,

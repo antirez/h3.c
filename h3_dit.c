@@ -82,6 +82,7 @@ struct h3_dit {
     unsigned core_reuse_interval;
     unsigned core_forward_count;
     int core_residual_ready;
+    int last_velocity_step;
     unsigned active_block_count;
     uint8_t block_active[H3_DIT_BLOCKS];
     h3_layout layout;
@@ -1381,6 +1382,7 @@ static h3_dit *load_dit(const char *weight_directory,
         fail(error, error_size, "out of memory creating DiT model");
         return NULL;
     }
+    dit->last_velocity_step = -1;
     dit->fused_mlp = getenv("H3_DISABLE_FUSED_MLP") == NULL;
     /* The released final heads are F32, but their inputs are already BF16.
      * Converting these small weights once selects the Iris-derived tiled
@@ -2137,7 +2139,51 @@ int h3_dit_reset_run(h3_dit *dit,
     }
     dit->core_forward_count = 0;
     dit->core_residual_ready = 0;
+    dit->last_velocity_step = -1;
     return 1;
+}
+
+static int read_output_velocity(h3_dit *dit,
+                                float *video_velocity,
+                                float *audio_velocity,
+                                char *error, size_t error_size) {
+    size_t video_row_elements = (size_t)dit->video_rows * VIDEO_PATCH;
+    size_t audio_row_elements = (size_t)dit->audio_rows * AUDIO_CHANNELS;
+    uint16_t *video_out = malloc(video_row_elements * sizeof(*video_out));
+    uint16_t *audio_out = malloc(audio_row_elements * sizeof(*audio_out));
+    float *video_f32 = malloc(video_row_elements * sizeof(*video_f32));
+    float *audio_f32 = malloc(audio_row_elements * sizeof(*audio_f32));
+    if (!video_out || !audio_out || !video_f32 || !audio_f32) {
+        fail(error, error_size, "out of memory reading DiT velocity");
+        free(video_out); free(audio_out);
+        free(video_f32); free(audio_f32);
+        return 0;
+    }
+    int ok = h3_gpu_tensor_read_bf16(
+                 dit->video_output_bf16, video_out, video_row_elements) &&
+             h3_gpu_tensor_read_bf16(
+                 dit->audio_output_bf16, audio_out, audio_row_elements);
+    if (!ok) fail(error, error_size, "cannot read DiT output velocity");
+    if (ok) {
+        for (size_t index = 0; index < video_row_elements; index++) {
+            uint32_t bits = (uint32_t)video_out[index] << 16;
+            memcpy(&video_f32[index], &bits, sizeof(bits));
+        }
+        for (size_t index = 0; index < audio_row_elements; index++) {
+            uint32_t bits = (uint32_t)audio_out[index] << 16;
+            memcpy(&audio_f32[index], &bits, sizeof(bits));
+        }
+        ok = h3_dit_unpatchify_video(
+                 video_f32, VIDEO_CHANNELS, dit->latent_t, dit->latent_h,
+                 dit->latent_w, video_velocity, h3_dit_video_elements(dit)) &&
+             h3_dit_unpack_audio(
+                 audio_f32, AUDIO_CHANNELS, dit->audio_t, audio_velocity,
+                 h3_dit_audio_elements(dit));
+        if (!ok) fail(error, error_size, "cannot unpack DiT output velocity");
+    }
+    free(video_out); free(audio_out);
+    free(video_f32); free(audio_f32);
+    return ok;
 }
 
 int h3_dit_forward(h3_dit *dit, int step,
@@ -2154,17 +2200,12 @@ int h3_dit_forward(h3_dit *dit, int step,
     size_t audio_row_elements = (size_t)dit->audio_rows * AUDIO_CHANNELS;
     float *video_rows = malloc(video_row_elements * sizeof(*video_rows));
     float *audio_rows = malloc(audio_row_elements * sizeof(*audio_rows));
-    uint16_t *video_out = malloc(video_row_elements * sizeof(*video_out));
-    uint16_t *audio_out = malloc(audio_row_elements * sizeof(*audio_out));
-    float *video_f32 = malloc(video_row_elements * sizeof(*video_f32));
-    float *audio_f32 = malloc(audio_row_elements * sizeof(*audio_f32));
-    if (!video_rows || !audio_rows || !video_out || !audio_out ||
-        !video_f32 || !audio_f32) {
+    if (!video_rows || !audio_rows) {
         fail(error, error_size, "out of memory packing DiT latents");
-        free(video_rows); free(audio_rows); free(video_out); free(audio_out);
-        free(video_f32); free(audio_f32);
+        free(video_rows); free(audio_rows);
         return 0;
     }
+    dit->last_velocity_step = -1;
     int ok = h3_dit_patchify_video(video_latent, VIDEO_CHANNELS,
         dit->latent_t, dit->latent_h, dit->latent_w, video_rows,
         video_row_elements) &&
@@ -2180,29 +2221,66 @@ int h3_dit_forward(h3_dit *dit, int step,
             audio_rows, audio_row_elements);
     if (!ok) fail(error, error_size, "cannot pack/write DiT input latents");
     if (ok) ok = encode_forward(dit, step, 1, 1, 0, error, error_size);
-    if (ok) ok = h3_gpu_tensor_read_bf16(dit->video_output_bf16, video_out,
-                                         video_row_elements) &&
-                 h3_gpu_tensor_read_bf16(dit->audio_output_bf16, audio_out,
-                                         audio_row_elements);
-    if (!ok && (!error || !*error)) fail(error, error_size, "cannot read DiT output");
-    if (ok) {
-        for (size_t index = 0; index < video_row_elements; index++) {
-            uint32_t bits = (uint32_t)video_out[index] << 16;
-            memcpy(&video_f32[index], &bits, sizeof(bits));
-        }
-        for (size_t index = 0; index < audio_row_elements; index++) {
-            uint32_t bits = (uint32_t)audio_out[index] << 16;
-            memcpy(&audio_f32[index], &bits, sizeof(bits));
-        }
+    if (ok) ok = read_output_velocity(
+        dit, video_velocity, audio_velocity, error, error_size);
+    if (ok) dit->last_velocity_step = step;
+    free(video_rows); free(audio_rows);
+    return ok;
+}
+
+int h3_dit_project_draft_to_zero(
+                   h3_dit *dit, int completed_steps,
+                   const float *video_latent, size_t video_elements,
+                   const float *audio_latent, size_t audio_elements,
+                   float *video_draft, float *audio_draft,
+                   char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!dit) {
+        fail(error, error_size, "invalid DiT draft projection arguments");
+        return 0;
     }
-    if (ok) ok = h3_dit_unpatchify_video(video_f32, VIDEO_CHANNELS,
-        dit->latent_t, dit->latent_h, dit->latent_w, video_velocity,
-        h3_dit_video_elements(dit)) &&
-        h3_dit_unpack_audio(audio_f32, AUDIO_CHANNELS, dit->audio_t,
-                            audio_velocity, h3_dit_audio_elements(dit));
-    if (!ok && (!error || !*error)) fail(error, error_size, "cannot unpack DiT output");
-    free(video_rows); free(audio_rows); free(video_out); free(audio_out);
-    free(video_f32); free(audio_f32);
+    size_t expected_video = h3_dit_video_elements(dit);
+    size_t expected_audio = h3_dit_audio_elements(dit);
+    if (completed_steps <= 0 ||
+        completed_steps >= dit->sigmas.steps ||
+        dit->last_velocity_step != completed_steps - 1 ||
+        !video_latent || video_elements != expected_video ||
+        !audio_latent || audio_elements != expected_audio ||
+        !video_draft || !audio_draft) {
+        fail(error, error_size, "invalid DiT draft projection arguments");
+        return 0;
+    }
+    float *video_velocity = malloc(video_elements * sizeof(*video_velocity));
+    float *audio_velocity = malloc(audio_elements * sizeof(*audio_velocity));
+    if (!video_velocity || !audio_velocity) {
+        fail(error, error_size, "out of memory projecting DiT draft");
+        free(video_velocity);
+        free(audio_velocity);
+        return 0;
+    }
+    int ok = read_output_velocity(
+        dit, video_velocity, audio_velocity, error, error_size);
+    if (ok) {
+        /* The stopped state is x_next = x + (sigma - sigma_next) * v.
+         * Extending that same data-ward velocity by sigma_next reaches the
+         * display-only zero-sigma estimate without mutating x_next. */
+        if (video_draft != video_latent)
+            memcpy(video_draft, video_latent,
+                   video_elements * sizeof(*video_draft));
+        if (audio_draft != audio_latent)
+            memcpy(audio_draft, audio_latent,
+                   audio_elements * sizeof(*audio_draft));
+        ok = h3_euler_velocity_step(
+                 video_draft, video_velocity, video_elements,
+                 dit->sigmas.video[completed_steps], 0.0f) &&
+             h3_euler_velocity_step(
+                 audio_draft, audio_velocity, audio_elements,
+                 dit->sigmas.audio[completed_steps], 0.0f);
+        if (!ok) fail(error, error_size,
+                      "cannot project DiT draft to sigma zero");
+    }
+    free(video_velocity);
+    free(audio_velocity);
     return ok;
 }
 
@@ -2394,6 +2472,7 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     unsigned pending_evaluations = 0;
     int command_active = 0;
     int completed_steps = start_step;
+    dit->last_velocity_step = -1;
     for (int step = start_step; step < dit->sigmas.steps && ok; step++) {
         report(progress, progress_opaque, "denoise enqueue", step,
                dit->sigmas.steps);
@@ -2421,6 +2500,7 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                                         error, error_size);
             if (ok) {
                 last_evaluated = step;
+                dit->last_velocity_step = step;
                 pending_evaluations++;
             }
         }

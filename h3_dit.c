@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
     TEXT_DIM = 5120,
@@ -2284,6 +2285,20 @@ static int gpu_sampler_requested(const h3_dit *dit) {
     return h3_gpu_is_m5(dit->gpu);
 }
 
+static double monotonic_seconds(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0.0;
+    return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+static int progressive_should_stop(const h3_dit_progressive *control,
+                                   int completed_steps, double elapsed) {
+    return (control->stop_after_seconds > 0.0 &&
+            elapsed >= control->stop_after_seconds) ||
+           (control->stop_after_step > 0 &&
+            completed_steps >= control->stop_after_step);
+}
+
 static unsigned gpu_sampler_window(void) {
     const char *value = getenv("H3_GPU_SAMPLER_WINDOW");
     if (!value || !*value) return 1;
@@ -2313,6 +2328,7 @@ static int ensure_previous_velocities(h3_dit *dit, char *error,
 static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                              float *audio_latent, int reuse_interval,
                              h3_dit_progress progress, void *progress_opaque,
+                             h3_dit_progressive *control,
                              h3_dit_preview preview, void *preview_opaque,
                              char *error, size_t error_size) {
     uint8_t selected[H3_MAX_STEPS] = {0};
@@ -2330,6 +2346,13 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     if (reuse_interval > 1 && getenv("H3_PROFILE"))
         fprintf(stderr, "h3: %s GPU reuse schedule has %d evaluations\n",
                 custom_count > 0 ? "custom" : "selected", selected_count);
+    int start_step = control->start_step;
+    int checkpoint_enabled = control->stop_after_seconds > 0.0 ||
+                             control->stop_after_step > 0;
+    double began = monotonic_seconds();
+    control->completed_steps = start_step;
+    control->stopped = 0;
+    control->elapsed_seconds = 0.0;
     unsigned window = gpu_sampler_window();
     int disable_command_split = window == 1 &&
                                 getenv("H3_DIT_COMMAND_BLOCKS") == NULL;
@@ -2370,7 +2393,8 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     int previous_evaluated = -1;
     unsigned pending_evaluations = 0;
     int command_active = 0;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    int completed_steps = start_step;
+    for (int step = start_step; step < dit->sigmas.steps && ok; step++) {
         report(progress, progress_opaque, "denoise enqueue", step,
                dit->sigmas.steps);
         if (!command_active) {
@@ -2426,8 +2450,9 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 dit->audio_output_bf16, previous_audio, (uint32_t)audio_count,
                 dit->sigmas.audio[step] - dit->sigmas.audio[step + 1],
                 audio_ratio), error, error_size, "GPU audio Euler step");
-        if (ok && (evaluate || preview)) {
-            int finish = preview || step + 1 == dit->sigmas.steps ||
+        if (ok && (evaluate || preview || checkpoint_enabled)) {
+            int finish = preview || checkpoint_enabled ||
+                         step + 1 == dit->sigmas.steps ||
                          (window && pending_evaluations >= window);
             ok = gpu_op(dit, finish ? h3_gpu_submit(dit->gpu)
                                     : h3_gpu_continue(dit->gpu),
@@ -2456,8 +2481,18 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 ok = 0;
             }
         }
-        if (ok) report(progress, progress_opaque, "denoise enqueue", step + 1,
-                       dit->sigmas.steps);
+        if (ok) {
+            completed_steps = step + 1;
+            report(progress, progress_opaque, "denoise enqueue",
+                   completed_steps, dit->sigmas.steps);
+            double elapsed = monotonic_seconds() - began;
+            if (checkpoint_enabled &&
+                progressive_should_stop(control, completed_steps, elapsed) &&
+                completed_steps < dit->sigmas.steps) {
+                control->stopped = 1;
+                break;
+            }
+        }
     }
     if (ok && command_active)
         ok = gpu_op(dit, h3_gpu_submit(dit->gpu), error, error_size,
@@ -2478,7 +2513,9 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
         fail(error, error_size, "cannot unpack GPU Euler latents");
     free(video_rows);
     free(audio_rows);
-    if (ok) report(progress, progress_opaque, "denoise", dit->sigmas.steps,
+    control->completed_steps = completed_steps;
+    control->elapsed_seconds = monotonic_seconds() - began;
+    if (ok) report(progress, progress_opaque, "denoise", completed_steps,
                    dit->sigmas.steps);
     h3_gpu_profile_mark(dit->gpu, "GPU Euler denoise");
     return ok;
@@ -2558,22 +2595,39 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
-int h3_dit_denoise_euler_preview(
+int h3_dit_denoise_euler_progressive(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_progressive *control,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!dit || !video_latent || !audio_latent || reuse_interval < 1 ||
+    if (!dit || !video_latent || !audio_latent || !control ||
+        reuse_interval < 1 ||
         reuse_interval > 32 ||
-        dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule)) {
+        dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule) ||
+        control->start_step < 0 ||
+        control->start_step >= dit->sigmas.steps ||
+        !isfinite(control->stop_after_seconds) ||
+        control->stop_after_seconds < 0.0 ||
+        control->stop_after_step < 0 ||
+        control->stop_after_step >= dit->sigmas.steps ||
+        (control->stop_after_step > 0 &&
+         control->stop_after_step <= control->start_step) ||
+        (control->stop_after_seconds > 0.0 &&
+         control->stop_after_step > 0) ||
+        ((control->start_step > 0 ||
+          control->stop_after_seconds > 0.0 ||
+          control->stop_after_step > 0) &&
+         (reuse_interval != 1 || dit->core_reuse_interval != 1))) {
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
     if (gpu_sampler_requested(dit))
         return denoise_euler_gpu(dit, video_latent, audio_latent,
                                  reuse_interval, progress, progress_opaque,
+                                 control,
                                  preview, preview_opaque,
                                  error, error_size);
     uint8_t selected[H3_MAX_STEPS] = {0};
@@ -2591,6 +2645,13 @@ int h3_dit_denoise_euler_preview(
     if (reuse_interval > 1 && getenv("H3_PROFILE"))
         fprintf(stderr, "h3: %s reuse schedule has %d evaluations\n",
                 custom_count > 0 ? "custom" : "selected", selected_count);
+    int start_step = control->start_step;
+    int checkpoint_enabled = control->stop_after_seconds > 0.0 ||
+                             control->stop_after_step > 0;
+    double began = monotonic_seconds();
+    control->completed_steps = start_step;
+    control->stopped = 0;
+    control->elapsed_seconds = 0.0;
     size_t video_count = h3_dit_video_elements(dit);
     size_t audio_count = h3_dit_audio_elements(dit);
     float *video_velocity = malloc(video_count * sizeof(*video_velocity));
@@ -2618,7 +2679,8 @@ int h3_dit_denoise_euler_preview(
     int ok = 1;
     int last_evaluated = -1;
     int previous_evaluated = -1;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    int completed_steps = start_step;
+    for (int step = start_step; step < dit->sigmas.steps && ok; step++) {
         report(progress, progress_opaque, "denoise", step, dit->sigmas.steps);
         int evaluate = selected[step];
         if (evaluate) {
@@ -2670,8 +2732,18 @@ int h3_dit_denoise_euler_preview(
                  step + 1);
             ok = 0;
         }
-        if (ok) report(progress, progress_opaque, "denoise", step + 1,
-                       dit->sigmas.steps);
+        if (ok) {
+            completed_steps = step + 1;
+            report(progress, progress_opaque, "denoise", completed_steps,
+                   dit->sigmas.steps);
+            double elapsed = monotonic_seconds() - began;
+            if (checkpoint_enabled &&
+                progressive_should_stop(control, completed_steps, elapsed) &&
+                completed_steps < dit->sigmas.steps) {
+                control->stopped = 1;
+                break;
+            }
+        }
     }
     free(video_velocity);
     free(audio_velocity);
@@ -2679,8 +2751,23 @@ int h3_dit_denoise_euler_preview(
     free(previous_video);
     free(last_audio);
     free(previous_audio);
+    control->completed_steps = completed_steps;
+    control->elapsed_seconds = monotonic_seconds() - began;
     h3_gpu_profile_mark(dit->gpu, "Euler denoise");
     return ok;
+}
+
+int h3_dit_denoise_euler_preview(
+                         h3_dit *dit, float *video_latent,
+                         float *audio_latent, int reuse_interval,
+                         h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_preview preview, void *preview_opaque,
+                         char *error, size_t error_size) {
+    h3_dit_progressive control = {0};
+    return h3_dit_denoise_euler_progressive(
+        dit, video_latent, audio_latent, reuse_interval,
+        progress, progress_opaque, &control, preview, preview_opaque,
+        error, error_size);
 }
 
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,

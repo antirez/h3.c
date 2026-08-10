@@ -128,6 +128,84 @@ against a 29-pass reference; an independent surfer test measured 0.547. The
 four-pass denoise took about 3.5 seconds on M5 Max, versus 26.4 seconds for the
 reference.
 
+#### Pause a long render and inspect a draft
+
+Progressive checkpoints let a final denoising schedule stop at a safe Euler
+transition. H3 saves the untouched video and audio sampler state, then projects
+a separate copy to sigma zero and decodes it as a normal draft MP4. The
+projection reuses the velocity from the completed transition; it does not run
+an extra DiT pass.
+
+Choose the final step budget at the start. This example plans a 20-step render
+but pauses after step 10:
+
+```sh
+PROMPT='A red fox walks through fresh snow in a pine forest. Medium tracking shot, natural winter light, realistic fur, soft footsteps and wind.'
+
+./h3 --profile \
+  -d ./MiniMax-H3 -p "$PROMPT" \
+  --width 512 --height 512 --frames 22 \
+  --steps 20 --layers 50 --reuse 1 --core-reuse 1 \
+  --checkpoint-after-step 10 \
+  --checkpoint outputs/fox-progress.h3ckpt \
+  -o outputs/fox-draft.mp4
+```
+
+If the direction looks right, continue the same schedule instead of starting
+again:
+
+```sh
+./h3 --profile \
+  -d ./MiniMax-H3 -p "$PROMPT" \
+  --width 512 --height 512 --frames 22 \
+  --steps 20 --layers 50 --reuse 1 --core-reuse 1 \
+  --resume outputs/fox-progress.h3ckpt \
+  -o outputs/fox-final.mp4
+```
+
+To inspect another intermediate result, resume with a later absolute step and
+write a new checkpoint:
+
+```sh
+./h3 --profile \
+  -d ./MiniMax-H3 -p "$PROMPT" \
+  --width 512 --height 512 --frames 22 \
+  --steps 20 --layers 50 --reuse 1 --core-reuse 1 \
+  --resume outputs/fox-progress.h3ckpt \
+  --checkpoint-after-step 15 \
+  --checkpoint outputs/fox-progress-15.h3ckpt \
+  -o outputs/fox-draft-15.mp4
+```
+
+`--checkpoint-after-step N` stops after exactly N completed transitions.
+`--checkpoint-after-seconds N` instead stops at the first completed transition
+whose denoising wall time reaches the threshold. A running Metal command cannot
+be suspended midway through a transition. The threshold excludes model loading,
+conditioning, draft VAE decoding, and FFmpeg work. On resume, a step threshold
+remains absolute within the original schedule, while a seconds threshold starts
+again for the current invocation. H3 reports both session and cumulative
+denoising time when it writes another checkpoint.
+
+The two threshold options are mutually exclusive. If denoising reaches its
+normal end first, H3 writes the final output and no checkpoint. Draft decoding
+still pays the audio/video VAE and FFmpeg cost; the saved work is the remaining
+DiT forwards. Early sigma-zero projections are estimates, so detail and anatomy
+become more reliable at later stops.
+
+Resume requires the same prompt, model directory, seed, denoising schedule,
+internal render shape, references, and semantic quality controls. Progressive
+v1 also requires `--reuse 1 --core-reuse 1`; accelerated reuse modes carry
+history that is not stored in the checkpoint. Checkpoints are private mode-0600
+files containing raw F32 latents and a corruption checksum. The checksum is not
+authentication, so do not load checkpoints from untrusted sources. Keep the
+same `-d` path spelling and do not modify or retimestamp reference files between
+pause and resume.
+
+A completed low-step run cannot be extended into a different higher-step
+schedule because its last transition has already reached sigma zero. To inspect
+roughly five of twenty passes, start with `--steps 20` and checkpoint that
+schedule after step 5.
+
 ### 3. Move toward reference quality
 
 Change one control at a time when evaluating quality. First restore all layers,

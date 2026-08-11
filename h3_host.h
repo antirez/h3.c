@@ -92,6 +92,7 @@ typedef struct {
     int has_spare;
 } h3_rng;
 
+/* Return the next legal frame count, or zero if it cannot fit in an int. */
 int h3_align_frame_count(int requested);
 int h3_video_latent_t(int frame_count);
 int h3_video_encoder_latent_t(int frame_count);

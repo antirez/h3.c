@@ -636,6 +636,29 @@ int h3_res_step(float *output, const float *sample, const float *denoised,
     return 1;
 }
 
+int h3_res_velocity_step(float *output, const float *sample,
+                         const float *velocity, float *denoised,
+                         const float *old_denoised, size_t count,
+                         const float *sigmas, int step, int total_steps) {
+    if (!output || !sample || !velocity || !denoised || !sigmas || step < 0 ||
+        total_steps < 1 || step >= total_steps) return 0;
+    float sigma = sigmas[step];
+    for (size_t index = 0; index < count; index++)
+        denoised[index] = sample[index] + sigma * velocity[index];
+    return h3_res_step(output, sample, denoised, old_denoised, count,
+                       sigmas, step, total_steps);
+}
+
+int h3_audio_res_velocity_step(float *output, const float *sample,
+                               const float *velocity, float *denoised,
+                               const float *old_denoised, size_t count,
+                               const h3_sigma_schedule *schedule, int step) {
+    if (!schedule) return 0;
+    return h3_res_velocity_step(output, sample, velocity, denoised,
+                                old_denoised, count, schedule->audio,
+                                step, schedule->steps);
+}
+
 int h3_euler_velocity_step(float *sample, const float *velocity, size_t count,
                            float sigma, float sigma_next) {
     if (!sample || !velocity || !isfinite(sigma) || !isfinite(sigma_next) ||

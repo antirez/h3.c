@@ -318,6 +318,30 @@ static void test_rng_and_solver(void) {
     CHECK(close_enough(output[0], 0.25, 1e-7));
     CHECK(h3_res_step(output, sample, denoised, old, 1, sigmas, 1, 3));
     CHECK(isfinite(output[0]));
+
+    /* Constant velocity has the exact endpoint x(0) = x(1) + velocity.
+     * On the native audio sigma grid, x + sigma * velocity stays constant. */
+    const int res_steps[] = {4, 7, 20};
+    for (size_t case_index = 0;
+         case_index < sizeof(res_steps) / sizeof(*res_steps); case_index++) {
+        h3_sigma_schedule schedule;
+        int steps = res_steps[case_index];
+        CHECK(h3_serving_schedule_build(steps, &schedule));
+        float res_sample = 1.0f;
+        float res_velocity = 0.5f;
+        float res_denoised = 0.0f;
+        float old_res_denoised = 0.0f;
+        float res_output = 0.0f;
+        for (int step = 0; step < steps; step++) {
+            CHECK(h3_audio_res_velocity_step(
+                &res_output, &res_sample, &res_velocity, &res_denoised,
+                step ? &old_res_denoised : NULL, 1, &schedule, step));
+            old_res_denoised = res_denoised;
+            res_sample = res_output;
+        }
+        CHECK(close_enough(res_sample, 1.5, 1e-6));
+    }
+
     float velocity[] = {2.0f, -4.0f};
     float euler[] = {1.0f, 3.0f};
     CHECK(h3_euler_velocity_step(euler, velocity, 2, 0.75f, 0.25f));

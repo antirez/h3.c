@@ -623,8 +623,7 @@ static int unpack_frame_range(vae_context *vae, int first_frame,
                         (size_t)within_x);
                     float value = rows[patch * OUTPUT_PATCH + component] *
                                   deviation[channel] + mean[channel];
-                    if (value < 0.0f) value = 0.0f;
-                    if (value > 1.0f) value = 1.0f;
+                    value = fminf(fmaxf(value, 0.0f), 1.0f);
                     size_t destination = (((size_t)output_frame *
                         (size_t)pixel_h +
                         (size_t)y) * (size_t)pixel_w + (size_t)x) * 3 +

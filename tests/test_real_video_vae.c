@@ -26,8 +26,33 @@ static void progress(int completed, int total, void *opaque) {
                 completed, total);
 }
 
+static void test_nonfinite_output(const char *model_root) {
+    enum { LATENT_COUNT = 24 * 2, FRAME_COUNT = 3 * 5 * 16 * 16 };
+    float latent[LATENT_COUNT];
+    for (size_t index = 0; index < LATENT_COUNT; index++) latent[index] = NAN;
+    char weights[1024];
+    snprintf(weights, sizeof(weights), "%s/FL2VA/video_vae/source", model_root);
+    char error[512];
+    h3_video_frames got;
+    if (!h3_video_vae_decode(weights, "h3_shaders.metal", latent, 2, 1, 1,
+                             progress, NULL, &got, error, sizeof(error)))
+        die(error);
+    if (got.frames != 5 || got.height != 16 || got.width != 16)
+        die("non-finite visual decoder test returned the wrong shape");
+    for (size_t index = 0; index < FRAME_COUNT; index++)
+        if (!isfinite(got.rgb[index]) || got.rgb[index] < 0.0f ||
+            got.rgb[index] > 1.0f)
+            die("visual decoder returned RGB outside finite [0,1]");
+    h3_video_frames_free(&got);
+    puts("ok: visual decoder bounds non-finite RGB output");
+}
+
 int main(int argc, char **argv) {
     const char *model_root = argc > 1 ? argv[1] : "MiniMax-H3";
+    if (argc > 2 && !strcmp(argv[2], "--nonfinite-output")) {
+        test_nonfinite_output(model_root);
+        return 0;
+    }
     const char *latent_path = argc > 2 ? argv[2] :
         "misc/fixtures/h3_real_dit_denoise20_bf16.safetensors";
     const char *frame_path = argc > 3 ? argv[3] :

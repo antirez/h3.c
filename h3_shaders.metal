@@ -3977,11 +3977,10 @@ kernel void h3_gqa_causal_bf16(
     threadgroup float shared_query[128];
 
     for (uint d = tid; d < args.head_dim; d += threads) {
-        /* MLX's fused SDPA applies the scale to Q before the tiled QK
-         * contraction. Matching that order matters at sharp late-layer
-         * attention boundaries. */
-        shared_query[d] = h3_bf16_to_f32(h3_f32_to_bf16(
-            h3_bf16_to_f32(query[q_base + d]) * args.scale));
+        /* Keep Q scaling in F32 through the QK contraction. Rounding the
+         * product back to BF16 discards precision without reducing storage. */
+        shared_query[d] =
+            h3_bf16_to_f32(query[q_base + d]) * args.scale;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 

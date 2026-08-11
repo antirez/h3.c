@@ -2518,24 +2518,14 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
         ok = h3_dit_forward(dit, step, video_latent, audio_latent,
                             video_velocity, audio_velocity,
                             error, error_size);
-        float sigma = dit->sigmas.video[step];
-        float timestep = 1.0f - sigma;
-        float sigma_from_timestep = 1.0f - timestep;
-        float audio_slope = (float)h3_time_shift_slope(
-            sigma, H3_VIDEO_SIGMA_SHIFT, H3_AUDIO_SIGMA_SHIFT);
         if (ok) {
-            for (size_t index = 0; index < video_count; index++)
-                video_denoised[index] = video_latent[index] +
-                    sigma_from_timestep * video_velocity[index];
-            for (size_t index = 0; index < audio_count; index++)
-                audio_denoised[index] = audio_latent[index] +
-                    sigma_from_timestep * audio_velocity[index] * audio_slope;
-            ok = h3_res_step(video_next, video_latent, video_denoised,
-                             step ? old_video : NULL, video_count,
-                             dit->sigmas.video, step, dit->sigmas.steps) &&
-                 h3_res_step(audio_next, audio_latent, audio_denoised,
-                             step ? old_audio : NULL, audio_count,
-                             dit->sigmas.video, step, dit->sigmas.steps);
+            ok = h3_res_velocity_step(
+                     video_next, video_latent, video_velocity, video_denoised,
+                     step ? old_video : NULL, video_count, dit->sigmas.video,
+                     step, dit->sigmas.steps) &&
+                 h3_audio_res_velocity_step(
+                     audio_next, audio_latent, audio_velocity, audio_denoised,
+                     step ? old_audio : NULL, audio_count, &dit->sigmas, step);
             if (!ok) fail(error, error_size, "RES solver rejected step %d", step);
         }
         if (ok) {

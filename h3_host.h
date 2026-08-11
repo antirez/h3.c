@@ -136,6 +136,17 @@ int h3_resize_rgb24_high_quality(const uint8_t *input, int frames,
 int h3_res_step(float *output, const float *sample, const float *denoised,
                 const float *old_denoised, size_t count,
                 const float *sigmas, int step, int total_steps);
+/* Convert data-ward velocity with the same sigma grid used by RES. The caller
+ * retains denoised for the following multistep update. */
+int h3_res_velocity_step(float *output, const float *sample,
+                         const float *velocity, float *denoised,
+                         const float *old_denoised, size_t count,
+                         const float *sigmas, int step, int total_steps);
+/* Apply an audio velocity on the audio half of an H3 sigma schedule. */
+int h3_audio_res_velocity_step(float *output, const float *sample,
+                               const float *velocity, float *denoised,
+                               const float *old_denoised, size_t count,
+                               const h3_sigma_schedule *schedule, int step);
 int h3_euler_velocity_step(float *sample, const float *velocity, size_t count,
                            float sigma, float sigma_next);
 

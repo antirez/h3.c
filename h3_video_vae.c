@@ -663,7 +663,7 @@ static int tile_count_for_extent(int extent, int tile_pixels) {
     return count;
 }
 
-static int configured_tile_pixels(int pixel_height, int pixel_width) {
+static int configured_tile_pixels(void) {
     const char *value = getenv("H3_VAE_TILE_PIXELS");
     if (value && *value) {
         char *end = NULL;
@@ -671,22 +671,8 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
         if (end && !*end && pixels >= TILE_PIXELS && pixels <= 512 &&
             pixels % SPATIAL_RATIO == 0) return (int)pixels;
     }
-    int best = TILE_PIXELS;
-    uint64_t best_score = UINT64_MAX;
-    for (int pixels = TILE_PIXELS; pixels <= 320;
-         pixels += SPATIAL_RATIO) {
-        uint64_t tiles = (uint64_t)tile_count_for_extent(pixel_height, pixels) *
-            (uint64_t)tile_count_for_extent(pixel_width, pixels);
-        /* The resident VAE is dominated by linears and activation traffic;
-         * measured tile cost follows area more closely than cubic sequence
-         * growth at these shapes. Attention is still included in each tile. */
-        uint64_t score = tiles * (uint64_t)pixels * (uint64_t)pixels;
-        if (score < best_score) {
-            best = pixels;
-            best_score = score;
-        }
-    }
-    return best;
+    /* Match vae_tile_size from the released checkpoint config. */
+    return TILE_PIXELS;
 }
 
 static int tile_axis_build(int extent, int tile_pixels, tile_axis *axis,
@@ -910,8 +896,7 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
     }
     decoder->latent_h = latent_height;
     decoder->latent_w = latent_width;
-    int tile_pixels = configured_tile_pixels(
-        latent_height * SPATIAL_RATIO, latent_width * SPATIAL_RATIO);
+    int tile_pixels = configured_tile_pixels();
     int ok = load_latent_normalization(
         weight_directory, decoder->latent_mean, decoder->latent_std,
         error, error_size) &&
@@ -1213,8 +1198,7 @@ int h3_video_vae_decode(const char *weight_directory,
     float latent_mean[LATENT_CHANNELS], latent_std[LATENT_CHANNELS];
     if (!load_latent_normalization(weight_directory, latent_mean, latent_std,
                                    error, error_size)) return 0;
-    int tile_pixels = configured_tile_pixels(
-        latent_height * SPATIAL_RATIO, latent_width * SPATIAL_RATIO);
+    int tile_pixels = configured_tile_pixels();
     if (latent_time == 2 &&
         (latent_height > TILE_PIXELS / SPATIAL_RATIO ||
          latent_width > TILE_PIXELS / SPATIAL_RATIO)) {

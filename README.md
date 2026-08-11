@@ -285,6 +285,18 @@ Short clips are useful for development. The released workflow is intended for
 roughly 4–15 second videos. A request such as `--frames 23` is rounded up to 39
 frames rather than producing an arbitrary temporal shape.
 
+<!-- h3-issue-5-compatibility-notes -->
+### Practical compatibility notes
+
+- **M4 Max and `H3_NAX`.** The current TensorOps/NAX path is selected only when the Metal device name identifies an M5. An M4 therefore keeps the ordinary MPSGraph/direct-Metal path. `H3_NAX` controls the optional M5 TensorOps path; setting it does not enable TensorOps on M4. If TensorOps compilation fails on an eligible M5 runtime, h3 automatically retries with the ordinary implementation. Published M3/M5 measurements should not be presented as M4 benchmark results without an actual M4 measurement.
+
+- **Unified memory and `--show`.** Treat memory fit as workload-dependent rather than as a guarantee attached to a particular unified-memory size. `--show` adds roughly 10 GiB of temporary preview-model residency, so leaving it disabled is useful when testing large-resolution or long-duration jobs. `--profile` reports peak live tensor storage and is the preferred way to record memory behavior for a specific configuration.
+
+- **15-second 768p runs.** A 15-second request aligns to the legal 362-frame H3 temporal shape at 24 fps, and `1344x768` is within the released 768p-class canvas limit. Avoid estimating the runtime from the 22-frame 512-square benchmark using only a `frames * pixels` multiplier: attention sequence length, VAE work, memory pressure, filesystem caching, and thermal behavior also change with the requested shape. For reproducible long-run reports, include the Metal device, macOS version, output and internal render sizes, frame count, steps, active layers, reuse mode, token reduction, and whether `--show` was enabled.
+
+- **GUI/frontends.** h3 currently ships the command-line interface, the Iris-style interactive session, and terminal graphical previews. This repository does not currently contain a first-party node-based GUI. Third-party frontends can integrate with h3 independently, but their supported conditioning features and maintenance status are outside the compatibility guarantees of this repository.
+
+
 ### 6. Improve the prompt
 
 A short prompt works, but the released system expects a Context-IR-like

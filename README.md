@@ -155,7 +155,7 @@ execution engines differ; the depicted content and motion should agree.
 
 These controls are independent unless noted otherwise:
 
-| Control | Slow reference | Default | Aggressive | Main impact |
+| Control | Slow reference | Balanced fast | Aggressive | Main impact |
 |---|---:|---:|---:|---|
 | Denoising passes | `--steps 50` | `--steps 20` | `--steps 4..7` | The number always names actual denoising passes. |
 | Whole denoiser reuse | `--reuse 1` | `--reuse 2` | `--reuse 3` | At 20 steps: 20, 11, or 8 fresh DiT evaluations. |
@@ -368,6 +368,11 @@ the media semantics:
   --ref-image fox.png --ref-audio music.wav \
   -o outputs/fox-image-audio.mp4
 ```
+
+Reference images use `--ref-image-size match` by default, which preserves the
+source aspect ratio while scaling down to approximately the output canvas area.
+Use `--ref-image-size max` to retain more source detail, downscaling only when
+the source's short edge exceeds 2048 pixels. Neither mode enlarges the source.
 
 Reference flags may be repeated and their command-line order is preserved.
 Standalone audio must accompany an image or video reference. Audio references

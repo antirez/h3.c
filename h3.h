@@ -58,7 +58,11 @@ typedef struct {
     int denoise_steps;
 } h3_frame;
 
+/* The frame and its RGB data remain valid only for the duration of the call.
+ * Return zero to continue generation or nonzero to cancel it. */
 typedef int (*h3_frame_callback)(const h3_frame *frame, void *opaque);
+/* The phase string remains valid only for the duration of the call. Return
+ * zero to continue generation or nonzero to cancel it. */
 typedef int (*h3_progress_callback)(const char *phase, int completed, int total,
                                     void *opaque);
 

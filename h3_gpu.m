@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <mach-o/dyld.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -353,6 +354,23 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
         const char *source_path = shader_source_path ? shader_source_path :
                                                        "h3_shaders.metal";
         NSString *path = [NSString stringWithUTF8String:source_path];
+        /* A relative shader path that does not exist in the current directory
+         * falls back to the executable's directory, so the binary can be
+         * launched from anywhere (daemons, PATH installs, other projects). */
+        if (![path isAbsolutePath] &&
+            ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            uint32_t exe_size = 0;
+            _NSGetExecutablePath(NULL, &exe_size);
+            char *exe_buf = malloc(exe_size);
+            if (exe_buf && _NSGetExecutablePath(exe_buf, &exe_size) == 0) {
+                NSString *exe = [NSString stringWithUTF8String:exe_buf];
+                NSString *beside = [[exe stringByDeletingLastPathComponent]
+                    stringByAppendingPathComponent:path];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:beside])
+                    path = beside;
+            }
+            free(exe_buf);
+        }
         NSError *libraryError = nil;
         NSString *source = [NSString stringWithContentsOfFile:path
                                                      encoding:NSUTF8StringEncoding

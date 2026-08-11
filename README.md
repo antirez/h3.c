@@ -403,6 +403,45 @@ Standalone audio must accompany an image or video reference. Audio references
 must be 2–15 seconds; at most three audio inputs are accepted and their total
 decoded duration is capped at 15 seconds.
 
+## Distilled sampling: fold the Turbo LoRA into the checkpoint
+
+h3.c does not implement a LoRA runtime; step-distillation adapters can instead
+be folded into the checkpoint before inference. `tools/fold_turbo_lora.py`
+applies
+[larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)
+directly to the bf16 shards. The adapter file,
+`minimax_h3_turbo_v4_step600_ema.safetensors`, is Apache-2.0 and remains subject
+to the MiniMax H3 Community License as a derivative. The tool clones the
+original shards and patches only the affected byte ranges. The headers and
+tensor order remain unchanged, as does their alignment:
+
+```sh
+python3 tools/fold_turbo_lora.py \
+  --checkpoint ./MiniMax-H3/FL2VA/transformer \
+  --lora ./minimax_h3_turbo_v4_step600_ema.safetensors \
+  --out ./MiniMax-H3-turbo/FL2VA/transformer
+```
+
+Point `-d` at a model directory whose `FL2VA/transformer` contains the folded
+tree; everything else can be symlinked to the original snapshot. Sample with
+`--steps 5` or `--steps 6` and no other speed flags. The distilled schedule
+removes the redundancy used by `--reuse` and `--core-reuse`, so neither option
+should be combined with it. On fast action, 4 steps showed motion smear; 5 is
+the validated floor.
+
+Cold single-shot measurements on an M5 Max used 960x544 and an identical prompt
+and seed. The comparison is against the tutorial's
+`--steps 20 --reuse 2 --layers 45` preset:
+
+| | balanced preset | folded turbo, 6 steps |
+|---|---:|---:|
+| 39 frames | 87s | 65s |
+| 124-frame (5 s) clip | 8.8min | 6.2min |
+
+On the clips tested, quality at 5-6 steps was comparable to the balanced preset,
+with sharper fine detail as the adapter's card advertises. An interactive
+session also amortizes transformer loading and text encoding across renders.
+
 ## Tests and runtime requirements
 
 ```sh

@@ -510,7 +510,8 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
             return 0;
         }
     }
-    if (params->frames < 5 || h3_align_frame_count(params->frames) > 362) {
+    int aligned_frames = h3_align_frame_count(params->frames);
+    if (params->frames < 5 || !aligned_frames || aligned_frames > 362) {
         h3_set_error(ctx, "frames must align within the released 5..362 range");
         return 0;
     }

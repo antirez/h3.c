@@ -37,6 +37,7 @@ static void test_temporal_and_canvas(void) {
         CHECK(got.video_t == cases[index].video_t);
         CHECK(got.audio_t == cases[index].audio_t);
     }
+    CHECK(h3_align_frame_count(INT32_MAX) == 0);
     CHECK(h3_video_encoder_latent_t(1) == 1);
     CHECK(h3_video_encoder_latent_t(5) == 2);
     CHECK(h3_video_encoder_latent_t(22) == 6);

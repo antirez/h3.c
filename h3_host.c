@@ -13,11 +13,11 @@ static const int h3_frame_per_token[5] = {1, 4, 4, 4, 4};
 static const double h3_frame_rescale = 5.0 / 3.0;
 
 int h3_align_frame_count(int requested) {
-    int value = requested < 5 ? 5 : requested;
-    int remainder = (value - 5) % 17;
+    int64_t value = requested < 5 ? 5 : requested;
+    int64_t remainder = (value - 5) % 17;
     if (remainder < 0) remainder += 17;
     if (remainder != 0) value += 17 - remainder;
-    return value;
+    return value > INT_MAX ? 0 : (int)value;
 }
 
 int h3_video_latent_t(int frame_count) {

@@ -1,6 +1,10 @@
 #ifndef H3_GPU_H
 #define H3_GPU_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -609,5 +613,9 @@ int h3_gpu_euler_bf16(h3_gpu *gpu, h3_gpu_tensor *sample,
 int h3_gpu_silu_mul_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                          const h3_gpu_tensor *gate,
                          const h3_gpu_tensor *up, uint32_t elements);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

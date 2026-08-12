@@ -1,6 +1,8 @@
 #include "h3_host.h"
 
+#ifndef H3_CUDA
 #include <Accelerate/Accelerate.h>
+#endif
 
 #include <float.h>
 #include <limits.h>
@@ -555,14 +557,15 @@ int h3_resize_rgb24_high_quality(const uint8_t *input, int frames,
         free(pixels);
         return 0;
     }
+    size_t input_frame_bytes = input_area * 3;
+    size_t output_frame_bytes = output_area * 3;
+#ifndef H3_CUDA
     uint8_t *source_argb = malloc(input_area * 4);
     uint8_t *output_argb = malloc(output_area * 4);
     if (!source_argb || !output_argb) {
         free(source_argb); free(output_argb); free(pixels);
         return 0;
     }
-    size_t input_frame_bytes = input_area * 3;
-    size_t output_frame_bytes = output_area * 3;
     vImage_Buffer source_buffer = {
         source_argb, (vImagePixelCount)input_height,
         (vImagePixelCount)input_width, (size_t)input_width * 4
@@ -594,6 +597,39 @@ int h3_resize_rgb24_high_quality(const uint8_t *input, int frames,
         }
     }
     free(source_argb); free(output_argb);
+#else
+    /* Portable bilinear RGB24 resize (CUDA build; Metal keeps vImage). */
+    for (int frame = 0; frame < frames; frame++) {
+        const uint8_t *src = input + (size_t)frame * input_frame_bytes;
+        uint8_t *dst = pixels + (size_t)frame * output_frame_bytes;
+        for (size_t y = 0; y < output_height; y++) {
+            float gy = (output_height == 1) ? 0.0f :
+                       (float)y * (input_height - 1) / (output_height - 1);
+            int y0 = (int)gy;
+            if (y0 > input_height - 2) y0 = input_height - 2;
+            float fy = gy - (float)y0;
+            for (size_t x = 0; x < output_width; x++) {
+                float gx = (output_width == 1) ? 0.0f :
+                           (float)x * (input_width - 1) / (output_width - 1);
+                int x0 = (int)gx;
+                if (x0 > input_width - 2) x0 = input_width - 2;
+                float fx = gx - (float)x0;
+                const uint8_t *p00 = src + ((size_t)y0 * input_width + x0) * 3;
+                const uint8_t *p10 = p00 + 3;
+                const uint8_t *p01 = src + ((size_t)(y0 + 1) * input_width + x0) * 3;
+                const uint8_t *p11 = p01 + 3;
+                uint8_t *o = dst + (y * output_width + x) * 3;
+                for (int c = 0; c < 3; c++) {
+                    float v = (1.0f - fy) * (1.0f - fx) * p00[c] +
+                              (1.0f - fy) * fx * p10[c] +
+                              fy * (1.0f - fx) * p01[c] +
+                              fy * fx * p11[c];
+                    o[c] = (uint8_t)(v + 0.5f);
+                }
+            }
+        }
+    }
+#endif
     *output = pixels;
     return 1;
 }

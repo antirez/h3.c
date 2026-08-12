@@ -12,6 +12,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef SSIZE_MAX
+#define SSIZE_MAX ((ssize_t)(~((size_t)0) >> 1))
+#endif
+
 extern char **environ;
 
 static const char *ffmpeg_program(void) {

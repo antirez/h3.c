@@ -11,6 +11,13 @@ H3-specific Metal performance and memory optimization on M3 Max and M5 Max.
 
 ## Tutorial
 
+### 0. Download the model
+
+```sh
+HF_HUB_ENABLE_HF_TRANSFER=1 hf download MiniMaxAI/MiniMax-H3 \
+    --local-dir ./MiniMax-H3 --include "FL2VA/*"
+```
+
 ### 1. Build and inspect the model
 
 The examples assume that the Hugging Face snapshot is in `./MiniMax-H3` and

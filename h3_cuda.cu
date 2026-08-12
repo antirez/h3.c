@@ -27,6 +27,40 @@ struct h3_gpu_tensor { void *device_ptr; h3_gpu_dtype dtype; size_t elements; si
 
 static unsigned h3_cu_grid(unsigned n) { return (n + H3_CU_BLOCK - 1) / H3_CU_BLOCK; }
 
+/* Row-major GEMM: C(rows x out) = A(rows x in) @ W^T, W stored (out x in) row-major.
+ * cuBLAS is column-major; compute C^T = W @ A^T via GemmEx(OP_T, OP_T, out, rows, in).
+ * ab = A/B data type, c = C data type, comp = compute type. */
+static cublasStatus_t h3_cu_gemm(h3_gpu *g, cudaDataType ab, cudaDataType c,
+                                 cublasComputeType_t comp,
+                                 const void *w, const void *a, void *out,
+                                 uint32_t rows, uint32_t in, uint32_t out_dim) {
+    cublasHandle_t h = (cublasHandle_t)g->dev_ctx;
+    const float alpha = 1.0f, beta = 0.0f;
+    return cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_T, (int)out_dim, (int)rows, (int)in,
+                        &alpha, w, ab, (int)in, a, ab, (int)rows, &beta, out, c, (int)out_dim,
+                        comp, CUBLAS_GEMM_DEFAULT_TENSOR_OP_ALGO);
+}
+
+__global__ void h3_cu_linear_bias_f32(float *out, const float *bias,
+                                      uint32_t rows, uint32_t out_dim, int has_bias) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows * out_dim) {
+        uint32_t col = i % out_dim;
+        out[i] += has_bias ? bias[col] : 0.0f;
+    }
+}
+/* BF16 bias: gemm already rounded to bf16; add bias in f32 and round once more
+ * (Metal accumulates bias in f32 before the single final bf16 rounding). */
+__global__ void h3_cu_linear_bias_bf16(uint16_t *out, const uint16_t *bias,
+                                       uint32_t rows, uint32_t out_dim, int has_bias) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows * out_dim) {
+        uint32_t col = i % out_dim;
+        float v = h3_bf16_to_f32(out[i]) + (has_bias ? h3_bf16_to_f32(bias[col]) : 0.0f);
+        out[i] = h3_f32_to_bf16(v);
+    }
+}
+
 /* BF16 helpers -- match Metal exactly (round-to-nearest-even). __device__ so
  * kernels can call them; CUDA intrinsics avoid memcpy in device code. */
 __device__ float h3_bf16_to_f32(uint16_t v) {
@@ -329,9 +363,28 @@ h3_gpu *h3_gpu_create(const char *shader_source_path, char *error, size_t error_
     (void)shader_source_path;
     h3_gpu *g = (h3_gpu *)calloc(1, sizeof(*g));
     if (!g) { if (error && error_size) snprintf(error, error_size, "oom"); return NULL; }
+    cudaError_t ce = cudaSetDevice(0);
+    if (ce != cudaSuccess) {
+        if (error && error_size)
+            snprintf(error, error_size, "cudaSetDevice: %s", cudaGetErrorString(ce));
+        free(g); return NULL;
+    }
+    cublasHandle_t h = NULL;
+    cublasStatus_t st = cublasCreate(&h);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        if (error && error_size)
+            snprintf(error, error_size, "cublasCreate failed (%d)", (int)st);
+        free(g); return NULL;
+    }
+    g->dev_ctx = (void *)h;
     return g;
 }
-void h3_gpu_free(h3_gpu *gpu) { if (gpu) free(gpu); }
+void h3_gpu_free(h3_gpu *gpu) {
+    if (gpu) {
+        if (gpu->dev_ctx) cublasDestroy((cublasHandle_t)gpu->dev_ctx);
+        free(gpu);
+    }
+}
 const char *h3_gpu_error(const h3_gpu *gpu) {
     return gpu && gpu->error[0] ? gpu->error : "no error";
 }
@@ -466,7 +519,23 @@ void h3_gpu_profile_mark(h3_gpu *gpu, const char *phase) {
 int h3_gpu_linear_f32(h3_gpu *gpu, h3_gpu_tensor *output,
                       const h3_gpu_tensor *input, const h3_gpu_tensor *weight,
                       const h3_gpu_tensor *bias, uint32_t rows,
-                      uint32_t input_dim, uint32_t output_dim) { h3_cuda_seterr(gpu); return (int)0; }
+                      uint32_t input_dim, uint32_t output_dim) {
+    if (!gpu || !output || !input || !weight || !output->device_ptr ||
+        !input->device_ptr || !weight->device_ptr) return 0;
+    cublasStatus_t st = h3_cu_gemm(gpu, CUDA_R_32F, CUDA_R_32F, CUBLAS_COMPUTE_32F,
+                                   weight->device_ptr, input->device_ptr, output->device_ptr,
+                                   rows, input_dim, output_dim);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        snprintf(((h3_gpu *)gpu)->error, sizeof(((h3_gpu *)gpu)->error),
+                 "cublasGemmEx f32 failed (%d)", (int)st);
+        return 0;
+    }
+    if (bias && bias->device_ptr)
+        h3_cu_linear_bias_f32<<<h3_cu_grid(rows * output_dim), H3_CU_BLOCK>>>(
+            (float *)output->device_ptr, (const float *)bias->device_ptr,
+            rows, output_dim, 1);
+    return 1;
+}
 int h3_gpu_patch_linear_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                              const h3_gpu_tensor *input,
                              const h3_gpu_tensor *weight,
@@ -702,7 +771,23 @@ int h3_gpu_linear_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                        const h3_gpu_tensor *input,
                        const h3_gpu_tensor *weight,
                        const h3_gpu_tensor *bias, uint32_t rows,
-                       uint32_t input_dim, uint32_t output_dim) { h3_cuda_seterr(gpu); return (int)0; }
+                       uint32_t input_dim, uint32_t output_dim) {
+    if (!gpu || !output || !input || !weight || !output->device_ptr ||
+        !input->device_ptr || !weight->device_ptr) return 0;
+    cublasStatus_t st = h3_cu_gemm(gpu, CUDA_R_16BF, CUDA_R_16BF, CUBLAS_COMPUTE_32F,
+                                   weight->device_ptr, input->device_ptr, output->device_ptr,
+                                   rows, input_dim, output_dim);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        snprintf(((h3_gpu *)gpu)->error, sizeof(((h3_gpu *)gpu)->error),
+                 "cublasGemmEx bf16 failed (%d)", (int)st);
+        return 0;
+    }
+    if (bias && bias->device_ptr)
+        h3_cu_linear_bias_bf16<<<h3_cu_grid(rows * output_dim), H3_CU_BLOCK>>>(
+            (uint16_t *)output->device_ptr, (const uint16_t *)bias->device_ptr,
+            rows, output_dim, 1);
+    return 1;
+}
 int h3_gpu_mlp_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                     const h3_gpu_tensor *input,
                     const h3_gpu_tensor *fc1_weight,

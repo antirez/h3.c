@@ -27,12 +27,13 @@ struct h3_gpu_tensor { void *device_ptr; h3_gpu_dtype dtype; size_t elements; si
 
 static unsigned h3_cu_grid(unsigned n) { return (n + H3_CU_BLOCK - 1) / H3_CU_BLOCK; }
 
-/* BF16 helpers -- match Metal exactly (round-to-nearest-even). */
-static inline float h3_bf16_to_f32(uint16_t v) {
-    uint32_t bits = ((uint32_t)v) << 16; float o; memcpy(&o, &bits, sizeof(o)); return o;
+/* BF16 helpers -- match Metal exactly (round-to-nearest-even). __device__ so
+ * kernels can call them; CUDA intrinsics avoid memcpy in device code. */
+__device__ float h3_bf16_to_f32(uint16_t v) {
+    return __int_as_float(((uint32_t)v) << 16);
 }
-static inline uint16_t h3_f32_to_bf16(float x) {
-    uint32_t bits; memcpy(&bits, &x, sizeof(bits));
+__device__ uint16_t h3_f32_to_bf16(float x) {
+    uint32_t bits = __float_as_uint(x);
     bits += 0x7fffu + ((bits >> 16) & 1u);
     return (uint16_t)(bits >> 16);
 }

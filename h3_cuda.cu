@@ -1,21 +1,130 @@
-/* h3_cuda.cu - CUDA backend skeleton for h3.c (feat/cuda).
+/* h3_cuda.cu - CUDA backend for h3.c (feat/cuda).
  * Metal backend (h3_gpu.m/h3_shaders.metal) is preserved untouched;
  * this file implements the same h3_gpu.h C API against CUDA/cuBLAS.
- * I1 scaffold: probe/create/free real, compute ops are stubs.
+ * I1 scaffold: probe/create/free + I2 tensor layer real; compute ops are stubs.
  */
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <limits.h>
 #include "h3_gpu.h"
 #include "h3.h"
 #include "h3_cuda.h"
 
 #define H3_CUDA_ERR "CUDA backend: op not yet implemented (feat/cuda)"
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-struct h3_gpu { void *dev_ctx; char error[512]; };
-struct h3_gpu_tensor { void *device_ptr; h3_gpu_dtype dtype; size_t elements; };
+struct h3_gpu { void *dev_ctx; h3_gpu_stats stats; char error[512]; };
+struct h3_gpu_tensor { void *device_ptr; h3_gpu_dtype dtype; size_t elements; size_t bytes; h3_gpu *owner; };
+
+static size_t h3_gpu_dtype_size(h3_gpu_dtype dtype) {
+    switch (dtype) {
+    case H3_GPU_F32: return sizeof(float);
+    case H3_GPU_BF16: return sizeof(uint16_t);
+    case H3_GPU_I8: return sizeof(int8_t);
+    case H3_GPU_U32: return sizeof(uint32_t);
+    default: return 0;
+    }
+}
+
+/* Allocate device memory (optionally filled from host `values`). */
+static h3_gpu_tensor *h3_gpu_tensor_alloc(h3_gpu *gpu, size_t elements, h3_gpu_dtype dtype, const void *values) {
+    size_t bytes = elements * h3_gpu_dtype_size(dtype);
+    if (bytes == 0) return NULL;
+    void *dptr = NULL;
+    if (cudaMalloc(&dptr, bytes) != cudaSuccess) return NULL;
+    if (values) {
+        if (cudaMemcpy(dptr, values, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(dptr); return NULL;
+        }
+    }
+    h3_gpu_tensor *t = (h3_gpu_tensor *)calloc(1, sizeof(*t));
+    if (!t) { cudaFree(dptr); return NULL; }
+    t->device_ptr = dptr; t->dtype = dtype; t->elements = elements; t->bytes = bytes; t->owner = gpu;
+    if (gpu) {
+        gpu->stats.allocated_bytes += bytes;
+        gpu->stats.live_bytes += bytes;
+        if (gpu->stats.live_bytes > gpu->stats.peak_live_bytes)
+            gpu->stats.peak_live_bytes = gpu->stats.live_bytes;
+        gpu->stats.tensor_allocations++;
+    }
+    return t;
+}
+
+/* Stream a file range into a device tensor via a small host staging buffer. */
+static int h3_gpu_tensor_file_load(h3_gpu *gpu, h3_gpu_tensor *t, const char *path, uint64_t file_offset, char *error, size_t error_size) {
+    if (!t || !path || !*path || file_offset > (uint64_t)INT64_MAX) return 0;
+    size_t bytes = t->bytes;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { if (error && error_size) snprintf(error, error_size, "cannot open %s: %s", path, strerror(errno)); return 0; }
+    size_t chunk = MIN(bytes, (size_t)(1 << 20));
+    void *host = malloc(chunk ? chunk : 1);
+    if (!host) { close(fd); return 0; }
+    size_t completed = 0;
+    while (completed < bytes) {
+        size_t request = MIN(chunk, bytes - completed);
+        size_t got = 0;
+        while (got < request) {
+            ssize_t count = pread(fd, (char *)host + got, request - got, (off_t)(file_offset + completed + got));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                if (error && error_size) snprintf(error, error_size, "cannot read %s payload: %s", path, count < 0 ? strerror(errno) : "unexpected end of file");
+                free(host); close(fd); return 0;
+            }
+            got += (size_t)count;
+        }
+        if (cudaMemcpy((char *)t->device_ptr + completed, host, request, cudaMemcpyHostToDevice) != cudaSuccess) {
+            if (error && error_size) snprintf(error, error_size, "cudaMemcpy failed");
+            free(host); close(fd); return 0;
+        }
+        completed += request;
+    }
+    free(host); close(fd);
+    (void)gpu;
+    return 1;
+}
+
+static int h3_gpu_tensor_read_file_bf16_mode(h3_gpu_tensor *tensor, const char *path, uint64_t file_offset, size_t elements, int uncached, char *error, size_t error_size) {
+    (void)uncached;
+    if (error && error_size) error[0] = '\0';
+    if (!tensor || !path || !*path || tensor->dtype != H3_GPU_BF16 || elements != tensor->elements || file_offset > (uint64_t)INT64_MAX) {
+        if (error && error_size) snprintf(error, error_size, "invalid BF16 file read request");
+        return 0;
+    }
+    size_t bytes = elements * sizeof(uint16_t);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { if (error && error_size) snprintf(error, error_size, "cannot open %s: %s", path, strerror(errno)); return 0; }
+    size_t chunk = MIN(bytes, (size_t)(1 << 20));
+    void *host = malloc(chunk ? chunk : 1);
+    if (!host) { close(fd); return 0; }
+    size_t completed = 0;
+    while (completed < bytes) {
+        size_t request = MIN(chunk, bytes - completed);
+        size_t got = 0;
+        while (got < request) {
+            ssize_t count = pread(fd, (char *)host + got, request - got, (off_t)(file_offset + completed + got));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                if (error && error_size) snprintf(error, error_size, "cannot read BF16 payload from %s: %s", path, count < 0 ? strerror(errno) : "unexpected end of file");
+                free(host); close(fd); return 0;
+            }
+            got += (size_t)count;
+        }
+        if (cudaMemcpy((char *)tensor->device_ptr + completed, host, request, cudaMemcpyHostToDevice) != cudaSuccess) {
+            if (error && error_size) snprintf(error, error_size, "cudaMemcpy failed");
+            free(host); close(fd); return 0;
+        }
+        completed += request;
+    }
+    free(host); close(fd);
+    return 1;
+}
 
 int h3_cuda_probe(h3_device_info *info, char *error, size_t error_size) {
     int count = 0;
@@ -32,8 +141,6 @@ int h3_cuda_probe(h3_device_info *info, char *error, size_t error_size) {
         snprintf(info->name, sizeof(info->name), "%s", prop.name);
         snprintf(info->architecture, sizeof(info->architecture), "sm_%d", prop.major * 100 + prop.minor * 10);
         info->physical_memory = (uint64_t)prop.totalGlobalMem;
-        /* GB10/DGX Spark is a unified-memory architecture (CUDA 13 removed
-         * both prop.unifiedMemory and cudaDevAttrUnifiedMemory). */
         info->unified_memory = 1;
     }
     return 1;
@@ -55,51 +162,129 @@ static void h3_cuda_seterr(const h3_gpu *gpu) {
 int h3_gpu_is_m5(const h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
 int h3_gpu_has_nax_mlp(const h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
 int h3_gpu_has_int8_mlp(const h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
-h3_gpu_tensor * h3_gpu_tensor_new_f32(h3_gpu *gpu, size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
-h3_gpu_tensor * h3_gpu_tensor_new_bf16(h3_gpu *gpu, size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
-h3_gpu_tensor * h3_gpu_tensor_new_i8(h3_gpu *gpu, size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+h3_gpu_tensor * h3_gpu_tensor_new_f32(h3_gpu *gpu, size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_F32, NULL);
+}
+h3_gpu_tensor * h3_gpu_tensor_new_bf16(h3_gpu *gpu, size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_BF16, NULL);
+}
+h3_gpu_tensor * h3_gpu_tensor_new_i8(h3_gpu *gpu, size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_I8, NULL);
+}
 h3_gpu_tensor * h3_gpu_tensor_from_f32(h3_gpu *gpu, const float *values,
-                                      size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+                                      size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_F32, values);
+}
 h3_gpu_tensor * h3_gpu_tensor_from_bf16(h3_gpu *gpu, const uint16_t *values,
-                                       size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+                                       size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_BF16, values);
+}
 h3_gpu_tensor * h3_gpu_tensor_from_u32(h3_gpu *gpu, const uint32_t *values,
-                                      size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+                                      size_t elements) {
+    return h3_gpu_tensor_alloc(gpu, elements, H3_GPU_U32, values);
+}
 h3_gpu_tensor * h3_gpu_tensor_load_bf16(h3_gpu *gpu, const char *path,
-                                       uint64_t file_offset, size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+                                       uint64_t file_offset, size_t elements) {
+    h3_gpu_tensor *t = h3_gpu_tensor_alloc(gpu, elements, H3_GPU_BF16, NULL);
+    if (!t) return NULL;
+    if (!h3_gpu_tensor_file_load(gpu, t, path, file_offset, NULL, 0)) { h3_gpu_tensor_free(t); return NULL; }
+    return t;
+}
 h3_gpu_tensor * h3_gpu_tensor_load_f32(h3_gpu *gpu, const char *path,
-                                      uint64_t file_offset, size_t elements) { h3_cuda_seterr(gpu); return (h3_gpu_tensor *)NULL; }
+                                      uint64_t file_offset, size_t elements) {
+    h3_gpu_tensor *t = h3_gpu_tensor_alloc(gpu, elements, H3_GPU_F32, NULL);
+    if (!t) return NULL;
+    if (!h3_gpu_tensor_file_load(gpu, t, path, file_offset, NULL, 0)) { h3_gpu_tensor_free(t); return NULL; }
+    return t;
+}
 int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                  uint64_t file_offset, size_t elements,
-                                 char *error, size_t error_size) { return (int)0; }
+                                 char *error, size_t error_size) {
+    return h3_gpu_tensor_read_file_bf16_mode(tensor, path, file_offset, elements, 0, error, error_size);
+}
 int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                    uint64_t file_offset, size_t elements,
-                                   char *error, size_t error_size) { return (int)0; }
-void h3_gpu_tensor_free(h3_gpu_tensor *tensor) { }
-size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor) { return (size_t)0; }
-h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor) { return (h3_gpu_dtype)0; }
+                                   char *error, size_t error_size) {
+    return h3_gpu_tensor_read_file_bf16_mode(tensor, path, file_offset, elements, 1, error, error_size);
+}
+void h3_gpu_tensor_free(h3_gpu_tensor *tensor) {
+    if (!tensor) return;
+    if (tensor->device_ptr) cudaFree(tensor->device_ptr);
+    if (tensor->owner) {
+        tensor->owner->stats.live_bytes = tensor->owner->stats.live_bytes >= tensor->bytes ? tensor->owner->stats.live_bytes - tensor->bytes : 0;
+    }
+    free(tensor);
+}
+size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor) {
+    return tensor ? tensor->elements : 0;
+}
+h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor) {
+    return tensor ? tensor->dtype : H3_GPU_F32;
+}
 int h3_gpu_tensor_read_f32(const h3_gpu_tensor *tensor, float *values,
-                           size_t elements) { return (int)0; }
+                           size_t elements) {
+    return h3_gpu_tensor_read_f32_range(tensor, 0, values, elements);
+}
 int h3_gpu_tensor_read_f32_range(const h3_gpu_tensor *tensor,
                                  size_t source_offset, float *values,
-                                 size_t elements) { return (int)0; }
+                                 size_t elements) {
+    if (!tensor || !values || tensor->dtype != H3_GPU_F32 || source_offset > tensor->elements || elements > tensor->elements - source_offset) return 0;
+    size_t bytes = elements * sizeof(float);
+    return (cudaMemcpy(values, (char *)tensor->device_ptr + source_offset * sizeof(float), bytes, cudaMemcpyDeviceToHost) == cudaSuccess) ? 1 : 0;
+}
 int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
-                            size_t elements) { return (int)0; }
+                            size_t elements) {
+    if (!tensor || !values || tensor->dtype != H3_GPU_BF16 || elements > tensor->elements) return 0;
+    size_t bytes = elements * sizeof(uint16_t);
+    return (cudaMemcpy(values, tensor->device_ptr, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) ? 1 : 0;
+}
 int h3_gpu_tensor_write_f32(h3_gpu_tensor *tensor, const float *values,
-                            size_t elements) { return (int)0; }
+                            size_t elements) {
+    return h3_gpu_tensor_write_f32_range(tensor, 0, values, elements);
+}
 int h3_gpu_tensor_write_f32_range(h3_gpu_tensor *tensor,
                                   size_t destination_offset,
-                                  const float *values, size_t elements) { return (int)0; }
+                                  const float *values, size_t elements) {
+    if (!tensor || !values || tensor->dtype != H3_GPU_F32 || destination_offset > tensor->elements || elements > tensor->elements - destination_offset) return 0;
+    size_t bytes = elements * sizeof(float);
+    return (cudaMemcpy((char *)tensor->device_ptr + destination_offset * sizeof(float), values, bytes, cudaMemcpyHostToDevice) == cudaSuccess) ? 1 : 0;
+}
 int h3_gpu_tensor_write_bf16(h3_gpu_tensor *tensor, const uint16_t *values,
-                             size_t elements) { return (int)0; }
+                             size_t elements) {
+    return h3_gpu_tensor_write_bf16_range(tensor, 0, values, elements);
+}
 int h3_gpu_tensor_write_bf16_range(h3_gpu_tensor *tensor,
                                    size_t destination_offset,
-                                   const uint16_t *values, size_t elements) { return (int)0; }
-int h3_gpu_begin(h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
-int h3_gpu_continue(h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
-int h3_gpu_submit(h3_gpu *gpu) { h3_cuda_seterr(gpu); return (int)0; }
-int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats) { h3_cuda_seterr(gpu); return (int)0; }
-void h3_gpu_profile_set_label(h3_gpu *gpu, const char *label) { h3_cuda_seterr(gpu); }
-void h3_gpu_profile_mark(h3_gpu *gpu, const char *phase) { h3_cuda_seterr(gpu); }
+                                   const uint16_t *values, size_t elements) {
+    if (!tensor || !values || tensor->dtype != H3_GPU_BF16 || destination_offset > tensor->elements || elements > tensor->elements - destination_offset) return 0;
+    size_t bytes = elements * sizeof(uint16_t);
+    return (cudaMemcpy((char *)tensor->device_ptr + destination_offset * sizeof(uint16_t), values, bytes, cudaMemcpyHostToDevice) == cudaSuccess) ? 1 : 0;
+}
+int h3_gpu_begin(h3_gpu *gpu) {
+    (void)gpu;
+    return 1;  /* CUDA has no explicit command buffer */
+}
+int h3_gpu_continue(h3_gpu *gpu) {
+    (void)gpu;
+    return 1;  /* CUDA has no explicit command buffer */
+}
+int h3_gpu_submit(h3_gpu *gpu) {
+    (void)gpu;
+    return 1;  /* CUDA has no explicit command buffer */
+}
+int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats) {
+    if (!gpu || !stats) return 0;
+    *stats = gpu->stats;
+    return 1;
+}
+void h3_gpu_profile_set_label(h3_gpu *gpu, const char *label) {
+    (void)gpu; (void)label;
+    /* no-op on CUDA */
+}
+void h3_gpu_profile_mark(h3_gpu *gpu, const char *phase) {
+    (void)gpu; (void)phase;
+    /* no-op on CUDA */
+}
 int h3_gpu_linear_f32(h3_gpu *gpu, h3_gpu_tensor *output,
                       const h3_gpu_tensor *input, const h3_gpu_tensor *weight,
                       const h3_gpu_tensor *bias, uint32_t rows,

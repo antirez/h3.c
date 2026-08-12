@@ -216,13 +216,18 @@ CUDA_C_SRC := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 	h3_ffmpeg.c h3_terminal.c h3_vision_encoder.c h3_multimodal.c h3_tokenizer.c
 CUDA_OBJ := $(CUDA_C_SRC:.c=.cuda.o) h3_cuda.cuda.o
 
+CLI_CUDA_OBJ := main.cuda.o h3_cli.cuda.o linenoise.cuda.o
+
 %.cuda.o: %.c
 	$(CC) $(CUDA_CFLAGS) -I. -c $< -o $@
 
 h3_cuda.cuda.o: h3_cuda.cu h3_gpu.h h3_cuda.h
 	$(NVCC) -std=c++17 -arch=$(CUDA_ARCH) -I. -DH3_CUDA -c $< -o $@
 
-h3-cuda: $(CLI_OBJ) $(CUDA_OBJ)
+linenoise.cuda.o: linenoise.c
+	$(CC) $(CUDA_CFLAGS) -Wno-conversion -Wno-variadic-macro-arguments-omitted -I. -c $< -o $@
+
+h3-cuda: $(CLI_CUDA_OBJ) $(CUDA_OBJ)
 	$(NVCC) -o h3 $^ $(CUDA_LDLIBS)
 
 cuda-spark:

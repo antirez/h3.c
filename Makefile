@@ -17,7 +17,7 @@ LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity clean
+.PHONY: all test parity real-parity clean h3-cuda cuda-spark cuda-generic cuda
 
 all: h3 libh3.a
 
@@ -196,6 +196,49 @@ real-parity: h3_real_prompt_test h3_real_dit_block_test
 tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -I. -c $< -o $@
 
+# ---------------------------------------------------------------------------
+# CUDA backend (feat/cuda). The Metal implementation (h3_gpu.m, h3_shaders.metal,
+# h3_metal.m, h3_tokenizer.m) is preserved untouched. This builds the CUDA path
+# on Linux, replacing the Metal GPU layer with h3_cuda.cu and the Foundation
+# tokenizer with h3_tokenizer.c. Usage:
+#   make cuda-spark    DGX Spark / GB10 (omits explicit -arch: fastest on GB10)
+#   make cuda-generic  any local CUDA GPU (nvcc -arch=native)
+#   make cuda CUDA_ARCH=sm_N  explicit arch
+CUDA_HOME ?= /usr/local/cuda-13.0
+NVCC ?= $(CUDA_HOME)/bin/nvcc
+CUDA_ARCH ?= sm_121
+CUDA_CFLAGS := -std=c11 -O3 -MMD -MP -Wall -Wextra -Wpedantic -Wshadow \
+	-Wno-sign-conversion -D_GNU_SOURCE -DH3_CUDA
+CUDA_LDLIBS := -L$(CUDA_HOME)/lib64 -lcudart -lcublas -lm
+
+CUDA_C_SRC := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
+	h3_dit_schedule.c h3_dit.c h3_video_vae.c h3_video_encoder.c h3_audio_vae.c \
+	h3_ffmpeg.c h3_terminal.c h3_vision_encoder.c h3_multimodal.c h3_tokenizer.c
+CUDA_OBJ := $(CUDA_C_SRC:.c=.cuda.o) h3_cuda.cuda.o
+
+%.cuda.o: %.c
+	$(CC) $(CUDA_CFLAGS) -I. -c $< -o $@
+
+h3_cuda.cuda.o: h3_cuda.cu h3_gpu.h h3_cuda.h
+	$(NVCC) -std=c++17 -arch=$(CUDA_ARCH) -I. -DH3_CUDA -c $< -o $@
+
+h3-cuda: $(CLI_OBJ) $(CUDA_OBJ)
+	$(NVCC) -o h3 $^ $(CUDA_LDLIBS)
+
+cuda-spark:
+	$(MAKE) -B h3-cuda CUDA_ARCH=sm_121 CC=gcc
+
+cuda-generic:
+	$(MAKE) -B h3-cuda CUDA_ARCH=native CC=gcc
+
+cuda:
+	@if [ -z "$(strip $(CUDA_ARCH))" ]; then \
+		echo "error: specify CUDA_ARCH, e.g. make cuda CUDA_ARCH=sm_120"; \
+		exit 2; \
+	fi
+	$(MAKE) -B h3-cuda CUDA_ARCH="$(CUDA_ARCH)" CC=gcc
+
+# ---------------------------------------------------------------------------
 # Vendored from Iris. Keep the main project strict without rewriting this small
 # terminal editor for conversion diagnostics unrelated to H3.
 linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted

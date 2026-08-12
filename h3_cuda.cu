@@ -31,9 +31,9 @@ int h3_cuda_probe(h3_device_info *info, char *error, size_t error_size) {
         snprintf(info->name, sizeof(info->name), "%s", prop.name);
         snprintf(info->architecture, sizeof(info->architecture), "sm_%d", prop.major * 100 + prop.minor * 10);
         info->physical_memory = (uint64_t)prop.totalGlobalMem;
-        int unif = 0;
-        cudaDeviceGetAttribute(&unif, cudaDevAttrUnifiedMemory, 0);
-        info->unified_memory = (unif ? 1 : 0);
+        /* GB10/DGX Spark is a unified-memory architecture (CUDA 13 removed
+         * both prop.unifiedMemory and cudaDevAttrUnifiedMemory). */
+        info->unified_memory = 1;
     }
     return 1;
 }

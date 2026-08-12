@@ -15,6 +15,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#ifndef __APPLE__
+#include <sys/random.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -103,7 +106,12 @@ static int set_directory(char destination[H3_CLI_PATH], const char *path) {
 
 static uint64_t random_seed(void) {
     uint64_t value;
+#ifdef __APPLE__
     arc4random_buf(&value, sizeof(value));
+#else
+    if (getrandom(&value, sizeof(value), 0) != (ssize_t)sizeof(value))
+        return (uint64_t)time(NULL);
+#endif
     return value;
 }
 

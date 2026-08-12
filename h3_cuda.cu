@@ -27,6 +27,17 @@ struct h3_gpu_tensor { void *device_ptr; h3_gpu_dtype dtype; size_t elements; si
 
 static unsigned h3_cu_grid(unsigned n) { return (n + H3_CU_BLOCK - 1) / H3_CU_BLOCK; }
 
+/* BF16 helpers -- match Metal exactly (round-to-nearest-even). __device__ so
+ * kernels can call them; CUDA intrinsics avoid memcpy in device code. */
+__device__ float h3_bf16_to_f32(uint16_t v) {
+    return __int_as_float(((uint32_t)v) << 16);
+}
+__device__ uint16_t h3_f32_to_bf16(float x) {
+    uint32_t bits = __float_as_uint(x);
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+    return (uint16_t)(bits >> 16);
+}
+
 /* Row-major GEMM: C(rows x out) = A(rows x in) @ W^T, W stored (out x in) row-major.
  * cuBLAS is column-major; compute C^T = W @ A^T via GemmEx(OP_T, OP_T, out, rows, in).
  * ab = A/B data type, c = C data type, comp = compute type. */
@@ -38,7 +49,7 @@ static cublasStatus_t h3_cu_gemm(h3_gpu *g, cudaDataType ab, cudaDataType c,
     const float alpha = 1.0f, beta = 0.0f;
     return cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_T, (int)out_dim, (int)rows, (int)in,
                         &alpha, w, ab, (int)in, a, ab, (int)rows, &beta, out, c, (int)out_dim,
-                        comp, CUBLAS_GEMM_DEFAULT_TENSOR_OP_ALGO);
+                        comp, CUBLAS_GEMM_DEFAULT);
 }
 
 __global__ void h3_cu_linear_bias_f32(float *out, const float *bias,
@@ -59,17 +70,6 @@ __global__ void h3_cu_linear_bias_bf16(uint16_t *out, const uint16_t *bias,
         float v = h3_bf16_to_f32(out[i]) + (has_bias ? h3_bf16_to_f32(bias[col]) : 0.0f);
         out[i] = h3_f32_to_bf16(v);
     }
-}
-
-/* BF16 helpers -- match Metal exactly (round-to-nearest-even). __device__ so
- * kernels can call them; CUDA intrinsics avoid memcpy in device code. */
-__device__ float h3_bf16_to_f32(uint16_t v) {
-    return __int_as_float(((uint32_t)v) << 16);
-}
-__device__ uint16_t h3_f32_to_bf16(float x) {
-    uint32_t bits = __float_as_uint(x);
-    bits += 0x7fffu + ((bits >> 16) & 1u);
-    return (uint16_t)(bits >> 16);
 }
 
 static size_t h3_gpu_dtype_size(h3_gpu_dtype dtype) {

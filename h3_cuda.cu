@@ -10,6 +10,7 @@
 #include <string.h>
 #include "h3_gpu.h"
 #include "h3.h"
+#include "h3_cuda.h"
 
 #define H3_CUDA_ERR "CUDA backend: op not yet implemented (feat/cuda)"
 

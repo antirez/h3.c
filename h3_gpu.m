@@ -325,6 +325,17 @@ static int h3_gpu_dispatch_rows(H3GPU *gpu, NSString *name, uint32_t rows,
     return 1;
 }
 
+extern const unsigned char h3_shaders_embedded_start[];
+extern const unsigned char h3_shaders_embedded_end[];
+
+static NSString *h3_gpu_embedded_shader_source(void) {
+    size_t length = (size_t)(h3_shaders_embedded_end -
+                             h3_shaders_embedded_start);
+    return [[NSString alloc] initWithBytes:h3_shaders_embedded_start
+                                   length:length
+                                 encoding:NSUTF8StringEncoding];
+}
+
 h3_gpu *h3_gpu_create(const char *shader_source_path,
                       char *error, size_t error_size) {
     @autoreleasepool {
@@ -350,13 +361,21 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
                     "%.3f GiB\n", (double)gpu.device.currentAllocatedSize /
                     (1024.0 * 1024.0 * 1024.0));
         }
-        const char *source_path = shader_source_path ? shader_source_path :
-                                                       "h3_shaders.metal";
-        NSString *path = [NSString stringWithUTF8String:source_path];
         NSError *libraryError = nil;
-        NSString *source = [NSString stringWithContentsOfFile:path
-                                                     encoding:NSUTF8StringEncoding
-                                                        error:&libraryError];
+        NSString *source = nil;
+        NSString *sourceName = @"embedded h3_shaders.metal";
+        if (shader_source_path) {
+            sourceName = [NSString stringWithUTF8String:shader_source_path];
+            source = [NSString stringWithContentsOfFile:sourceName
+                                                encoding:NSUTF8StringEncoding
+                                                   error:&libraryError];
+        }
+        if (!source && (!shader_source_path ||
+                        !strcmp(shader_source_path, "h3_shaders.metal"))) {
+            source = h3_gpu_embedded_shader_source();
+            sourceName = @"embedded h3_shaders.metal";
+            libraryError = nil;
+        }
         if (source) {
             MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
             options.mathMode = MTLMathModeSafe;
@@ -397,7 +416,8 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             if (error && error_size) {
                 const char *description = libraryError.localizedDescription.UTF8String;
                 snprintf(error, error_size, "cannot compile %s: %s",
-                         source_path, description ? description : "unknown error");
+                         sourceName.UTF8String,
+                         description ? description : "unknown error");
             }
             return NULL;
         }

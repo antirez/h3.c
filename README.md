@@ -26,6 +26,16 @@ mkdir -p outputs
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
+The model directory can also be supplied through `H3_MODEL_DIR`:
+
+```sh
+export H3_MODEL_DIR=./MiniMax-H3
+./h3 --info
+```
+
+The `-d`/`--model-dir` option takes precedence when both are provided. An empty
+`H3_MODEL_DIR` is ignored.
+
 Without `-p`, the same binary starts an Iris-style interactive session:
 
 ```sh

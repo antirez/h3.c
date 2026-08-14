@@ -19,6 +19,7 @@ static void usage(const char *program) {
         "       %s -d MODEL_DIR --info\n\n"
         "Options:\n"
         "  -d, --model-dir PATH   MiniMax-H3 local directory\n"
+        "                         (or set H3_MODEL_DIR)\n"
         "  -p, --prompt TEXT      Raw H3 prompt\n"
         "  -o, --output PATH      Output MP4 (default: outputs/h3.mp4)\n"
         "      --width N          Output width (default: 864)\n"
@@ -463,6 +464,10 @@ int main(int argc, char **argv) {
             case OPT_INFO: info = 1; break;
             default: usage(argv[0]); return 2;
         }
+    }
+    const char *env_model_dir = getenv("H3_MODEL_DIR");
+    if ((!model_dir || !*model_dir) && env_model_dir && *env_model_dir) {
+        model_dir = env_model_dir;
     }
     if (!model_dir) {
         usage(argv[0]);

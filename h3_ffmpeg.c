@@ -133,12 +133,20 @@ int h3_ffprobe_visual_size(const char *path, int *width, int *height,
              path);
         return 0;
     }
-    for (char *cursor = output + consumed; *cursor; cursor++) {
-        if (*cursor != ' ' && *cursor != '\t' && *cursor != '\r' &&
-            *cursor != '\n') {
-            fail(error, error_size, "FFprobe returned an invalid visual size");
-            return 0;
-        }
+    /* FFprobe's compact/CSV writer (FFmpeg >= 5.1) emits one item
+     * separator before an unselected nested stream side_data_list —
+     * present in e.g. iPhone .mov files carrying a display matrix —
+     * yielding "3840x2160x". Accept exactly that one optional separator
+     * before trailing whitespace; anything else is still an error. */
+    char *cursor = output + consumed;
+    if (*cursor == 'x') cursor++;
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
+           *cursor == '\n') {
+        cursor++;
+    }
+    if (*cursor != '\0') {
+        fail(error, error_size, "FFprobe returned an invalid visual size");
+        return 0;
     }
     if (parsed_width < 1 || parsed_height < 1) {
         fail(error, error_size, "visual stream has invalid dimensions %dx%d",

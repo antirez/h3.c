@@ -32,6 +32,8 @@ typedef struct {
     double gpu_seconds;
 } h3_gpu_stats;
 
+/* Pass NULL to compile the shader source embedded in the library. The default
+ * source filename also falls back to the embedded copy when it is absent. */
 h3_gpu *h3_gpu_create(const char *shader_source_path,
                       char *error, size_t error_size);
 void h3_gpu_free(h3_gpu *gpu);

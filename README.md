@@ -26,6 +26,14 @@ mkdir -p outputs
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
+The Metal shader source is embedded in the executable and compiled at runtime,
+so `h3` can be installed as a standalone binary:
+
+```sh
+mkdir -p "$HOME/bin"
+install -m 755 h3 "$HOME/bin/h3"
+```
+
 Without `-p`, the same binary starts an Iris-style interactive session:
 
 ```sh

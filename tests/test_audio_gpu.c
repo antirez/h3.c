@@ -135,7 +135,7 @@ static void activation_reference(float *output, const float *input,
 int main(void) {
     test_context test = {0};
     char error[512];
-    test.gpu = h3_gpu_create("h3_shaders.metal", error, sizeof(error));
+    test.gpu = h3_gpu_create(NULL, error, sizeof(error));
     if (!test.gpu) die(error);
 
     const float input_values[] = {0.2f, -0.3f, 0.5f, 0.1f,

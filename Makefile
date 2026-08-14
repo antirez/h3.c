@@ -14,7 +14,8 @@ LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
 	h3_terminal.c h3_vision_encoder.c h3_multimodal.c
 LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
-LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
+LIB_S := h3_shaders_embedded.S
+LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o) $(LIB_S:.S=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
 .PHONY: all test parity real-parity clean
@@ -192,6 +193,11 @@ real-parity: h3_real_prompt_test h3_real_dit_block_test
 
 %.o: %.m
 	$(CC) $(OBJCFLAGS) -I. -c $< -o $@
+
+%.o: %.S
+	$(CC) -c $< -o $@
+
+h3_shaders_embedded.o: h3_shaders.metal
 
 tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -I. -c $< -o $@

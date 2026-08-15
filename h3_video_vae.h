@@ -28,6 +28,12 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
                         int latent_height, int latent_width,
                         h3_video_vae_progress progress, void *progress_opaque,
                         char *error, size_t error_size);
+/* Reports block progress while decoding, which costs about as much as the
+ * load did. Optional: a decoder without a sink decodes silently. */
+void h3_video_vae_decoder_set_progress(h3_video_vae_decoder *decoder,
+                                       h3_video_vae_progress progress,
+                                       void *progress_opaque);
+
 int h3_video_vae_decoder_preview(h3_video_vae_decoder *decoder,
                         const float *normalized_latent, int latent_time,
                         h3_video_frames *output, int *output_frame_index,

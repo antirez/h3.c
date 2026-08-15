@@ -2740,6 +2740,12 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
             }
         }
         if (ok && preview) {
+            /* This path previews the sample rather than the denoised
+             * estimate the CPU sampler shows: the velocity lives in a BF16
+             * GPU tensor here and would need its own readback to combine.
+             * The GPU sampler runs on M5-class hardware only, which this
+             * change could not be exercised on, so the cheaper preview
+             * stands until it can be tested there. */
             ok = h3_gpu_tensor_read_f32_range(
                      dit->video_input, video_offset, video_rows, video_count) &&
                  h3_dit_unpatchify_video(
@@ -2858,6 +2864,24 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
+/* Previews want the model's current estimate of the finished picture, not
+ * the sample it is stepping through. This engine's velocity points from the
+ * sample toward the clean image as sigma falls, so the estimate is
+ * x0 = x_t + sigma * v — the same expression the res sampler already uses to
+ * build its denoised buffer. It reads as a blurry version of the result from
+ * the first step and sharpens; decoding x_t instead shows latent noise until
+ * sigma collapses near the end, which is useless for deciding whether to
+ * cancel. Returns the buffer to hand the preview callback. */
+static const float *preview_estimate(float *destination, const float *sample,
+                                     const float *velocity, size_t count,
+                                     float sigma) {
+    if (!destination || !velocity || !isfinite(sigma) || sigma <= 0.0f)
+        return sample;
+    for (size_t index = 0; index < count; index++)
+        destination[index] = sample[index] + sigma * velocity[index];
+    return destination;
+}
+
 int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
@@ -2895,6 +2919,8 @@ int h3_dit_denoise_euler_preview(
     size_t audio_count = h3_dit_audio_elements(dit);
     float *video_velocity = malloc(video_count * sizeof(*video_velocity));
     float *audio_velocity = malloc(audio_count * sizeof(*audio_velocity));
+    float *preview_video = preview
+        ? malloc(video_count * sizeof(*preview_video)) : NULL;
     float *last_video = reuse_interval > 1
         ? malloc(video_count * sizeof(*last_video)) : NULL;
     float *previous_video = reuse_interval > 1
@@ -2909,6 +2935,7 @@ int h3_dit_denoise_euler_preview(
         fail(error, error_size, "out of memory allocating Euler velocities");
         free(video_velocity);
         free(audio_velocity);
+        free(preview_video);
         free(last_video);
         free(previous_video);
         free(last_audio);
@@ -2964,8 +2991,11 @@ int h3_dit_denoise_euler_preview(
                           "Euler solver rejected step %d", step);
         }
         if (ok && preview &&
-            preview(step + 1, dit->sigmas.steps, video_latent, video_count,
-                    preview_opaque)) {
+            preview(step + 1, dit->sigmas.steps,
+                    preview_estimate(preview_video, video_latent,
+                                     video_velocity, video_count,
+                                     dit->sigmas.video[step + 1]),
+                    video_count, preview_opaque)) {
             fail(error, error_size, "denoising preview stopped at step %d",
                  step + 1);
             ok = 0;
@@ -2975,6 +3005,7 @@ int h3_dit_denoise_euler_preview(
     }
     free(video_velocity);
     free(audio_velocity);
+    free(preview_video);
     free(last_video);
     free(previous_video);
     free(last_audio);

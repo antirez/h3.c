@@ -97,7 +97,23 @@ struct h3_video_vae_decoder {
     int latent_w;
     float latent_mean[LATENT_CHANNELS];
     float latent_std[LATENT_CHANNELS];
+    h3_video_vae_progress progress;
+    void *progress_opaque;
+    /* Spatial tiles each run the full block stack, so a raw per-tile count
+     * would restart the bar once per tile; these carry the tile's place in
+     * the whole decode so the reported figure only moves forward. */
+    int progress_tile;
+    int progress_tiles;
 };
+
+/* Forwards a tile's block progress as a position in the whole decode. */
+static void decoder_tile_progress(int completed, int total, void *opaque) {
+    h3_video_vae_decoder *decoder = opaque;
+    if (!decoder || !decoder->progress || total <= 0) return;
+    int tiles = decoder->progress_tiles > 0 ? decoder->progress_tiles : 1;
+    decoder->progress(decoder->progress_tile * total + completed,
+                      tiles * total, decoder->progress_opaque);
+}
 
 static void fail(char *error, size_t error_size, const char *format, ...) {
     if (!error || !error_size) return;
@@ -530,7 +546,9 @@ static int load_resident_weights(vae_context *vae,
 /* Tiled decoding keeps every VAE weight resident for the duration of the phase.
  * This uses about 9 GiB after the DiT has been retired, avoids rereading 9 GiB
  * per spatial tile, and permits one command-buffer chain per tile. */
-static int run_resident_tile(vae_context *vae, char *error,
+static int run_resident_tile(vae_context *vae,
+                             h3_video_vae_progress progress,
+                             void *progress_opaque, char *error,
                              size_t error_size) {
     float zeros[HIDDEN];
     memset(zeros, 0, sizeof(zeros));
@@ -559,11 +577,16 @@ static int run_resident_tile(vae_context *vae, char *error,
     OP(h3_gpu_copy_f32(vae->gpu, vae->hidden,
         (size_t)(vae->patches + REGISTERS) * HIDDEN, zero, 0, HIDDEN),
        "pack tiled video VAE suffix");
-    for (int index = 0; index < LAYERS; index++)
+    for (int index = 0; index < LAYERS; index++) {
         if (!run_block(vae, index, error, error_size)) {
             h3_gpu_tensor_free(zero);
             return 0;
         }
+        /* Decoding costs about as much as loading did, so it reports too;
+         * without this a caller's phase sits at its last value for minutes
+         * and reads as a hang. */
+        if (progress) progress(index + 1, LAYERS, progress_opaque);
+    }
     OP(h3_gpu_layer_norm_f32(vae->gpu, vae->norm, vae->hidden,
         vae->norm_out_w, vae->norm_out_b, vae->sequence, HIDDEN, 1e-5f),
        "tiled video VAE output LayerNorm");
@@ -849,8 +872,11 @@ static int decoder_decode_chunk(h3_video_vae_decoder *decoder,
     }
     int frame_count = selected_frame >= 0 ? 1 : FIRST_CHUNK_FRAMES;
     int ok = 1;
+    decoder->progress_tiles = tile_count;
     for (int tile_y = 0; tile_y < decoder->y_axis.count && ok; tile_y++)
         for (int tile_x = 0; tile_x < decoder->x_axis.count && ok; tile_x++) {
+            decoder->progress_tile =
+                tile_y * decoder->x_axis.count + tile_x;
             float *input = extract_latent_tile(
                 normalized_latent, latent_time, decoder->latent_h,
                 decoder->latent_w, chunk * 5,
@@ -866,7 +892,10 @@ static int decoder_decode_chunk(h3_video_vae_decoder *decoder,
             ok = prepare_input(&decoder->vae, input,
                                decoder->latent_mean, decoder->latent_std,
                                error, error_size) &&
-                 run_resident_tile(&decoder->vae, error, error_size);
+                 run_resident_tile(&decoder->vae,
+                                   decoder->progress ? decoder_tile_progress
+                                                     : NULL,
+                                   decoder, error, error_size);
             free(input);
             if (!ok) break;
             h3_video_frames tile;
@@ -948,6 +977,14 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
         return NULL;
     }
     return decoder;
+}
+
+void h3_video_vae_decoder_set_progress(h3_video_vae_decoder *decoder,
+                                       h3_video_vae_progress progress,
+                                       void *progress_opaque) {
+    if (!decoder) return;
+    decoder->progress = progress;
+    decoder->progress_opaque = progress_opaque;
 }
 
 int h3_video_vae_decoder_preview(h3_video_vae_decoder *decoder,
@@ -1123,7 +1160,7 @@ static int decode_chunked(const char *weight_directory,
                 free_tensor(&vae.latent);
                 ok = prepare_input(&vae, input, latent_mean, latent_std,
                                    error, error_size) &&
-                     run_resident_tile(&vae, error, error_size);
+                     run_resident_tile(&vae, NULL, NULL, error, error_size);
                 free(input);
                 if (!ok) break;
                 h3_video_frames tile;

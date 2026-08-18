@@ -24,7 +24,7 @@ mkdir -p outputs
 
 `--info` checks the model layout and prints the selected Metal device without
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
-reference.
+reference. Use `./h3 --version` to print the h3 version without loading a model.
 
 The model directory can also be supplied through `H3_MODEL_DIR`:
 
@@ -350,6 +350,14 @@ prompt, seed, resolution, frame count, and step count.
   factor without resizing the generated video or the encoded terminal image.
 - `--frames-dir DIR` writes final callback frames as PPM files. Intermediate
   `--show` previews are not written there.
+- Single-shot generation takes a non-blocking per-output lock. A concurrent
+  process targeting the same output or `--frames-dir` exits with an error;
+  separate output paths and frame directories can still run in parallel.
+- Lock files use the `.h3.lock` suffix and contain the owning process ID. They
+  are released by the OS if the process exits unexpectedly.
+- All generation sessions also take a global process lock at
+  `/tmp/h3-process.h3.lock`, so Metal and unified-memory use is serialized.
+  Set `H3_PROCESS_LOCK` to use a different lock location.
 - `-o ''` disables MP4 encoding; combine it with `--frames-dir` when FFmpeg is
   unavailable.
 - `--profile` reports phase wall time, Metal encoding/wait time, peak live

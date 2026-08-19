@@ -1,6 +1,7 @@
 #include "h3.h"
 #include "h3_cli.h"
 #include "h3_host.h"
+#include "h3_log.h"
 #include "h3_terminal.h"
 
 #include <errno.h>
@@ -109,6 +110,7 @@ static void usage(const char *program) {
         "      --show             Display a frame after every denoising step (M5)\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase Metal timing and allocation data\n"
+        "      --log-file PATH    Append CLI diagnostics and progress to PATH\n"
         "      --info             Inspect model/device without mapping weights\n"
         "  -v, --version          Show h3 version\n"
         "  -h, --help             Show this help\n",
@@ -218,6 +220,7 @@ static int cli_progress(const char *phase, int completed, int total,
     state->total = total;
     state->active = completed < total;
     fprintf(stderr, "\r%-25s %4d/%-4d", phase, completed, total);
+    h3_log_progress(phase, completed, total);
     if (!state->active) fputc('\n', stderr);
     fflush(stderr);
     return 0;
@@ -303,7 +306,7 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+           OPT_PROFILE, OPT_INFO, OPT_LOG_FILE };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -355,6 +358,7 @@ int main(int argc, char **argv) {
         {"show", no_argument, NULL, OPT_SHOW},
         {"zoom", required_argument, NULL, OPT_ZOOM},
         {"profile", no_argument, NULL, OPT_PROFILE},
+        {"log-file", required_argument, NULL, OPT_LOG_FILE},
         {"info", no_argument, NULL, OPT_INFO},
         {"version", no_argument, NULL, 'v'},
         {"help", no_argument, NULL, 'h'},
@@ -370,6 +374,8 @@ int main(int argc, char **argv) {
     int show = 0;
     int profile = 0;
     int info = 0;
+    const char *log_file = NULL;
+    h3_log log = {0};
     int frames_given = 0;
     int seconds_given = 0;
     int seed_given = 0;
@@ -517,28 +523,39 @@ int main(int argc, char **argv) {
                 }
                 break;
             case OPT_PROFILE: profile = 1; break;
+            case OPT_LOG_FILE: log_file = optarg; break;
             case OPT_INFO: info = 1; break;
             default: usage(argv[0]); return 2;
         }
     }
+    if (!h3_log_open(&log, log_file)) {
+        fprintf(stderr, "h3: cannot open log file %s: %s\n", log_file,
+                strerror(errno));
+        return 1;
+    }
+    h3_log_set_active(&log);
     const char *env_model_dir = getenv("H3_MODEL_DIR");
     if ((!model_dir || !*model_dir) && env_model_dir && *env_model_dir) {
         model_dir = env_model_dir;
     }
     if (!model_dir) {
         usage(argv[0]);
+        h3_log_close(&log);
         return 2;
     }
     if (frames_given && seconds_given) {
         fprintf(stderr, "h3: --seconds and --frames are mutually exclusive\n");
+        h3_log_close(&log);
         return 2;
     }
     int needs_process_lock = prompt || !info;
     if (needs_process_lock) {
         const char *lock_target = getenv("H3_PROCESS_LOCK");
         if (!lock_target || !*lock_target) lock_target = "/tmp/h3-process";
-        if (!acquire_lock(&process_guard, lock_target, "generation process"))
+        if (!acquire_lock(&process_guard, lock_target, "generation process")) {
+            h3_log_close(&log);
             return 1;
+        }
     }
     if (prompt && params.steps >= 2 && params.steps <= 7 &&
         params.denoise_reuse > 1) {
@@ -552,17 +569,20 @@ int main(int argc, char **argv) {
         errno != EEXIST) {
         fprintf(stderr, "h3: cannot create frames directory %s: %s\n",
                 cli.frames_dir, strerror(errno));
+        h3_log_close(&log);
         return 1;
     }
     if (prompt && output && *output &&
         !acquire_lock(&output_guard, output, "output")) {
         release_lock(&process_guard);
+        h3_log_close(&log);
         return 1;
     }
     if (prompt && cli.frames_dir &&
         !acquire_lock(&frames_guard, cli.frames_dir, "frames directory")) {
         release_lock(&output_guard);
         release_lock(&process_guard);
+        h3_log_close(&log);
         return 1;
     }
     if (profile) setenv("H3_PROFILE", "1", 1);
@@ -572,6 +592,7 @@ int main(int argc, char **argv) {
         release_lock(&frames_guard);
         release_lock(&output_guard);
         release_lock(&process_guard);
+        h3_log_close(&log);
         return 1;
     }
     if (info) print_info(ctx);
@@ -600,6 +621,7 @@ int main(int argc, char **argv) {
             release_lock(&frames_guard);
             release_lock(&output_guard);
             release_lock(&process_guard);
+            h3_log_close(&log);
             return 1;
         }
         h3_result_free(result);
@@ -613,8 +635,10 @@ int main(int argc, char **argv) {
         int cli_status = h3_cli_run(ctx, model_dir, &params, show, seed_given);
         h3_free(ctx);
         release_lock(&process_guard);
+        h3_log_close(&log);
         return cli_status;
     }
     h3_free(ctx);
+    h3_log_close(&log);
     return 0;
 }

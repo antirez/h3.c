@@ -2,6 +2,7 @@
 
 #include "h3_ffmpeg.h"
 #include "h3_host.h"
+#include "h3_log.h"
 #include "h3_terminal.h"
 #include "linenoise.h"
 
@@ -120,6 +121,7 @@ static int cli_progress(const char *phase, int completed, int total,
     state->total = total;
     state->progress_active = completed < total;
     fprintf(stderr, "\r%-25s %4d/%-4d", phase, completed, total);
+    h3_log_progress(phase, completed, total);
     if (!state->progress_active) fputc('\n', stderr);
     fflush(stderr);
     return 0;

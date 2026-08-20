@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -12,8 +13,17 @@ class ImageConversionError(RuntimeError):
 
 
 CommandRunner = Callable[[tuple[str, ...]], None]
-CONVERTIBLE_REFERENCE_SUFFIXES = frozenset((".heic", ".heif"))
-REFERENCE_IMAGE_FILE_FILTER = "Immagini (*.png *.jpg *.jpeg *.heic *.heif *.webp)"
+CONVERTIBLE_REFERENCE_SUFFIXES = (".heic", ".heif")
+REFERENCE_IMAGE_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    *CONVERTIBLE_REFERENCE_SUFFIXES,
+    ".webp",
+)
+REFERENCE_IMAGE_FILE_FILTER = "Immagini (" + " ".join(
+    f"*{suffix}" for suffix in REFERENCE_IMAGE_SUFFIXES
+) + ")"
 
 
 def requires_png_conversion(source: Path) -> bool:
@@ -51,19 +61,27 @@ def convert_reference_image(
         str(temporary),
     )
     try:
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            run(command)
-            signature = temporary.read_bytes()[:8]
-        except (OSError, subprocess.SubprocessError) as error:
-            raise ImageConversionError(
-                "Non sono riuscito a convertire l’immagine HEIC con sips."
-            ) from error
+        output_dir.mkdir(parents=True, exist_ok=True)
+        run(command)
+        signature = temporary.read_bytes()[:8]
         if signature != b"\x89PNG\r\n\x1a\n":
             raise ImageConversionError(
                 "La conversione HEIC non ha prodotto un file PNG valido."
             )
         temporary.replace(destination)
         return destination
+    except ImageConversionError:
+        raise
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ImageConversionError(
+            "Non sono riuscito a convertire o salvare l’immagine HEIC."
+        ) from error
     finally:
-        temporary.unlink(missing_ok=True)
+        active_error = sys.exc_info()[0] is not None
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            if not active_error:
+                raise ImageConversionError(
+                    "Non sono riuscito a rimuovere il file temporaneo HEIC."
+                ) from cleanup_error

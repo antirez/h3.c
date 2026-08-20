@@ -135,6 +135,62 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn("HEIC convertito", window.reference_status.text())
             window.close()
 
+    def test_changing_video_output_reconverts_heic_beside_new_output(self) -> None:
+        from gui.window import MainWindow
+
+        conversions: list[Path] = []
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            (repo / "h3").touch()
+            model = repo / "MiniMax-H3"
+            model.mkdir()
+            source = repo / "IMG_4621.HEIC"
+            source.write_bytes(b"heic")
+
+            def fake_converter(image: Path, output_dir: Path) -> Path:
+                conversions.append(output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                converted = output_dir / "IMG_4621-converted.png"
+                converted.write_bytes(b"png")
+                return converted
+
+            runner = FakeRunner()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                runner=runner,
+                load_preferences=False,
+                reference_converter=fake_converter,
+            )
+            first_output = repo / "first" / "video.mp4"
+            second_output = repo / "second" / "video.mp4"
+            window.set_paths(
+                model_dir=model,
+                reference_image=None,
+                output_path=first_output,
+            )
+            window.set_prompt("Michela cammina sulla spiaggia.")
+            window.set_reference_image(source)
+            window.output_edit.setText(str(second_output))
+
+            window.generate_button.click()
+
+            self.assertEqual(
+                conversions,
+                [
+                    first_output.parent / "reference-images",
+                    second_output.parent / "reference-images",
+                ],
+            )
+            self.assertEqual(
+                runner.settings.reference_image,
+                second_output.parent
+                / "reference-images"
+                / "IMG_4621-converted.png",
+            )
+            runner.running = False
+            window.close()
+
     def test_persists_complete_generation_configuration(self) -> None:
         from gui.window import MainWindow
 

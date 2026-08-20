@@ -78,6 +78,8 @@ class MainWindow(QMainWindow):
         self._settings = settings_store or QSettings("h3-metal", "H3 Studio")
         self._preview_temp: tempfile.TemporaryDirectory[str] | None = None
         self._last_output: Path | None = None
+        self._reference_source: Path | None = None
+        self._converted_reference: Path | None = None
         self._active_preset = recommended_preset_name(mac_info)
         self._preset_buttons: dict[str, QPushButton] = {}
         self._bridge = RunnerBridge(self)
@@ -425,6 +427,8 @@ class MainWindow(QMainWindow):
         reference_image: Path | None,
         output_path: Path,
     ) -> None:
+        self._reference_source = None
+        self._converted_reference = None
         self.model_edit.setText(str(model_dir))
         self.reference_edit.setText(str(reference_image) if reference_image else "")
         self.output_edit.setText(str(output_path))
@@ -437,16 +441,12 @@ class MainWindow(QMainWindow):
 
     def set_reference_image(self, source: Path) -> Path:
         is_heic = requires_png_conversion(source)
-        output_text = self.output_edit.text().strip()
-        output_dir = (
-            Path(output_text).expanduser().resolve().parent
-            if output_text
-            else self.default_output_dir
-        )
         converted = self.reference_converter(
             source,
-            output_dir / "reference-images",
+            self._reference_output_dir(),
         )
+        self._reference_source = source.expanduser() if is_heic else None
+        self._converted_reference = converted.expanduser() if is_heic else None
         self.reference_edit.setText(str(converted))
         self.reference_edit.setCursorPosition(0)
         if is_heic:
@@ -459,12 +459,40 @@ class MainWindow(QMainWindow):
             )
         return converted
 
+    def _reference_output_dir(self) -> Path:
+        output_text = self.output_edit.text().strip()
+        output_dir = (
+            Path(output_text).expanduser().resolve().parent
+            if output_text
+            else self.default_output_dir
+        )
+        return output_dir / "reference-images"
+
     def _convert_reference_field(self) -> bool:
         text = self.reference_edit.text().strip()
-        if not text or not requires_png_conversion(Path(text)):
+        if not text:
+            self._reference_source = None
+            self._converted_reference = None
+            return True
+        current = Path(text).expanduser()
+        if not requires_png_conversion(current):
+            if (
+                self._reference_source is None
+                or self._converted_reference is None
+                or current.resolve() != self._converted_reference.resolve()
+            ):
+                self._reference_source = None
+                self._converted_reference = None
+                return True
+            if current.resolve().parent == self._reference_output_dir().resolve():
+                return True
+        source = (
+            current if requires_png_conversion(current) else self._reference_source
+        )
+        if source is None:
             return True
         try:
-            self.set_reference_image(Path(text).expanduser())
+            self.set_reference_image(source)
         except ImageConversionError as error:
             QMessageBox.critical(self, "Conversione HEIC non riuscita", str(error))
             return False
@@ -695,6 +723,7 @@ class MainWindow(QMainWindow):
         reference = self._setting_text(
             "reference_image", self.reference_edit.text()
         )
+        reference_source = self._setting_text("reference_source", "")
         output = self._setting_text("output_path", self.output_edit.text())
         prompt = self._setting_text("prompt", "")
         preset = self._setting_text("preset", self._active_preset)
@@ -741,6 +770,12 @@ class MainWindow(QMainWindow):
         self.reference_edit.setCursorPosition(0)
         self.output_edit.setCursorPosition(0)
         self.prompt_edit.setPlainText(prompt)
+        if reference_source and requires_png_conversion(Path(reference_source)):
+            self._reference_source = Path(reference_source).expanduser()
+            self._converted_reference = Path(reference).expanduser()
+        else:
+            self._reference_source = None
+            self._converted_reference = None
 
     def _setting_text(self, key: str, default: str) -> str:
         value = self._settings.value(key, default)
@@ -768,6 +803,10 @@ class MainWindow(QMainWindow):
             return
         self._settings.setValue("model_dir", self.model_edit.text())
         self._settings.setValue("reference_image", self.reference_edit.text())
+        self._settings.setValue(
+            "reference_source",
+            str(self._reference_source) if self._reference_source else "",
+        )
         self._settings.setValue("output_path", self.output_edit.text())
         self._settings.setValue("prompt", self.prompt_edit.toPlainText())
         self._settings.setValue("preset", self._active_preset)

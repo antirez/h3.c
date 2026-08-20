@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "h3-studio"
+version = "0.1.0"
+description = "Optional PySide6 desktop interface for h3-metal"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.10.1,<7"]
+license = "MIT"
+
+[project.optional-dependencies]
+dev = ["mypy>=1.19,<2"]
+
+[project.gui-scripts]
+h3-studio = "gui.main:main"
+
+[tool.setuptools.packages.find]
+include = ["gui*"]
+exclude = ["gui.tests*"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["gui"]
+exclude = ["gui/tests"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true

@@ -17,9 +17,33 @@ LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity clean
+.PHONY: all test parity real-parity gui-setup gui gui-test gui-app clean
+
+PYTHON ?= python3
+GUI_VENV ?= .venv-gui
+GUI_PYTHON := $(GUI_VENV)/bin/python
 
 all: h3 libh3.a
+
+gui-setup:
+	@test -x $(GUI_PYTHON) || $(PYTHON) -m venv $(GUI_VENV)
+	$(GUI_PYTHON) -m pip install -e .
+
+gui: h3 gui-setup
+	$(GUI_PYTHON) -m gui.main
+
+gui-test: h3 gui-setup
+	$(GUI_PYTHON) -m pip install -e ".[dev]"
+	$(GUI_PYTHON) -m mypy gui
+	QT_QPA_PLATFORM=offscreen $(GUI_PYTHON) -m unittest discover -s gui/tests -t .
+
+gui-app: h3 gui-setup
+	$(GUI_VENV)/bin/pyside6-deploy gui/main.py --name H3Studio --force
+	mkdir -p gui/H3Studio.app/Contents/Resources
+	cp h3 h3_shaders.metal gui/H3Studio.app/Contents/Resources/
+	chmod +x gui/H3Studio.app/Contents/Resources/h3
+	codesign --force --deep --sign - gui/H3Studio.app
+	@echo "Built gui/H3Studio.app"
 
 h3: $(CLI_OBJ) $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)

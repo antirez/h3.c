@@ -26,6 +26,32 @@ mkdir -p outputs
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
+#### Optional macOS desktop interface
+
+H3 Studio is a PySide6 interface for choosing the model, reference image,
+prompt, output format, duration, speed preset, and advanced denoising options.
+It detects the Mac chip, unified memory, architecture, and Metal support; the
+default fast preset keeps live previews off because the resident preview VAE
+adds roughly 10 GiB of temporary model storage.
+
+Build `h3`, create the isolated GUI environment, and open the window with:
+
+```sh
+make gui
+```
+
+The first run downloads PySide6 into `.venv-gui`. To create a double-clickable
+Apple Silicon application containing the `h3` executable and Metal shader:
+
+```sh
+make gui-app
+open gui/H3Studio.app
+```
+
+The model weights remain external. Select `MiniMax-H3` on first launch; H3
+Studio remembers the model, reference, prompt, output, and preset paths through
+macOS preferences. Run the GUI contract tests with `make gui-test`.
+
 Without `-p`, the same binary starts an Iris-style interactive session:
 
 ```sh
@@ -340,6 +366,9 @@ prompt, seed, resolution, frame count, and step count.
   factor without resizing the generated video or the encoded terminal image.
 - `--frames-dir DIR` writes final callback frames as PPM files. Intermediate
   `--show` previews are not written there.
+- `--preview-dir DIR` writes one complete PPM preview after every denoising
+  transition. It is intended for graphical front ends and has the same preview
+  VAE memory and decode cost as `--show`.
 - `-o ''` disables MP4 encoding; combine it with `--frames-dir` when FFmpeg is
   unavailable.
 - `--profile` reports phase wall time, Metal encoding/wait time, peak live

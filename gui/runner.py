@@ -29,6 +29,15 @@ class GenerationSettings:
     ssd_streaming: bool
     live_preview: bool
     preview_dir: Path | None = None
+    additional_reference_images: tuple[Path, ...] = ()
+    reference_image_size: str = "max"
+    token_reduction: bool = False
+    use_int8_row_fc2: bool = False
+
+    @property
+    def reference_images(self) -> tuple[Path, ...]:
+        primary = (self.reference_image,) if self.reference_image is not None else ()
+        return primary + self.additional_reference_images
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,15 +294,10 @@ class H3Runner:
 
 def build_h3_command(executable: Path, settings: GenerationSettings) -> list[str]:
     command = [str(executable), "--profile", "-d", str(settings.model_dir)]
-    if settings.reference_image is not None:
-        command.extend(
-            (
-                "--ref-image",
-                str(settings.reference_image),
-                "--ref-image-size",
-                "max",
-            )
-        )
+    for reference_image in settings.reference_images:
+        command.extend(("--ref-image", str(reference_image)))
+    if settings.reference_images:
+        command.extend(("--ref-image-size", settings.reference_image_size))
     command.extend(("-p", settings.prompt))
     command.extend(("--width", str(settings.width), "--height", str(settings.height)))
     if settings.render_width is not None and settings.render_height is not None:
@@ -322,6 +326,10 @@ def build_h3_command(executable: Path, settings: GenerationSettings) -> list[str
     command.extend(("--seed", str(settings.seed)))
     if settings.ssd_streaming:
         command.append("--ssd-streaming")
+    if settings.token_reduction:
+        command.append("--token-reduction")
+    if settings.use_int8_row_fc2:
+        command.append("--use-int8-row-fc2")
     if settings.live_preview and settings.preview_dir is not None:
         command.extend(("--preview-dir", str(settings.preview_dir)))
     command.extend(("-o", str(settings.output_path)))

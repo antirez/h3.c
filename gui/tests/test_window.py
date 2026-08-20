@@ -84,6 +84,82 @@ class MainWindowTests(unittest.TestCase):
             )
             window.close()
 
+    def test_additional_reference_images_keep_their_picture_order(self) -> None:
+        from gui.window import MainWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            primary = repo / "front.png"
+            profile = repo / "profile.png"
+            full_body = repo / "full-body.png"
+            for image in (primary, profile, full_body):
+                image.touch()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+            window.set_paths(
+                model_dir=repo / "MiniMax-H3",
+                reference_image=primary,
+                output_path=repo / "outputs" / "video.mp4",
+            )
+
+            window.add_reference_images((profile, full_body))
+            settings = window.generation_settings()
+
+            self.assertEqual(
+                settings.reference_images,
+                (primary, profile.resolve(), full_body.resolve()),
+            )
+            self.assertEqual(window.additional_references_list.count(), 2)
+
+            window.additional_references_list.setCurrentRow(1)
+            window.move_reference_up_button.click()
+            self.assertEqual(
+                window.generation_settings().reference_images,
+                (primary, full_body.resolve(), profile.resolve()),
+            )
+            window.remove_reference_button.click()
+            self.assertEqual(
+                window.generation_settings().reference_images,
+                (primary, profile.resolve()),
+            )
+            window.close()
+
+    def test_input_preview_shows_all_selected_reference_images(self) -> None:
+        from gui.window import MainWindow
+
+        assert QApplication is not None
+        assert QColor is not None
+        assert QImage is not None
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            first = repo / "front.png"
+            second = repo / "profile.png"
+            for path, color in ((first, "#42c98c"), (second, "#e9b866")):
+                image = QImage(320, 240, QImage.Format.Format_RGB32)
+                image.fill(QColor(color))
+                self.assertTrue(image.save(str(path), "PNG"))
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+
+            window.set_reference_image(first)
+            window.add_reference_images((second,))
+            QApplication.processEvents()
+
+            self.assertEqual(
+                window.input_preview.reference_paths,
+                (first.resolve(), second.resolve()),
+            )
+            self.assertIs(window.preview_tabs.currentWidget(), window.input_preview)
+            window.close()
+
     def test_blank_output_is_rejected_before_settings_are_built(self) -> None:
         from gui.window import MainWindow
 
@@ -194,7 +270,67 @@ class MainWindowTests(unittest.TestCase):
             runner.running = False
             window.close()
 
-    def test_persists_complete_generation_configuration(self) -> None:
+    def test_all_heic_references_follow_the_final_output_folder(self) -> None:
+        from gui.window import MainWindow
+
+        conversions: list[tuple[str, Path]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            (repo / "h3").touch()
+            model = repo / "MiniMax-H3"
+            model.mkdir()
+            front = repo / "front.HEIC"
+            profile = repo / "profile.HEIC"
+            front.write_bytes(b"heic")
+            profile.write_bytes(b"heic")
+
+            def fake_converter(image: Path, output_dir: Path) -> Path:
+                conversions.append((image.name, output_dir))
+                output_dir.mkdir(parents=True, exist_ok=True)
+                converted = output_dir / f"{image.stem}.png"
+                converted.write_bytes(b"png")
+                return converted
+
+            runner = FakeRunner()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=runner,
+                load_preferences=False,
+                reference_converter=fake_converter,
+            )
+            first_output = repo / "first" / "video.mp4"
+            final_output = repo / "final" / "video.mp4"
+            window.set_paths(
+                model_dir=model,
+                reference_image=None,
+                output_path=first_output,
+            )
+            window.set_reference_image(front)
+            window.add_reference_images((profile,))
+            window.set_prompt("Picture 1 and Picture 2 show the same person.")
+            window.output_edit.setText(str(final_output))
+
+            window.generate_button.click()
+
+            self.assertEqual(
+                runner.settings.reference_images,
+                (
+                    final_output.parent / "reference-images" / "front.png",
+                    final_output.parent / "reference-images" / "profile.png",
+                ),
+            )
+            self.assertEqual(
+                conversions[-2:],
+                [
+                    ("front.HEIC", final_output.parent / "reference-images"),
+                    ("profile.HEIC", final_output.parent / "reference-images"),
+                ],
+            )
+            runner.running = False
+            window.close()
+
+    def test_persists_technical_settings_but_starts_with_fresh_content(self) -> None:
         from gui.window import MainWindow
 
         assert QSettings is not None
@@ -217,6 +353,13 @@ class MainWindowTests(unittest.TestCase):
             first.steps_spin.setValue(12)
             first.seed_spin.setValue(99)
             first.ssd_streaming_check.setChecked(False)
+            first.reference_size_combo.setCurrentIndex(1)
+            first.token_reduction_check.setChecked(True)
+            first.int8_row_fc2_check.setChecked(True)
+            reference = repo / "previous-reference.png"
+            reference.touch()
+            first.set_reference_image(reference)
+            first.set_prompt("This prompt belongs only to the current session.")
             first.close()
             preferences.sync()
 
@@ -236,6 +379,13 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(settings.seed, 99)
             self.assertTrue(settings.live_preview)
             self.assertFalse(settings.ssd_streaming)
+            self.assertEqual(settings.reference_image_size, "match")
+            self.assertTrue(settings.token_reduction)
+            self.assertTrue(settings.use_int8_row_fc2)
+            self.assertEqual(restored.prompt_edit.toPlainText(), "")
+            self.assertEqual(restored.reference_edit.text(), "")
+            self.assertEqual(settings.reference_images, ())
+            self.assertEqual(restored.input_preview.reference_paths, ())
             restored.close()
 
     def test_live_preview_appears_and_resizes_with_the_window(self) -> None:

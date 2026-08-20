@@ -28,7 +28,7 @@ reference.
 
 #### Optional macOS desktop interface
 
-H3 Studio is a PySide6 interface for choosing the model, reference image,
+H3 Studio is a PySide6 interface for choosing the model, reference images,
 prompt, output format, duration, speed preset, and advanced denoising options.
 It detects the Mac chip, unified memory, architecture, and Metal support; the
 default fast preset keeps live previews off because the resident preview VAE
@@ -37,8 +37,14 @@ adds roughly 10 GiB of temporary model storage.
 The interface is English-only and responsive: it uses two resizable columns on
 wide windows, stacks them with scrolling on smaller windows, and includes a
 Custom preset that opens every advanced control without changing its current
-value. Progress is shown as three global stages (Preparation, Generation, and
-Decode & export), while the optional preview follows the available panel size.
+value. The advanced panel can add, remove, and reorder up to nine image
+references; their order is passed to Ref2VA as `Picture 1`, `Picture 2`, and so
+on. It also exposes reference sizing, token reduction, M5 INT8 row FC2, SSD
+streaming, seed, render canvas, layer count, and both reuse controls. The Preview
+column has separate Inputs and Generation tabs, so selected
+photos remain inspectable before denoising begins. Progress is shown as three
+global stages (Preparation, Generation, and Decode & export), while the optional
+live preview follows the available panel size.
 
 Build `h3`, create the isolated GUI environment, and open the window with:
 
@@ -55,11 +61,13 @@ open gui/H3Studio.app
 ```
 
 The model weights remain external. Select `MiniMax-H3` on first launch; H3
-Studio remembers the model, reference, prompt, output, and preset paths through
-macOS preferences. iPhone `.heic` and `.heif` references are converted
-automatically with the macOS `sips` utility; the original photo is left intact
-and the generated PNG is stored in the `reference-images` folder beside the
-output selected in the GUI. Run the GUI contract tests with `make gui-test`.
+Studio remembers model, output, preset, and technical generation choices through
+macOS preferences. Prompts and image references are deliberately session-only,
+so every new window starts with both fields empty. iPhone `.heic` and `.heif`
+references are converted automatically with the macOS `sips` utility; originals
+are left intact and the generated PNG files are stored in the `reference-images`
+folder beside the output selected in the GUI. Run the GUI contract tests with
+`make gui-test`.
 
 Without `-p`, the same binary starts an Iris-style interactive session:
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -48,7 +50,7 @@ from .runner import (
     RunResult,
     RunnerCallbacks,
 )
-from .widgets import ScalablePreviewLabel, SegmentedProgressBar
+from .widgets import ReferenceInputPreview, ScalablePreviewLabel, SegmentedProgressBar
 
 
 class RunnerBridge(QObject):
@@ -83,6 +85,8 @@ class MainWindow(QMainWindow):
         self._preview_received = False
         self._reference_source: Path | None = None
         self._converted_reference: Path | None = None
+        self._additional_reference_sources: list[Path] = []
+        self._additional_reference_images: list[Path] = []
         self._active_preset = recommended_preset_name(mac_info)
         self._preset_buttons: dict[str, QPushButton] = {}
         self._bridge = RunnerBridge(self)
@@ -245,6 +249,11 @@ class MainWindow(QMainWindow):
         self.render_height_spin = self._spin(0, 2048, "Native")
         self.seed_spin = self._spin(0, 2_147_483_647)
         self.ssd_streaming_check = QCheckBox("SSD streaming")
+        self.reference_size_combo = QComboBox()
+        self.reference_size_combo.addItem("Keep reference detail", "max")
+        self.reference_size_combo.addItem("Match output canvas", "match")
+        self.token_reduction_check = QCheckBox("Token reduction")
+        self.int8_row_fc2_check = QCheckBox("Fast INT8 row FC2 (M5)")
         fields = (
             ("Step", self.steps_spin),
             ("Layer", self.layers_spin),
@@ -260,7 +269,45 @@ class MainWindow(QMainWindow):
             box.addWidget(self._field_label(label))
             box.addWidget(widget)
             advanced.addLayout(box, row, column)
-        advanced.addWidget(self.ssd_streaming_check, 3, 0, 1, 3)
+        reference_size_box = QVBoxLayout()
+        reference_size_box.addWidget(self._field_label("Reference image sizing"))
+        reference_size_box.addWidget(self.reference_size_combo)
+        advanced.addLayout(reference_size_box, 3, 0)
+        advanced.addWidget(self.token_reduction_check, 3, 1)
+        advanced.addWidget(self.int8_row_fc2_check, 3, 2)
+        advanced.addWidget(self.ssd_streaming_check, 4, 0, 1, 3)
+        additional_box = QVBoxLayout()
+        additional_box.addWidget(self._field_label("Additional reference images"))
+        self.additional_references_list = QListWidget()
+        self.additional_references_list.setMinimumHeight(90)
+        additional_box.addWidget(self.additional_references_list)
+        additional_actions = QHBoxLayout()
+        self.add_reference_button = QPushButton("Add images…")
+        self.remove_reference_button = QPushButton("Remove")
+        self.move_reference_up_button = QPushButton("Move up")
+        self.move_reference_down_button = QPushButton("Move down")
+        self.add_reference_button.clicked.connect(self._choose_additional_references)
+        self.remove_reference_button.clicked.connect(self._remove_additional_reference)
+        self.move_reference_up_button.clicked.connect(
+            lambda: self._move_additional_reference(-1)
+        )
+        self.move_reference_down_button.clicked.connect(
+            lambda: self._move_additional_reference(1)
+        )
+        for button in (
+            self.add_reference_button,
+            self.remove_reference_button,
+            self.move_reference_up_button,
+            self.move_reference_down_button,
+        ):
+            additional_actions.addWidget(button)
+        additional_box.addLayout(additional_actions)
+        additional_box.addWidget(
+            self._field_label(
+                "Up to 9 pictures total. Their order defines Picture 1, Picture 2, …"
+            )
+        )
+        advanced.addLayout(additional_box, 5, 0, 1, 3)
         self.advanced_group.setVisible(False)
         controls_layout.addWidget(self.advanced_group)
         controls_layout.addStretch()
@@ -276,6 +323,11 @@ class MainWindow(QMainWindow):
         self.content_splitter.setStretchFactor(1, 9)
         self.content_splitter.setSizes((560, 460))
         right_layout.addWidget(self._section_label("Preview"))
+
+        self.preview_tabs = QTabWidget()
+        self.preview_tabs.setObjectName("previewTabs")
+        self.input_preview = ReferenceInputPreview()
+        self.preview_tabs.addTab(self.input_preview, "Inputs")
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setObjectName("previewPanel")
@@ -293,7 +345,8 @@ class MainWindow(QMainWindow):
         )
         self.preview_stack.addWidget(self.preview_placeholder)
         self.preview_stack.addWidget(self.preview_label)
-        right_layout.addWidget(self.preview_stack, 1)
+        self.preview_tabs.addTab(self.preview_stack, "Generation")
+        right_layout.addWidget(self.preview_tabs, 1)
 
         status_row = QHBoxLayout()
         self.phase_label = QLabel("Ready")
@@ -347,11 +400,15 @@ class MainWindow(QMainWindow):
             """
             QMainWindow { background: #171816; }
             QWidget#contentRoot, QWidget#controlsPanel, QWidget#previewColumn,
-            QScrollArea#contentScroll, QScrollArea#contentScroll > QWidget > QWidget {
+            QWidget#inputPreviewCards, QScrollArea#contentScroll,
+            QScrollArea#contentScroll > QWidget > QWidget,
+            QScrollArea#inputPreviewScroll,
+            QScrollArea#inputPreviewScroll > QWidget > QWidget {
                 background: #171816; border: 0;
             }
             QWidget { color: #f1f3ed; font-size: 13px; }
-            QFrame#hardwarePanel, QGroupBox, QStackedWidget#previewPanel {
+            QFrame#hardwarePanel, QFrame#inputCard, QGroupBox,
+            QStackedWidget#previewPanel, QTabWidget#previewTabs::pane {
                 background: #252723; border: 1px solid #41463e; border-radius: 9px;
             }
             QLabel#hardwareTitle { font-weight: 600; font-size: 15px; }
@@ -369,6 +426,10 @@ class MainWindow(QMainWindow):
             QPushButton#presetButton:checked, QPushButton#primaryButton {
                 background: #65c58e; color: #102218; border-color: #65c58e;
             }
+            QTabBar::tab { background: #2c2e2a; border: 1px solid #41463e;
+                padding: 7px 14px; }
+            QTabBar::tab:selected { background: #65c58e; color: #102218;
+                border-color: #65c58e; }
             QProgressBar { background: #353832; border: 0; border-radius: 3px; }
             QProgressBar::chunk { background: #65c58e; border-radius: 3px; }
             QSplitter::handle { background: #171816; }
@@ -442,11 +503,10 @@ class MainWindow(QMainWindow):
 
     def _set_default_paths(self) -> None:
         model = self.repo_root / "MiniMax-H3"
-        reference = self.repo_root.parent / "reference-images" / "michela-cutout-transparent.png"
         output = self.default_output_dir / "h3-studio.mp4"
         self.set_paths(
             model_dir=model,
-            reference_image=reference if reference.exists() else None,
+            reference_image=None,
             output_path=output,
         )
 
@@ -459,12 +519,16 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._reference_source = None
         self._converted_reference = None
+        self._additional_reference_sources.clear()
+        self._additional_reference_images.clear()
+        self._refresh_additional_reference_list()
         self.model_edit.setText(str(model_dir))
         self.reference_edit.setText(str(reference_image) if reference_image else "")
         self.output_edit.setText(str(output_path))
         self.model_edit.setCursorPosition(0)
         self.reference_edit.setCursorPosition(0)
         self.output_edit.setCursorPosition(0)
+        self._refresh_input_preview()
 
     def set_prompt(self, prompt: str) -> None:
         self.prompt_edit.setPlainText(prompt)
@@ -487,7 +551,117 @@ class MainWindow(QMainWindow):
             self.reference_status.setText(
                 "iPhone HEIC/HEIF photos are converted to PNG automatically."
             )
+        self._refresh_additional_reference_list()
         return converted
+
+    def add_reference_images(self, sources: tuple[Path, ...]) -> tuple[Path, ...]:
+        primary_count = 1 if self.reference_edit.text().strip() else 0
+        if primary_count + len(self._additional_reference_images) + len(sources) > 9:
+            raise ValueError("H3 supports at most 9 reference images.")
+        expanded_sources = tuple(source.expanduser().resolve() for source in sources)
+        converted_images: list[Path] = []
+        for source in expanded_sources:
+            converted = self.reference_converter(
+                source,
+                self._reference_output_dir(),
+            ).expanduser()
+            converted_images.append(converted)
+        self._additional_reference_sources.extend(expanded_sources)
+        self._additional_reference_images.extend(converted_images)
+        self._refresh_additional_reference_list()
+        return tuple(converted_images)
+
+    def _choose_additional_references(self) -> None:
+        selected, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add reference images",
+            "",
+            REFERENCE_IMAGE_FILE_FILTER,
+        )
+        if not selected:
+            return
+        try:
+            self.add_reference_images(tuple(Path(path) for path in selected))
+        except (ImageConversionError, ValueError) as error:
+            QMessageBox.warning(self, "Cannot add images", str(error))
+
+    def _refresh_additional_reference_list(self) -> None:
+        if not hasattr(self, "additional_references_list"):
+            return
+        selected_row = self.additional_references_list.currentRow()
+        self.additional_references_list.clear()
+        first_picture = 2 if self.reference_edit.text().strip() else 1
+        for index, image in enumerate(
+            self._additional_reference_images,
+            start=first_picture,
+        ):
+            self.additional_references_list.addItem(
+                f"Picture {index} · {image.name}"
+            )
+        if self._additional_reference_images:
+            self.additional_references_list.setCurrentRow(
+                min(max(selected_row, 0), len(self._additional_reference_images) - 1)
+            )
+        self._refresh_input_preview()
+
+    def _refresh_input_preview(self) -> None:
+        if not hasattr(self, "input_preview"):
+            return
+        primary_text = self.reference_edit.text().strip()
+        paths = (
+            (Path(primary_text).expanduser(),) if primary_text else ()
+        ) + tuple(self._additional_reference_images)
+        self.input_preview.set_references(paths)
+        self.preview_tabs.setCurrentWidget(self.input_preview)
+
+    def _remove_additional_reference(self) -> None:
+        row = self.additional_references_list.currentRow()
+        if row < 0:
+            return
+        del self._additional_reference_sources[row]
+        del self._additional_reference_images[row]
+        self._refresh_additional_reference_list()
+
+    def _move_additional_reference(self, offset: int) -> None:
+        row = self.additional_references_list.currentRow()
+        destination = row + offset
+        if row < 0 or destination < 0 or destination >= len(
+            self._additional_reference_images
+        ):
+            return
+        for values in (
+            self._additional_reference_sources,
+            self._additional_reference_images,
+        ):
+            values[row], values[destination] = values[destination], values[row]
+        self._refresh_additional_reference_list()
+        self.additional_references_list.setCurrentRow(destination)
+
+    def _convert_additional_references(self) -> bool:
+        output_dir = self._reference_output_dir().resolve()
+        converted_any = False
+        for index, (source, converted) in enumerate(
+            zip(
+                self._additional_reference_sources,
+                self._additional_reference_images,
+            )
+        ):
+            if not requires_png_conversion(source):
+                continue
+            if converted.resolve().parent == output_dir and converted.is_file():
+                continue
+            try:
+                self._additional_reference_images[index] = self.reference_converter(
+                    source,
+                    output_dir,
+                ).expanduser()
+            except ImageConversionError as error:
+                QMessageBox.critical(self, "HEIC conversion failed", str(error))
+                return False
+            converted_any = True
+        if converted_any:
+            self._refresh_additional_reference_list()
+        return True
 
     def _reference_output_dir(self) -> Path:
         output_text = self.output_edit.text().strip()
@@ -503,6 +677,7 @@ class MainWindow(QMainWindow):
         if not text:
             self._reference_source = None
             self._converted_reference = None
+            self._refresh_additional_reference_list()
             return True
         current = Path(text).expanduser()
         if not requires_png_conversion(current):
@@ -513,8 +688,10 @@ class MainWindow(QMainWindow):
             ):
                 self._reference_source = None
                 self._converted_reference = None
+                self._refresh_additional_reference_list()
                 return True
             if current.resolve().parent == self._reference_output_dir().resolve():
+                self._refresh_additional_reference_list()
                 return True
         source = (
             current if requires_png_conversion(current) else self._reference_source
@@ -545,6 +722,9 @@ class MainWindow(QMainWindow):
         self.render_height_spin.setValue(preset.render_height or 0)
         self.seed_spin.setValue(42)
         self.ssd_streaming_check.setChecked(preset.ssd_streaming)
+        self.reference_size_combo.setCurrentIndex(0)
+        self.token_reduction_check.setChecked(False)
+        self.int8_row_fc2_check.setChecked(False)
         index = self.duration_combo.findData(preset.seconds)
         if index >= 0:
             self.duration_combo.setCurrentIndex(index)
@@ -631,6 +811,10 @@ class MainWindow(QMainWindow):
             ssd_streaming=self.ssd_streaming_check.isChecked(),
             live_preview=self.live_preview_check.isChecked(),
             preview_dir=preview_dir,
+            additional_reference_images=tuple(self._additional_reference_images),
+            reference_image_size=str(self.reference_size_combo.currentData()),
+            token_reduction=self.token_reduction_check.isChecked(),
+            use_int8_row_fc2=self.int8_row_fc2_check.isChecked(),
         )
 
     def _validate(self, settings: GenerationSettings) -> str | None:
@@ -641,8 +825,11 @@ class MainWindow(QMainWindow):
             return "The model folder does not exist."
         if not settings.prompt:
             return "Enter a prompt."
-        if settings.reference_image is not None and not settings.reference_image.is_file():
-            return "The reference image does not exist."
+        for reference_image in settings.reference_images:
+            if not reference_image.is_file():
+                return f"Reference image does not exist: {reference_image}"
+        if len(settings.reference_images) > 9:
+            return "H3 supports at most 9 reference images."
         if settings.reuse > 1 and settings.core_reuse > 1:
             return "Reuse and core reuse cannot both be greater than 1."
         return None
@@ -650,7 +837,10 @@ class MainWindow(QMainWindow):
     def _start_generation(self) -> None:
         if self.runner.running:
             return
-        if not self._convert_reference_field():
+        if (
+            not self._convert_reference_field()
+            or not self._convert_additional_references()
+        ):
             return
         preview_dir = None
         if self.live_preview_check.isChecked():
@@ -679,6 +869,8 @@ class MainWindow(QMainWindow):
             if settings.live_preview
             else "Live preview is off for this generation."
         )
+        if settings.live_preview:
+            self.preview_tabs.setCurrentWidget(self.preview_stack)
         self.generate_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.open_button.setEnabled(False)
@@ -731,6 +923,7 @@ class MainWindow(QMainWindow):
             return
         self.preview_label.set_source_pixmap(pixmap)
         self.preview_stack.setCurrentWidget(self.preview_label)
+        self.preview_tabs.setCurrentWidget(self.preview_stack)
         self._preview_received = True
 
     def _on_finished(self, result: RunResult) -> None:
@@ -795,12 +988,7 @@ class MainWindow(QMainWindow):
 
     def _load_preferences(self) -> None:
         model = self._setting_text("model_dir", self.model_edit.text())
-        reference = self._setting_text(
-            "reference_image", self.reference_edit.text()
-        )
-        reference_source = self._setting_text("reference_source", "")
         output = self._setting_text("output_path", self.output_edit.text())
-        prompt = self._setting_text("prompt", "")
         preset = self._setting_text("preset", self._active_preset)
         if preset == "custom":
             self.activate_custom()
@@ -834,6 +1022,25 @@ class MainWindow(QMainWindow):
         self.ssd_streaming_check.setChecked(
             self._setting_bool("ssd_streaming", self.ssd_streaming_check.isChecked())
         )
+        reference_size = self._setting_text(
+            "reference_image_size",
+            str(self.reference_size_combo.currentData()),
+        )
+        reference_size_index = self.reference_size_combo.findData(reference_size)
+        if reference_size_index >= 0:
+            self.reference_size_combo.setCurrentIndex(reference_size_index)
+        self.token_reduction_check.setChecked(
+            self._setting_bool(
+                "token_reduction",
+                self.token_reduction_check.isChecked(),
+            )
+        )
+        self.int8_row_fc2_check.setChecked(
+            self._setting_bool(
+                "use_int8_row_fc2",
+                self.int8_row_fc2_check.isChecked(),
+            )
+        )
         self.live_preview_check.setChecked(
             self._setting_bool("live_preview", self.live_preview_check.isChecked())
         )
@@ -841,18 +1048,9 @@ class MainWindow(QMainWindow):
             self._setting_bool("advanced_visible", self.advanced_check.isChecked())
         )
         self.model_edit.setText(model)
-        self.reference_edit.setText(reference)
         self.output_edit.setText(output)
         self.model_edit.setCursorPosition(0)
-        self.reference_edit.setCursorPosition(0)
         self.output_edit.setCursorPosition(0)
-        self.prompt_edit.setPlainText(prompt)
-        if reference_source and requires_png_conversion(Path(reference_source)):
-            self._reference_source = Path(reference_source).expanduser()
-            self._converted_reference = Path(reference).expanduser()
-        else:
-            self._reference_source = None
-            self._converted_reference = None
 
     def _setting_text(self, key: str, default: str) -> str:
         value = self._settings.value(key, default)
@@ -879,13 +1077,14 @@ class MainWindow(QMainWindow):
         if not self._persistence_enabled:
             return
         self._settings.setValue("model_dir", self.model_edit.text())
-        self._settings.setValue("reference_image", self.reference_edit.text())
-        self._settings.setValue(
-            "reference_source",
-            str(self._reference_source) if self._reference_source else "",
-        )
         self._settings.setValue("output_path", self.output_edit.text())
-        self._settings.setValue("prompt", self.prompt_edit.toPlainText())
+        for transient_key in (
+            "prompt",
+            "reference_image",
+            "reference_source",
+            "reference_images",
+        ):
+            self._settings.remove(transient_key)
         self._settings.setValue("preset", self._active_preset)
         width, height = self.format_combo.currentData()
         self._settings.setValue("format_width", width)
@@ -900,6 +1099,18 @@ class MainWindow(QMainWindow):
         self._settings.setValue("seed", self.seed_spin.value())
         self._settings.setValue(
             "ssd_streaming", self.ssd_streaming_check.isChecked()
+        )
+        self._settings.setValue(
+            "reference_image_size",
+            self.reference_size_combo.currentData(),
+        )
+        self._settings.setValue(
+            "token_reduction",
+            self.token_reduction_check.isChecked(),
+        )
+        self._settings.setValue(
+            "use_int8_row_fc2",
+            self.int8_row_fc2_check.isChecked(),
         )
         self._settings.setValue("live_preview", self.live_preview_check.isChecked())
         self._settings.setValue("advanced_visible", self.advanced_check.isChecked())

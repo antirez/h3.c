@@ -82,6 +82,13 @@ class CommandTests(unittest.TestCase):
             seed=42,
             ssd_streaming=True,
             live_preview=False,
+            additional_reference_images=(
+                Path("/images/michela-profile.png"),
+                Path("/images/michela-full-body.png"),
+            ),
+            reference_image_size="match",
+            token_reduction=True,
+            use_int8_row_fc2=True,
         )
 
         command = build_h3_command(Path("/repo/h3"), settings)
@@ -95,8 +102,12 @@ class CommandTests(unittest.TestCase):
                 "/models/MiniMax-H3",
                 "--ref-image",
                 "/images/michela.png",
+                "--ref-image",
+                "/images/michela-profile.png",
+                "--ref-image",
+                "/images/michela-full-body.png",
                 "--ref-image-size",
-                "max",
+                "match",
                 "-p",
                 "Michela cammina sulla spiaggia e sorride.",
                 "--width",
@@ -118,6 +129,8 @@ class CommandTests(unittest.TestCase):
                 "--seed",
                 "42",
                 "--ssd-streaming",
+                "--token-reduction",
+                "--use-int8-row-fc2",
                 "-o",
                 "/videos/michela.mp4",
             ],

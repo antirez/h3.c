@@ -50,7 +50,10 @@ open gui/H3Studio.app
 
 The model weights remain external. Select `MiniMax-H3` on first launch; H3
 Studio remembers the model, reference, prompt, output, and preset paths through
-macOS preferences. Run the GUI contract tests with `make gui-test`.
+macOS preferences. iPhone `.heic` and `.heif` references are converted
+automatically with the macOS `sips` utility; the original photo is left intact
+and the generated PNG is stored in the `reference-images` folder beside the
+GUI outputs. Run the GUI contract tests with `make gui-test`.
 
 Without `-p`, the same binary starts an Iris-style interactive session:
 

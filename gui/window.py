@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .hardware import MacInfo
+from .image_converter import ImageConversionError, convert_reference_image
 from .presets import PRESET_ORDER, preset_for, recommended_preset_name
 from .runner import (
     GenerationSettings,
@@ -59,12 +61,14 @@ class MainWindow(QMainWindow):
         load_preferences: bool = True,
         default_output_dir: Path | None = None,
         settings_store: QSettings | None = None,
+        reference_converter: Callable[[Path, Path], Path] = convert_reference_image,
     ) -> None:
         super().__init__()
         self.repo_root = repo_root.resolve()
         self.mac_info = mac_info
         self.runner = runner
         self.default_output_dir = default_output_dir or self.repo_root / "outputs"
+        self.reference_converter = reference_converter
         self._persistence_enabled = load_preferences
         self._settings = settings_store or QSettings("h3-metal", "H3 Studio")
         self._preview_temp: tempfile.TemporaryDirectory[str] | None = None
@@ -155,6 +159,13 @@ class MainWindow(QMainWindow):
             image=True,
             optional=True,
         )
+        self.reference_edit.editingFinished.connect(self._convert_reference_field)
+        self.reference_status = QLabel(
+            "Le foto HEIC/HEIF dell’iPhone vengono convertite automaticamente in PNG."
+        )
+        self.reference_status.setWordWrap(True)
+        self.reference_status.setObjectName("secondaryText")
+        controls_layout.addWidget(self.reference_status)
 
         controls_layout.addWidget(self._field_label("Prompt"))
         self.prompt_edit = QTextEdit()
@@ -383,6 +394,8 @@ class MainWindow(QMainWindow):
                 selected, _ = QFileDialog.getOpenFileName(self, label, edit.text())
             if selected:
                 edit.setText(selected)
+                if image:
+                    self._convert_reference_field()
 
         browse.clicked.connect(choose)
         row.addWidget(edit, 1)
@@ -416,6 +429,35 @@ class MainWindow(QMainWindow):
 
     def set_prompt(self, prompt: str) -> None:
         self.prompt_edit.setPlainText(prompt)
+
+    def set_reference_image(self, source: Path) -> Path:
+        is_heic = source.suffix.lower() in (".heic", ".heif")
+        converted = self.reference_converter(
+            source,
+            self.default_output_dir / "reference-images",
+        )
+        self.reference_edit.setText(str(converted))
+        self.reference_edit.setCursorPosition(0)
+        if is_heic:
+            self.reference_status.setText(
+                f"HEIC convertito automaticamente: {converted}"
+            )
+        else:
+            self.reference_status.setText(
+                "Le foto HEIC/HEIF dell’iPhone vengono convertite automaticamente in PNG."
+            )
+        return converted
+
+    def _convert_reference_field(self) -> bool:
+        text = self.reference_edit.text().strip()
+        if not text or Path(text).suffix.lower() not in (".heic", ".heif"):
+            return True
+        try:
+            self.set_reference_image(Path(text).expanduser())
+        except ImageConversionError as error:
+            QMessageBox.critical(self, "Conversione HEIC non riuscita", str(error))
+            return False
+        return True
 
     def apply_preset(self, name: str) -> None:
         preset = preset_for(name, self.mac_info)
@@ -529,6 +571,8 @@ class MainWindow(QMainWindow):
 
     def _start_generation(self) -> None:
         if self.runner.running:
+            return
+        if not self._convert_reference_field():
             return
         preview_dir = None
         if self.live_preview_check.isChecked():

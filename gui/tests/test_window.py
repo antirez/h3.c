@@ -98,6 +98,41 @@ class MainWindowTests(unittest.TestCase):
                 window.generation_settings()
             window.close()
 
+    def test_selecting_heic_reference_uses_the_converted_png(self) -> None:
+        from gui.window import MainWindow
+
+        conversions: list[tuple[Path, Path]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            source = repo / "IMG_4621.HEIC"
+            source.write_bytes(b"heic")
+            converted = repo / "outputs" / "reference-images" / "IMG_4621.png"
+
+            def fake_converter(image: Path, output_dir: Path) -> Path:
+                conversions.append((image, output_dir))
+                converted.parent.mkdir(parents=True)
+                converted.write_bytes(b"png")
+                return converted
+
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                runner=FakeRunner(),
+                load_preferences=False,
+                reference_converter=fake_converter,
+            )
+
+            selected = window.set_reference_image(source)
+
+            self.assertEqual(selected, converted)
+            self.assertEqual(window.reference_edit.text(), str(converted))
+            self.assertEqual(
+                conversions,
+                [(source, repo.resolve() / "outputs" / "reference-images")],
+            )
+            self.assertIn("HEIC convertito", window.reference_status.text())
+            window.close()
+
     def test_persists_complete_generation_configuration(self) -> None:
         from gui.window import MainWindow
 

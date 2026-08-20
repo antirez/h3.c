@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -10,6 +12,12 @@ class ImageConversionError(RuntimeError):
 
 
 CommandRunner = Callable[[tuple[str, ...]], None]
+CONVERTIBLE_REFERENCE_SUFFIXES = frozenset((".heic", ".heif"))
+REFERENCE_IMAGE_FILE_FILTER = "Immagini (*.png *.jpg *.jpeg *.heic *.heif *.webp)"
+
+
+def requires_png_conversion(source: Path) -> bool:
+    return source.suffix.lower() in CONVERTIBLE_REFERENCE_SUFFIXES
 
 
 def _run_command(command: tuple[str, ...]) -> None:
@@ -24,13 +32,15 @@ def convert_reference_image(
 ) -> Path:
     """Convert an iPhone HEIC/HEIF reference to PNG, preserving the original."""
     source = source.expanduser().resolve()
-    if source.suffix.lower() not in (".heic", ".heif"):
+    if not requires_png_conversion(source):
         return source
     if not source.is_file():
         raise ImageConversionError(f"Immagine HEIC non trovata: {source}")
 
     output_dir = output_dir.expanduser().resolve()
-    destination = output_dir / f"{source.stem}.png"
+    source_id = hashlib.sha256(str(source).encode()).hexdigest()[:8]
+    destination = output_dir / f"{source.stem}-{source_id}.png"
+    temporary = output_dir / f".{destination.stem}-{uuid.uuid4().hex}.tmp.png"
     command = (
         "/usr/bin/sips",
         "-s",
@@ -38,18 +48,22 @@ def convert_reference_image(
         "png",
         str(source),
         "--out",
-        str(destination),
+        str(temporary),
     )
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        run(command)
-        signature = destination.read_bytes()[:8]
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ImageConversionError(
-            "Non sono riuscito a convertire l’immagine HEIC con sips."
-        ) from error
-    if signature != b"\x89PNG\r\n\x1a\n":
-        raise ImageConversionError(
-            "La conversione HEIC non ha prodotto un file PNG valido."
-        )
-    return destination
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            run(command)
+            signature = temporary.read_bytes()[:8]
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ImageConversionError(
+                "Non sono riuscito a convertire l’immagine HEIC con sips."
+            ) from error
+        if signature != b"\x89PNG\r\n\x1a\n":
+            raise ImageConversionError(
+                "La conversione HEIC non ha prodotto un file PNG valido."
+            )
+        temporary.replace(destination)
+        return destination
+    finally:
+        temporary.unlink(missing_ok=True)

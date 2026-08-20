@@ -33,7 +33,12 @@ from PySide6.QtWidgets import (
 )
 
 from .hardware import MacInfo
-from .image_converter import ImageConversionError, convert_reference_image
+from .image_converter import (
+    REFERENCE_IMAGE_FILE_FILTER,
+    ImageConversionError,
+    convert_reference_image,
+    requires_png_conversion,
+)
 from .presets import PRESET_ORDER, preset_for, recommended_preset_name
 from .runner import (
     GenerationSettings,
@@ -388,7 +393,7 @@ class MainWindow(QMainWindow):
                     self,
                     label,
                     edit.text(),
-                    "Immagini (*.png *.jpg *.jpeg *.heic *.webp)",
+                    REFERENCE_IMAGE_FILE_FILTER,
                 )
             else:
                 selected, _ = QFileDialog.getOpenFileName(self, label, edit.text())
@@ -431,10 +436,16 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setPlainText(prompt)
 
     def set_reference_image(self, source: Path) -> Path:
-        is_heic = source.suffix.lower() in (".heic", ".heif")
+        is_heic = requires_png_conversion(source)
+        output_text = self.output_edit.text().strip()
+        output_dir = (
+            Path(output_text).expanduser().resolve().parent
+            if output_text
+            else self.default_output_dir
+        )
         converted = self.reference_converter(
             source,
-            self.default_output_dir / "reference-images",
+            output_dir / "reference-images",
         )
         self.reference_edit.setText(str(converted))
         self.reference_edit.setCursorPosition(0)
@@ -450,7 +461,7 @@ class MainWindow(QMainWindow):
 
     def _convert_reference_field(self) -> bool:
         text = self.reference_edit.text().strip()
-        if not text or Path(text).suffix.lower() not in (".heic", ".heif"):
+        if not text or not requires_png_conversion(Path(text)):
             return True
         try:
             self.set_reference_image(Path(text).expanduser())

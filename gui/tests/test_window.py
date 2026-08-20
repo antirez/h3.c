@@ -121,6 +121,8 @@ class MainWindowTests(unittest.TestCase):
                 load_preferences=False,
                 reference_converter=fake_converter,
             )
+            chosen_output = repo / "custom-output" / "video.mp4"
+            window.output_edit.setText(str(chosen_output))
 
             selected = window.set_reference_image(source)
 
@@ -128,7 +130,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(window.reference_edit.text(), str(converted))
             self.assertEqual(
                 conversions,
-                [(source, repo.resolve() / "outputs" / "reference-images")],
+                [(source, chosen_output.resolve().parent / "reference-images")],
             )
             self.assertIn("HEIC convertito", window.reference_status.text())
             window.close()

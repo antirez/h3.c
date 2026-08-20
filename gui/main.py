@@ -21,10 +21,10 @@ def _mac_info() -> MacInfo:
         return detect_mac_info()
     except (OSError, ValueError, SubprocessError):
         return MacInfo(
-            chip="Mac non rilevato",
+            chip="Mac not detected",
             memory_gib=0.0,
             architecture="—",
-            metal_support="Non rilevato",
+            metal_support="Not detected",
         )
 
 

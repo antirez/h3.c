@@ -7,9 +7,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QColor, QImage
     from PySide6.QtWidgets import QApplication
 except ImportError:  # pragma: no cover - exercised without the optional GUI deps
     QApplication = None
+    QColor = None
+    QImage = None
     QSettings = None
 
 from gui.hardware import MacInfo
@@ -61,7 +64,7 @@ class MainWindowTests(unittest.TestCase):
             repo = Path(directory)
             window = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=FakeRunner(),
                 load_preferences=False,
             )
@@ -88,7 +91,7 @@ class MainWindowTests(unittest.TestCase):
             repo = Path(directory)
             window = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=FakeRunner(),
                 load_preferences=False,
             )
@@ -116,7 +119,7 @@ class MainWindowTests(unittest.TestCase):
 
             window = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=FakeRunner(),
                 load_preferences=False,
                 reference_converter=fake_converter,
@@ -132,7 +135,7 @@ class MainWindowTests(unittest.TestCase):
                 conversions,
                 [(source, chosen_output.resolve().parent / "reference-images")],
             )
-            self.assertIn("HEIC convertito", window.reference_status.text())
+            self.assertIn("HEIC converted", window.reference_status.text())
             window.close()
 
     def test_changing_video_output_reconverts_heic_beside_new_output(self) -> None:
@@ -157,7 +160,7 @@ class MainWindowTests(unittest.TestCase):
             runner = FakeRunner()
             window = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=runner,
                 load_preferences=False,
                 reference_converter=fake_converter,
@@ -203,7 +206,7 @@ class MainWindowTests(unittest.TestCase):
             )
             first = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=FakeRunner(),
                 settings_store=preferences,
             )
@@ -219,7 +222,7 @@ class MainWindowTests(unittest.TestCase):
 
             restored = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supportato"),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
                 runner=FakeRunner(),
                 settings_store=QSettings(
                     str(preferences_path), QSettings.Format.IniFormat
@@ -234,6 +237,94 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(settings.live_preview)
             self.assertFalse(settings.ssd_streaming)
             restored.close()
+
+    def test_live_preview_appears_and_resizes_with_the_window(self) -> None:
+        from gui.window import MainWindow
+
+        assert QApplication is not None
+        assert QColor is not None
+        assert QImage is not None
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            (repo / "h3").touch()
+            model = repo / "MiniMax-H3"
+            model.mkdir()
+            reference = repo / "reference.png"
+            reference.touch()
+            output = repo / "outputs" / "video.mp4"
+            preview = repo / "preview.ppm"
+            image = QImage(800, 600, QImage.Format.Format_RGB32)
+            image.fill(QColor("#42c98c"))
+            self.assertTrue(image.save(str(preview), "PPM"))
+            runner = FakeRunner()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=runner,
+                load_preferences=False,
+            )
+            window.set_paths(
+                model_dir=model,
+                reference_image=reference,
+                output_path=output,
+            )
+            window.set_prompt("A person powers up.")
+            window.live_preview_check.setChecked(True)
+            window.resize(820, 650)
+            window.show()
+            QApplication.processEvents()
+            window.generate_button.click()
+
+            runner.callbacks.on_preview(preview)
+            QApplication.processEvents()
+            first_pixmap = window.preview_label.pixmap()
+            self.assertIs(window.preview_stack.currentWidget(), window.preview_label)
+            self.assertFalse(first_pixmap.isNull())
+            first_width = first_pixmap.width()
+
+            window.resize(1200, 900)
+            QApplication.processEvents()
+            resized_pixmap = window.preview_label.pixmap()
+
+            self.assertGreater(resized_pixmap.width(), first_width)
+            runner.running = False
+            window.close()
+
+    def test_custom_opens_advanced_controls_and_layout_is_responsive(self) -> None:
+        from PySide6.QtCore import Qt
+
+        from gui.window import MainWindow
+
+        assert QApplication is not None
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(
+                repo_root=Path(directory),
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+            window.show()
+            original_steps = window.steps_spin.value()
+
+            window.custom_button.click()
+
+            self.assertEqual(window.windowTitle(), "H3 Studio - by pierpaolov")
+            self.assertTrue(window.custom_button.isChecked())
+            self.assertTrue(window.advanced_check.isChecked())
+            self.assertTrue(window.advanced_group.isVisible())
+            self.assertEqual(window.steps_spin.value(), original_steps)
+
+            window.resize(700, 600)
+            QApplication.processEvents()
+            self.assertEqual(
+                window.content_splitter.orientation(), Qt.Orientation.Vertical
+            )
+            window.resize(1200, 800)
+            QApplication.processEvents()
+            self.assertEqual(
+                window.content_splitter.orientation(), Qt.Orientation.Horizontal
+            )
+            window.close()
 
 
 class FakeRunner:

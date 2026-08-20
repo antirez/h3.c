@@ -135,9 +135,10 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNotNone(second)
         assert second is not None
         self.assertEqual(second.phase, "denoise")
+        self.assertEqual(second.stage, "Generation")
         self.assertEqual((second.completed, second.total), (1, 6))
-        self.assertAlmostEqual(second.percent, 100 / 6)
-        self.assertAlmostEqual(second.eta_seconds or 0.0, 50.0)
+        self.assertAlmostEqual(second.percent, 350 / 9)
+        self.assertAlmostEqual(second.eta_seconds or 0.0, 110 / 7)
 
     def test_ignores_regular_diagnostic_output(self) -> None:
         tracker = ProgressTracker()
@@ -145,6 +146,30 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(
             tracker.consume("h3: video VAE cache miss; decoder retained", now=2.0)
         )
+
+    def test_maps_log_phases_to_three_global_progress_segments(self) -> None:
+        tracker = ProgressTracker()
+
+        tracker.consume("tokenizer 0/1", now=100.0)
+        preparation = tracker.consume("video VAE encoder 154/154", now=120.0)
+        generation = tracker.consume("denoise 3/6", now=160.0)
+        export_started = tracker.consume("FFmpeg 0/96", now=190.0)
+        completed = tracker.consume("FFmpeg 96/96", now=200.0)
+
+        assert preparation is not None
+        assert generation is not None
+        assert export_started is not None
+        assert completed is not None
+        self.assertEqual(preparation.stage, "Preparation")
+        self.assertLess(preparation.percent, 100 / 3)
+        self.assertGreater(preparation.eta_seconds or 0.0, 0.0)
+        self.assertEqual(generation.stage, "Generation")
+        self.assertGreaterEqual(generation.percent, 100 / 3)
+        self.assertLess(generation.percent, 200 / 3)
+        self.assertEqual(export_started.stage, "Decode & export")
+        self.assertGreaterEqual(export_started.percent, 200 / 3)
+        self.assertEqual(completed.percent, 100.0)
+        self.assertEqual(completed.eta_seconds, 0.0)
 
 
 class RunnerTests(unittest.TestCase):

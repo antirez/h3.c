@@ -34,6 +34,12 @@ It detects the Mac chip, unified memory, architecture, and Metal support; the
 default fast preset keeps live previews off because the resident preview VAE
 adds roughly 10 GiB of temporary model storage.
 
+The interface is English-only and responsive: it uses two resizable columns on
+wide windows, stacks them with scrolling on smaller windows, and includes a
+Custom preset that opens every advanced control without changing its current
+value. Progress is shown as three global stages (Preparation, Generation, and
+Decode & export), while the optional preview follows the available panel size.
+
 Build `h3`, create the isolated GUI environment, and open the window with:
 
 ```sh

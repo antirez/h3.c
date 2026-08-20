@@ -10,7 +10,7 @@ class PresetTests(unittest.TestCase):
             chip="Apple M4 Pro",
             memory_gib=48.0,
             architecture="arm64",
-            metal_support="Metal supportato",
+            metal_support="Metal supported",
         )
 
     def test_m4_pro_48_gib_defaults_to_fast_identity_preview(self) -> None:
@@ -45,7 +45,7 @@ class PresetTests(unittest.TestCase):
             chip="Apple M3",
             memory_gib=24.0,
             architecture="arm64",
-            metal_support="Metal supportato",
+            metal_support="Metal supported",
         )
 
         preset = preset_for("fast", small_mac)

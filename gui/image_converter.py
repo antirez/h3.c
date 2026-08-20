@@ -21,7 +21,7 @@ REFERENCE_IMAGE_SUFFIXES = (
     *CONVERTIBLE_REFERENCE_SUFFIXES,
     ".webp",
 )
-REFERENCE_IMAGE_FILE_FILTER = "Immagini (" + " ".join(
+REFERENCE_IMAGE_FILE_FILTER = "Images (" + " ".join(
     f"*{suffix}" for suffix in REFERENCE_IMAGE_SUFFIXES
 ) + ")"
 
@@ -45,7 +45,7 @@ def convert_reference_image(
     if not requires_png_conversion(source):
         return source
     if not source.is_file():
-        raise ImageConversionError(f"Immagine HEIC non trovata: {source}")
+        raise ImageConversionError(f"HEIC image not found: {source}")
 
     output_dir = output_dir.expanduser().resolve()
     source_id = hashlib.sha256(str(source).encode()).hexdigest()[:8]
@@ -66,7 +66,7 @@ def convert_reference_image(
         signature = temporary.read_bytes()[:8]
         if signature != b"\x89PNG\r\n\x1a\n":
             raise ImageConversionError(
-                "La conversione HEIC non ha prodotto un file PNG valido."
+                "HEIC conversion did not produce a valid PNG file."
             )
         temporary.replace(destination)
         return destination
@@ -74,7 +74,7 @@ def convert_reference_image(
         raise
     except (OSError, subprocess.SubprocessError) as error:
         raise ImageConversionError(
-            "Non sono riuscito a convertire o salvare l’immagine HEIC."
+            "Could not convert or save the HEIC image."
         ) from error
     finally:
         active_error = sys.exc_info()[0] is not None
@@ -83,5 +83,5 @@ def convert_reference_image(
         except OSError as cleanup_error:
             if not active_error:
                 raise ImageConversionError(
-                    "Non sono riuscito a rimuovere il file temporaneo HEIC."
+                    "Could not remove the temporary HEIC file."
                 ) from cleanup_error

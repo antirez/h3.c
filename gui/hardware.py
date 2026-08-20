@@ -18,7 +18,7 @@ class MacInfo:
 
     @property
     def summary(self) -> str:
-        return f"{self.chip} · {self.memory_gib:.0f} GB memoria unificata"
+        return f"{self.chip} · {self.memory_gib:.0f} GB unified memory"
 
 
 def _run_command(command: Sequence[str]) -> str:
@@ -41,9 +41,9 @@ def detect_mac_info(run: CommandRunner = _run_command) -> MacInfo:
         r"^\s*Metal(?: Support)?:\s*(.+?)\s*$", display_info, re.MULTILINE
     )
     if not metal_match:
-        metal_support = "Non rilevato"
+        metal_support = "Not detected"
     elif metal_match.group(1).strip().lower() == "supported":
-        metal_support = "Metal supportato"
+        metal_support = "Metal supported"
     else:
         metal_support = metal_match.group(1).strip()
     return MacInfo(

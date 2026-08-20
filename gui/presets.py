@@ -28,10 +28,10 @@ PRESET_ORDER = ("fast", "balanced", "quality")
 _PRESETS = {
     "fast": GenerationPreset(
             name="fast",
-            label="Veloce",
+            label="Fast",
             description=(
-                "Controlla rapidamente prompt, identità e inquadratura con "
-                "un canvas interno ridotto."
+                "Quickly check the prompt, identity, and framing with a smaller "
+                "internal canvas."
             ),
             width=512,
             height=512,
@@ -46,8 +46,8 @@ _PRESETS = {
     ),
     "balanced": GenerationPreset(
             name="balanced",
-            label="Bilanciato",
-            description="Buon compromesso per verificare movimento e somiglianza.",
+            label="Balanced",
+            description="A good compromise for checking motion and likeness.",
             width=512,
             height=512,
             render_width=None,
@@ -61,8 +61,8 @@ _PRESETS = {
     ),
     "quality": GenerationPreset(
             name="quality",
-            label="Qualità",
-            description="Render finale con tutti i layer e denoising completo.",
+            label="Quality",
+            description="Final render with every layer and full denoising.",
             width=512,
             height=512,
             render_width=None,
@@ -89,7 +89,7 @@ def preset_for(name: str, info: MacInfo) -> GenerationPreset:
     try:
         preset = _PRESETS[name]
     except KeyError as error:
-        raise ValueError(f"preset sconosciuto: {name}") from error
+        raise ValueError(f"unknown preset: {name}") from error
     if name == "fast" and info.memory_gib < 32:
         return replace(
             preset,

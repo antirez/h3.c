@@ -34,6 +34,8 @@ class GenerationSettings:
 @dataclass(frozen=True, slots=True)
 class ProgressUpdate:
     phase: str
+    stage: str
+    stage_index: int
     completed: int
     total: int
     percent: float
@@ -42,11 +44,29 @@ class ProgressUpdate:
 
 class ProgressTracker:
     _pattern = re.compile(r"\s*(.*?)\s+(\d+)\s*/\s*(\d+)\s*")
+    _third = 100.0 / 3.0
+    _phase_bands = {
+        "tokenizer": (0, 0.0, 2.0),
+        "audio VAE encoder": (0, 2.0, 8.0),
+        "video VAE encoder": (0, 2.0, 12.0),
+        "Qwen vision": (0, 12.0, 18.0),
+        "text encoder": (0, 18.0, 23.0),
+        "load transformer core": (0, 23.0, 30.0),
+        "precompute AdaLN": (0, 30.0, 31.0),
+        "refine text": (0, 31.0, 32.0),
+        "preview VAE load": (0, 32.0, _third),
+        "denoise enqueue": (1, _third, 2 * _third),
+        "denoise": (1, _third, 2 * _third),
+        "audio VAE": (2, 2 * _third, 74.0),
+        "video VAE load": (2, 74.0, 92.0),
+        "FFmpeg": (2, 92.0, 100.0),
+    }
+    _stage_names = ("Preparation", "Generation", "Decode & export")
 
     def __init__(self) -> None:
-        self._phase: str | None = None
-        self._phase_started = 0.0
-        self._phase_started_at = 0
+        self._started: float | None = None
+        self._overall_percent = 0.0
+        self._stage_index = 0
 
     def consume(self, text: str, *, now: float) -> ProgressUpdate | None:
         match = self._pattern.fullmatch(text.strip("\r\n"))
@@ -57,22 +77,38 @@ class ProgressTracker:
         total = int(match.group(3))
         if total <= 0 or completed > total:
             return None
-        if phase != self._phase or completed < self._phase_started_at:
-            self._phase = phase
-            self._phase_started = now
-            self._phase_started_at = completed
-        delta = completed - self._phase_started_at
-        eta_seconds = None
-        if delta > 0:
-            seconds_per_unit = (now - self._phase_started) / delta
-            eta_seconds = max(0.0, seconds_per_unit * (total - completed))
+        if self._started is None:
+            self._started = now
+        stage_index, band_start, band_end = self._band_for(phase)
+        self._stage_index = max(self._stage_index, stage_index)
+        phase_fraction = completed / total
+        mapped_percent = band_start + (band_end - band_start) * phase_fraction
+        self._overall_percent = max(self._overall_percent, mapped_percent)
+        eta_seconds: float | None = None
+        elapsed = now - self._started
+        if self._overall_percent >= 100.0:
+            eta_seconds = 0.0
+        elif elapsed > 0.0 and self._overall_percent > 0.0:
+            eta_seconds = elapsed * (100.0 - self._overall_percent) / self._overall_percent
         return ProgressUpdate(
             phase=phase,
+            stage=self._stage_names[self._stage_index],
+            stage_index=self._stage_index,
             completed=completed,
             total=total,
-            percent=(completed / total) * 100.0,
+            percent=self._overall_percent,
             eta_seconds=eta_seconds,
         )
+
+    def _band_for(self, phase: str) -> tuple[int, float, float]:
+        known = self._phase_bands.get(phase)
+        if known is not None:
+            return known
+        if "denoise" in phase.lower():
+            return (1, self._third, 2 * self._third)
+        if self._stage_index >= 1:
+            return (2, 2 * self._third, 92.0)
+        return (0, 0.0, self._third)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +165,7 @@ class H3Runner:
     ) -> None:
         with self._lock:
             if self._process is not None:
-                raise RuntimeError("una generazione è già in corso")
+                raise RuntimeError("a generation is already running")
             settings.output_path.parent.mkdir(parents=True, exist_ok=True)
             if settings.preview_dir is not None:
                 settings.preview_dir.mkdir(parents=True, exist_ok=True)

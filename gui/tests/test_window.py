@@ -160,6 +160,33 @@ class MainWindowTests(unittest.TestCase):
             self.assertIs(window.preview_tabs.currentWidget(), window.input_preview)
             window.close()
 
+    def test_primary_reference_cannot_exceed_the_nine_picture_limit(self) -> None:
+        from gui.window import MainWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            images = tuple(repo / f"reference-{index}.png" for index in range(10))
+            for image in images:
+                image.touch()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+            window.add_reference_images(images[:9])
+
+            with self.assertRaisesRegex(ValueError, "at most 9"):
+                window.set_reference_image(images[9])
+
+            self.assertEqual(window.reference_edit.text(), "")
+            self.assertEqual(len(window.generation_settings().reference_images), 9)
+            self.assertIn(
+                "Picture 9",
+                window.additional_references_list.item(8).text(),
+            )
+            window.close()
+
     def test_blank_output_is_rejected_before_settings_are_built(self) -> None:
         from gui.window import MainWindow
 
@@ -434,7 +461,12 @@ class MainWindowTests(unittest.TestCase):
 
             m5_window = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M5 Max", 64.0, "arm64", "Metal 4"),
+                mac_info=MacInfo(
+                    "Apple M5 Max",
+                    64.0,
+                    "arm64",
+                    "Metal supported",
+                ),
                 runner=FakeRunner(),
                 load_preferences=False,
             )

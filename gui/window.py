@@ -508,9 +508,17 @@ class MainWindow(QMainWindow):
             else:
                 selected, _ = QFileDialog.getOpenFileName(self, label, edit.text())
             if selected:
-                edit.setText(selected)
                 if image:
-                    self._convert_reference_field()
+                    try:
+                        self.set_reference_image(Path(selected))
+                    except (ImageConversionError, ValueError) as error:
+                        QMessageBox.warning(
+                            self,
+                            "Cannot select reference image",
+                            str(error),
+                        )
+                else:
+                    edit.setText(selected)
 
         browse.clicked.connect(choose)
         row.addWidget(edit, 1)
@@ -550,6 +558,8 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setPlainText(prompt)
 
     def set_reference_image(self, source: Path) -> Path:
+        if len(self._additional_references) >= 9:
+            raise ValueError("H3 supports at most 9 reference images.")
         is_heic = requires_png_conversion(source)
         converted = self.reference_converter(
             source,
@@ -691,6 +701,15 @@ class MainWindow(QMainWindow):
             self._converted_reference = None
             self._refresh_additional_reference_list()
             return True
+        if len(self._additional_references) >= 9:
+            self.reference_edit.clear()
+            self._refresh_additional_reference_list()
+            QMessageBox.warning(
+                self,
+                "Cannot select reference image",
+                "H3 supports at most 9 reference images.",
+            )
+            return False
         current = Path(text).expanduser()
         if not requires_png_conversion(current):
             if (
@@ -786,10 +805,12 @@ class MainWindow(QMainWindow):
         )
 
     def _supports_int8_row_fc2(self) -> bool:
-        return (
-            "m5" in self.mac_info.chip.lower()
-            and "metal 4" in self.mac_info.metal_support.lower()
+        metal_support = self.mac_info.metal_support.lower()
+        metal_available = not any(
+            unavailable in metal_support
+            for unavailable in ("not detected", "not supported", "unsupported")
         )
+        return "m5" in self.mac_info.chip.lower() and metal_available
 
     def _update_int8_row_fc2_availability(self, checked: bool = False) -> None:
         del checked

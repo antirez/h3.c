@@ -10,7 +10,7 @@ class PresetTests(unittest.TestCase):
             chip="Apple M4 Pro",
             memory_gib=48.0,
             architecture="arm64",
-            metal_support="Metal 3",
+            metal_support="Metal supportato",
         )
 
     def test_m4_pro_48_gib_defaults_to_fast_identity_preview(self) -> None:
@@ -38,13 +38,29 @@ class PresetTests(unittest.TestCase):
         for name in ("fast", "balanced", "quality"):
             self.assertFalse(preset_for(name, large_mac).live_preview)
 
+        self.assertEqual(recommended_preset_name(large_mac), "balanced")
+
+    def test_low_memory_mac_gets_a_smaller_fast_canvas(self) -> None:
+        small_mac = MacInfo(
+            chip="Apple M3",
+            memory_gib=24.0,
+            architecture="arm64",
+            metal_support="Metal supportato",
+        )
+
+        preset = preset_for("fast", small_mac)
+
+        self.assertEqual((preset.width, preset.height), (256, 256))
+        self.assertEqual((preset.render_width, preset.render_height), (256, 256))
+        self.assertEqual(preset.steps, 4)
+
     def test_detects_mac_characteristics_from_system_commands(self) -> None:
         outputs = {
             ("sysctl", "-n", "machdep.cpu.brand_string"): "Apple M4 Pro\n",
             ("sysctl", "-n", "hw.memsize"): "51539607552\n",
             ("uname", "-m"): "arm64\n",
             ("system_profiler", "SPDisplaysDataType"): (
-                "Chipset Model: Apple M4 Pro\nMetal Support: Metal 3\n"
+                "Chipset Model: Apple M4 Pro\nMetal: Supported\n"
             ),
         }
 

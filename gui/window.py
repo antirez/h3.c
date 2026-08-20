@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from .hardware import MacInfo
-from .presets import preset_for, recommended_preset_name
+from .presets import PRESET_ORDER, preset_for, recommended_preset_name
 from .runner import (
     GenerationSettings,
     H3Runner,
@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         runner: H3Runner | Any,
         load_preferences: bool = True,
         default_output_dir: Path | None = None,
+        settings_store: QSettings | None = None,
     ) -> None:
         super().__init__()
         self.repo_root = repo_root.resolve()
@@ -65,7 +66,7 @@ class MainWindow(QMainWindow):
         self.runner = runner
         self.default_output_dir = default_output_dir or self.repo_root / "outputs"
         self._persistence_enabled = load_preferences
-        self._settings = QSettings("h3-metal", "H3 Studio")
+        self._settings = settings_store or QSettings("h3-metal", "H3 Studio")
         self._preview_temp: tempfile.TemporaryDirectory[str] | None = None
         self._last_output: Path | None = None
         self._active_preset = recommended_preset_name(mac_info)
@@ -129,12 +130,8 @@ class MainWindow(QMainWindow):
         preset_row.setSpacing(6)
         preset_group = QButtonGroup(self)
         preset_group.setExclusive(True)
-        for name, label in (
-            ("fast", "Veloce"),
-            ("balanced", "Bilanciato"),
-            ("quality", "Qualità"),
-        ):
-            button = QPushButton(label)
+        for name in PRESET_ORDER:
+            button = QPushButton(preset_for(name, self.mac_info).label)
             button.setCheckable(True)
             button.setObjectName("presetButton")
             button.clicked.connect(lambda checked=False, key=name: self.apply_preset(key))
@@ -169,6 +166,7 @@ class MainWindow(QMainWindow):
         format_row = QHBoxLayout()
         format_form = QFormLayout()
         self.format_combo = QComboBox()
+        self.format_combo.addItem("Compatto · 256 × 256", (256, 256))
         self.format_combo.addItem("Quadrato · 512 × 512", (512, 512))
         self.format_combo.addItem("Verticale · 480 × 864", (480, 864))
         self.format_combo.addItem("Orizzontale · 864 × 480", (864, 480))
@@ -205,6 +203,7 @@ class MainWindow(QMainWindow):
         self.render_width_spin = self._spin(0, 2048, "Native")
         self.render_height_spin = self._spin(0, 2048, "Native")
         self.seed_spin = self._spin(0, 2_147_483_647)
+        self.ssd_streaming_check = QCheckBox("SSD streaming")
         fields = (
             ("Step", self.steps_spin),
             ("Layer", self.layers_spin),
@@ -220,6 +219,7 @@ class MainWindow(QMainWindow):
             box.addWidget(self._field_label(label))
             box.addWidget(widget)
             advanced.addLayout(box, row, column)
+        advanced.addWidget(self.ssd_streaming_check, 3, 0, 1, 3)
         self.advanced_group.setVisible(False)
         controls_layout.addWidget(self.advanced_group)
         controls_layout.addStretch()
@@ -421,6 +421,7 @@ class MainWindow(QMainWindow):
         preset = preset_for(name, self.mac_info)
         self._active_preset = name
         self._preset_buttons[name].setChecked(True)
+        self.select_format(preset.width, preset.height)
         self.preset_description.setText(preset.description)
         self.recommendation_label.setText(
             f"Preset consigliato: {preset_for(recommended_preset_name(self.mac_info), self.mac_info).label}"
@@ -432,22 +433,36 @@ class MainWindow(QMainWindow):
         self.render_width_spin.setValue(preset.render_width or 0)
         self.render_height_spin.setValue(preset.render_height or 0)
         self.seed_spin.setValue(42)
+        self.ssd_streaming_check.setChecked(preset.ssd_streaming)
         index = self.duration_combo.findData(preset.seconds)
         if index >= 0:
             self.duration_combo.setCurrentIndex(index)
         self.live_preview_check.setChecked(preset.live_preview)
         self._on_format_changed()
 
+    def select_format(self, width: int, height: int) -> None:
+        for index in range(self.format_combo.count()):
+            if self.format_combo.itemData(index) == (width, height):
+                self.format_combo.setCurrentIndex(index)
+                return
+        raise ValueError(f"formato non disponibile: {width}x{height}")
+
+    def select_duration(self, seconds: int) -> None:
+        index = self.duration_combo.findData(seconds)
+        if index < 0:
+            raise ValueError(f"durata non disponibile: {seconds}")
+        self.duration_combo.setCurrentIndex(index)
+
     def _on_format_changed(self) -> None:
         if self._active_preset != "fast":
             return
         width, height = self.format_combo.currentData()
         if width == height:
-            render = (320, 320)
+            render = (256, 256) if width == 256 else (320, 320)
         elif width > height:
-            render = (512, 288)
+            render = (576, 320)
         else:
-            render = (288, 512)
+            render = (320, 576)
         self.render_width_spin.setValue(render[0])
         self.render_height_spin.setValue(render[1])
 
@@ -472,10 +487,16 @@ class MainWindow(QMainWindow):
         render_width = self.render_width_spin.value() or None
         render_height = self.render_height_spin.value() or None
         reference_text = self.reference_edit.text().strip()
+        model_text = self.model_edit.text().strip()
+        output_text = self.output_edit.text().strip()
+        if not model_text:
+            raise ValueError("Scegli la cartella del modello.")
+        if not output_text:
+            raise ValueError("Scegli il file video di output.")
         return GenerationSettings(
-            model_dir=Path(self.model_edit.text().strip()).expanduser(),
+            model_dir=Path(model_text).expanduser(),
             prompt=self.prompt_edit.toPlainText().strip(),
-            output_path=Path(self.output_edit.text().strip()).expanduser(),
+            output_path=Path(output_text).expanduser(),
             reference_image=Path(reference_text).expanduser() if reference_text else None,
             width=width,
             height=height,
@@ -487,7 +508,7 @@ class MainWindow(QMainWindow):
             reuse=self.reuse_spin.value(),
             core_reuse=self.core_reuse_spin.value(),
             seed=self.seed_spin.value(),
-            ssd_streaming=True,
+            ssd_streaming=self.ssd_streaming_check.isChecked(),
             live_preview=self.live_preview_check.isChecked(),
             preview_dir=preview_dir,
         )
@@ -500,8 +521,6 @@ class MainWindow(QMainWindow):
             return "La cartella del modello non esiste."
         if not settings.prompt:
             return "Inserisci un prompt."
-        if not str(settings.output_path):
-            return "Scegli il file video di output."
         if settings.reference_image is not None and not settings.reference_image.is_file():
             return "L’immagine di riferimento non esiste."
         if settings.reuse > 1 and settings.core_reuse > 1:
@@ -515,11 +534,16 @@ class MainWindow(QMainWindow):
         if self.live_preview_check.isChecked():
             self._preview_temp = tempfile.TemporaryDirectory(prefix="h3-studio-preview-")
             preview_dir = Path(self._preview_temp.name)
-        settings = self.generation_settings(preview_dir)
-        error = self._validate(settings)
-        if error:
+        try:
+            settings = self.generation_settings(preview_dir)
+        except ValueError as settings_error:
             self._cleanup_preview_temp()
-            QMessageBox.warning(self, "Impossibile generare", error)
+            QMessageBox.warning(self, "Impossibile generare", str(settings_error))
+            return
+        validation_error = self._validate(settings)
+        if validation_error:
+            self._cleanup_preview_temp()
+            QMessageBox.warning(self, "Impossibile generare", validation_error)
             return
         self.log_edit.clear()
         self.progress_bar.setValue(0)
@@ -621,6 +645,40 @@ class MainWindow(QMainWindow):
         preset = self._setting_text("preset", self._active_preset)
         if preset in self._preset_buttons:
             self.apply_preset(preset)
+        width = self._setting_int("format_width", self.format_combo.currentData()[0])
+        height = self._setting_int("format_height", self.format_combo.currentData()[1])
+        try:
+            self.select_format(width, height)
+        except ValueError:
+            pass
+        try:
+            self.select_duration(
+                self._setting_int("seconds", int(self.duration_combo.currentData()))
+            )
+        except ValueError:
+            pass
+        self.steps_spin.setValue(self._setting_int("steps", self.steps_spin.value()))
+        self.layers_spin.setValue(self._setting_int("layers", self.layers_spin.value()))
+        self.reuse_spin.setValue(self._setting_int("reuse", self.reuse_spin.value()))
+        self.core_reuse_spin.setValue(
+            self._setting_int("core_reuse", self.core_reuse_spin.value())
+        )
+        self.render_width_spin.setValue(
+            self._setting_int("render_width", self.render_width_spin.value())
+        )
+        self.render_height_spin.setValue(
+            self._setting_int("render_height", self.render_height_spin.value())
+        )
+        self.seed_spin.setValue(self._setting_int("seed", self.seed_spin.value()))
+        self.ssd_streaming_check.setChecked(
+            self._setting_bool("ssd_streaming", self.ssd_streaming_check.isChecked())
+        )
+        self.live_preview_check.setChecked(
+            self._setting_bool("live_preview", self.live_preview_check.isChecked())
+        )
+        self.advanced_check.setChecked(
+            self._setting_bool("advanced_visible", self.advanced_check.isChecked())
+        )
         self.model_edit.setText(model)
         self.reference_edit.setText(reference)
         self.output_edit.setText(output)
@@ -633,6 +691,23 @@ class MainWindow(QMainWindow):
         value = self._settings.value(key, default)
         return value if isinstance(value, str) else default
 
+    def _setting_int(self, key: str, default: int) -> int:
+        value = self._settings.value(key, default)
+        if not isinstance(value, (int, str)):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _setting_bool(self, key: str, default: bool) -> bool:
+        value = self._settings.value(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes", "on")
+        return default
+
     def _save_preferences(self) -> None:
         if not self._persistence_enabled:
             return
@@ -641,6 +716,23 @@ class MainWindow(QMainWindow):
         self._settings.setValue("output_path", self.output_edit.text())
         self._settings.setValue("prompt", self.prompt_edit.toPlainText())
         self._settings.setValue("preset", self._active_preset)
+        width, height = self.format_combo.currentData()
+        self._settings.setValue("format_width", width)
+        self._settings.setValue("format_height", height)
+        self._settings.setValue("seconds", self.duration_combo.currentData())
+        self._settings.setValue("steps", self.steps_spin.value())
+        self._settings.setValue("layers", self.layers_spin.value())
+        self._settings.setValue("reuse", self.reuse_spin.value())
+        self._settings.setValue("core_reuse", self.core_reuse_spin.value())
+        self._settings.setValue("render_width", self.render_width_spin.value())
+        self._settings.setValue("render_height", self.render_height_spin.value())
+        self._settings.setValue("seed", self.seed_spin.value())
+        self._settings.setValue(
+            "ssd_streaming", self.ssd_streaming_check.isChecked()
+        )
+        self._settings.setValue("live_preview", self.live_preview_check.isChecked())
+        self._settings.setValue("advanced_visible", self.advanced_check.isChecked())
+        self._settings.sync()
 
     def closeEvent(self, event) -> None:
         if self.runner.running:

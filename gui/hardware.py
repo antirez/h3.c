@@ -37,8 +37,15 @@ def detect_mac_info(run: CommandRunner = _run_command) -> MacInfo:
     memory_bytes = int(run(("sysctl", "-n", "hw.memsize")).strip())
     architecture = run(("uname", "-m")).strip()
     display_info = run(("system_profiler", "SPDisplaysDataType"))
-    metal_match = re.search(r"Metal Support:\s*(.+)", display_info)
-    metal_support = metal_match.group(1).strip() if metal_match else "Non rilevato"
+    metal_match = re.search(
+        r"^\s*Metal(?: Support)?:\s*(.+?)\s*$", display_info, re.MULTILINE
+    )
+    if not metal_match:
+        metal_support = "Non rilevato"
+    elif metal_match.group(1).strip().lower() == "supported":
+        metal_support = "Metal supportato"
+    else:
+        metal_support = metal_match.group(1).strip()
     return MacInfo(
         chip=chip,
         memory_gib=memory_bytes / (1024**3),

@@ -42,7 +42,13 @@ gui-app: h3 gui-setup
 	mkdir -p gui/H3Studio.app/Contents/Resources
 	cp h3 h3_shaders.metal gui/H3Studio.app/Contents/Resources/
 	chmod +x gui/H3Studio.app/Contents/Resources/h3
+	/usr/libexec/PlistBuddy -c "Set :CFBundleName H3 Studio" gui/H3Studio.app/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName H3 Studio" gui/H3Studio.app/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier io.github.antirez.h3studio" gui/H3Studio.app/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.1.0" gui/H3Studio.app/Contents/Info.plist
 	codesign --force --deep --sign - gui/H3Studio.app
+	codesign --verify --deep --strict gui/H3Studio.app
+	QT_QPA_PLATFORM=offscreen gui/H3Studio.app/Contents/MacOS/main --smoke-test
 	@echo "Built gui/H3Studio.app"
 
 h3: $(CLI_OBJ) $(LIB_OBJ)

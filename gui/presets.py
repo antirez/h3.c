@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .hardware import MacInfo
 
@@ -23,15 +23,10 @@ class GenerationPreset:
     live_preview: bool = False
 
 
-def recommended_preset_name(info: MacInfo) -> str:
-    del info
-    return "fast"
+PRESET_ORDER = ("fast", "balanced", "quality")
 
-
-def preset_for(name: str, info: MacInfo) -> GenerationPreset:
-    del info
-    presets = {
-        "fast": GenerationPreset(
+_PRESETS = {
+    "fast": GenerationPreset(
             name="fast",
             label="Veloce",
             description=(
@@ -48,8 +43,8 @@ def preset_for(name: str, info: MacInfo) -> GenerationPreset:
             reuse=1,
             core_reuse=1,
             ssd_streaming=True,
-        ),
-        "balanced": GenerationPreset(
+    ),
+    "balanced": GenerationPreset(
             name="balanced",
             label="Bilanciato",
             description="Buon compromesso per verificare movimento e somiglianza.",
@@ -63,8 +58,8 @@ def preset_for(name: str, info: MacInfo) -> GenerationPreset:
             reuse=2,
             core_reuse=1,
             ssd_streaming=True,
-        ),
-        "quality": GenerationPreset(
+    ),
+    "quality": GenerationPreset(
             name="quality",
             label="Qualità",
             description="Render finale con tutti i layer e denoising completo.",
@@ -78,9 +73,30 @@ def preset_for(name: str, info: MacInfo) -> GenerationPreset:
             reuse=1,
             core_reuse=1,
             ssd_streaming=True,
-        ),
-    }
+    ),
+}
+
+
+def recommended_preset_name(info: MacInfo) -> str:
+    if info.memory_gib >= 64 and (
+        "M5" in info.chip.upper() or "METAL 4" in info.metal_support.upper()
+    ):
+        return "balanced"
+    return "fast"
+
+
+def preset_for(name: str, info: MacInfo) -> GenerationPreset:
     try:
-        return presets[name]
+        preset = _PRESETS[name]
     except KeyError as error:
         raise ValueError(f"preset sconosciuto: {name}") from error
+    if name == "fast" and info.memory_gib < 32:
+        return replace(
+            preset,
+            width=256,
+            height=256,
+            render_width=256,
+            render_height=256,
+            steps=4,
+        )
+    return preset

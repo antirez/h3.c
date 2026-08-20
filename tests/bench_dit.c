@@ -14,16 +14,22 @@
 #ifndef H3_BENCH_LATENT_W
 #define H3_BENCH_LATENT_W 32
 #endif
+#ifndef H3_BENCH_LATENT_T
+#define H3_BENCH_LATENT_T 7
+#endif
+#ifndef H3_BENCH_AUDIO_T
+#define H3_BENCH_AUDIO_T 37
+#endif
 
 enum {
     TEXT_ROWS = 6,
     TEXT_WIDTH = 5120,
-    LATENT_T = 7,
+    LATENT_T = H3_BENCH_LATENT_T,
     LATENT_H = H3_BENCH_LATENT_H,
     LATENT_W = H3_BENCH_LATENT_W,
     CANVAS_H = LATENT_H * 16,
     CANVAS_W = LATENT_W * 16,
-    AUDIO_T = 37,
+    AUDIO_T = H3_BENCH_AUDIO_T,
     VIDEO_ELEMENTS = 24 * LATENT_T * LATENT_H * LATENT_W,
     AUDIO_ELEMENTS = 32 * 2 * AUDIO_T
 };
@@ -1514,7 +1520,9 @@ int main(int argc, char **argv) {
     const char *model_root = argc > 1 ? argv[1] : "MiniMax-H3";
     const char *prompt_fixture = argc > 2 ? argv[2] :
         "misc/fixtures/h3_real_prompt_bf16.safetensors";
-    uint16_t *text_values = load_text(prompt_fixture);
+    uint16_t *text_values = getenv("H3_BENCH_SYNTHETIC_TEXT") ?
+        calloc(TEXT_ROWS * TEXT_WIDTH, sizeof(*text_values)) :
+        load_text(prompt_fixture);
     float *video = calloc(VIDEO_ELEMENTS, sizeof(*video));
     float *audio = calloc(AUDIO_ELEMENTS, sizeof(*audio));
     float *video_velocity = malloc(VIDEO_ELEMENTS * sizeof(*video_velocity));

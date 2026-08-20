@@ -3,7 +3,7 @@
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
-#include "h3_metal.h"
+#include "h3_device.h"
 #include "h3_multimodal.h"
 #include "h3_safetensors.h"
 #include "h3_text_encoder.h"
@@ -130,10 +130,14 @@ static int h3_key_file(h3_key *key, const char *role, const char *path) {
     if (stat(path, &status) != 0)
         return h3_key_append(key, "|%s=%zu:%s:missing", role,
                              strlen(path), path);
+#if defined(__APPLE__)
+    const struct timespec modified = status.st_mtimespec;
+#else
+    const struct timespec modified = status.st_mtim;
+#endif
     return h3_key_append(key, "|%s=%zu:%s:%lld:%lld:%ld", role, strlen(path),
                          path, (long long)status.st_size,
-                         (long long)status.st_mtimespec.tv_sec,
-                         status.st_mtimespec.tv_nsec);
+                         (long long)modified.tv_sec, modified.tv_nsec);
 }
 
 static char *h3_conditioning_key(const char *prompt, const h3_params *params,
@@ -449,9 +453,9 @@ h3_ctx *h3_load_dir(const char *model_dir) {
         h3_free(ctx);
         return NULL;
     }
-    char metal_error[256];
-    if (!h3_metal_probe(&ctx->device, metal_error, sizeof(metal_error))) {
-        h3_set_error(ctx, "%s", metal_error);
+    char device_error[256];
+    if (!h3_device_probe(&ctx->device, device_error, sizeof(device_error))) {
+        h3_set_error(ctx, "%s", device_error);
         snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
         h3_free(ctx);
         return NULL;
@@ -559,10 +563,12 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
         return 0;
     }
+#if defined(__APPLE__)
     if (params->use_int8_row_fc2 && !h3_device(ctx)->metal4) {
         h3_set_error(ctx, "int8 row FC2 requires an M5-class Metal 4 GPU");
         return 0;
     }
+#endif
     if (params->preview_denoise != 0 && params->preview_denoise != 1) {
         h3_set_error(ctx, "denoising preview must be zero or one");
         return 0;

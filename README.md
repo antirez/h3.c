@@ -1,13 +1,65 @@
-# h3-metal
+# h3.c
 
-Native MiniMax-H3 inference for Apple Silicon. The project is being built as a
-sequence of working vertical slices: deterministic host/model metadata first,
-then portable Metal block parity, prompt encoding, prompt-to-video/audio, and
-first/last-frame conditioning and then ordered references.
+Native MiniMax-H3 inference in C for NVIDIA CUDA on Linux and Metal on Apple
+Silicon. Prompt-to-video/audio, first/last-frame conditioning, and ordered
+Ref2VA image/video/audio references work end to end on both backends.
 
-Prompt-to-video/audio, first/last-frame conditioning, and ordered Ref2VA
-image/video/audio references work end to end. The current work is incremental
-H3-specific Metal performance and memory optimization on M3 Max and M5 Max.
+## Platforms and prerequisites
+
+The validated Linux configuration is Ubuntu ARM64, NVIDIA GB10, driver 595.84,
+and CUDA Toolkit 13.0. The supported Linux baseline is a C11 compiler, GNU
+Make, CUDA Toolkit 13.0 or newer, ICU 72 or newer, and FFmpeg/FFprobe 6.1 or
+newer. The build links `cudart`, `cublasLt`, ICU, pthreads, and libm. NVIDIA
+drivers must support the installed toolkit and GPU. macOS continues to use the
+Metal backend and the Objective-C/Foundation tokenizer; its existing Apple
+Silicon optimization switches remain available there.
+
+Install the ordinary Ubuntu build dependencies with your package manager and
+install CUDA from NVIDIA's repository for the target architecture. Verify the
+toolchain before building:
+
+```sh
+cc --version
+nvcc --version
+ffmpeg -version
+pkg-config --modversion icu-uc
+```
+
+The released checkpoint is about 465 GB. If `./MiniMax-H3` already contains
+the complete snapshot, reuse it: no second download is needed. Otherwise the
+current Hugging Face CLI resumes and reuses cached blobs:
+
+```sh
+hf auth login
+hf download MiniMaxAI/MiniMax-H3 --local-dir ./MiniMax-H3
+hf cache verify MiniMaxAI/MiniMax-H3 --local-dir ./MiniMax-H3 \
+  --fail-on-missing-files
+```
+
+Build and run the complete local gate:
+
+```sh
+make -j"$(nproc)"
+./scripts/verify.sh all
+./h3 --info -d ./MiniMax-H3
+```
+
+The GB10 end-to-end command validated with the official checkpoint is:
+
+```sh
+mkdir -p outputs
+./h3 --profile -d ./MiniMax-H3 \
+  -p "A bright red cube rotates smoothly on a white background." \
+  --width 512 --height 512 --frames 22 --steps 20 --layers 50 \
+  --token-reduction -o outputs/gb10-cube.mp4
+```
+
+Linux/CUDA limitations: `--use-int8-row-fc2` is currently a Metal/M5
+specialization and a measured CUDA no-op; there is no verified FP8 execution
+path. `--show` depends on terminal graphics support. `--ssd-streaming` is exact
+and cuts the measured GB10 DiT peak from 27.06 GB to 1.63 GB, but increased
+load-plus-denoise time by 37.6% in the three-run benchmark. See
+[`docs/GB10_PROFILE.md`](docs/GB10_PROFILE.md) for the reproducible measurements.
 
 ## Tutorial
 
@@ -22,7 +74,7 @@ mkdir -p outputs
 ./h3 --info -d ./MiniMax-H3
 ```
 
-`--info` checks the model layout and prints the selected Metal device without
+`--info` checks the model layout and prints the selected GPU device without
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 

@@ -68,6 +68,7 @@ class ProgressTracker:
         self._overall_percent = 0.0
         self._stage_index = 0
         self._active_phase: str | None = None
+        self._active_completed = 0
         self._seen_phases: set[str] = set()
         self._phase_is_repeated = False
         self._phase_cycle_start = 0.0
@@ -86,11 +87,15 @@ class ProgressTracker:
         if self._started is None:
             self._started = now
         stage_index, band_start, band_end = self._band_for(phase)
-        if phase != self._active_phase:
+        phase_restarted = (
+            phase == self._active_phase and completed < self._active_completed
+        )
+        if phase != self._active_phase or phase_restarted:
             self._phase_is_repeated = phase in self._seen_phases
             self._seen_phases.add(phase)
             self._active_phase = phase
             self._phase_cycle_start = self._overall_percent
+        self._active_completed = completed
         self._stage_index = max(self._stage_index, stage_index)
         phase_fraction = completed / total
         mapped_percent = band_start + (band_end - band_start) * phase_fraction
@@ -113,8 +118,14 @@ class ProgressTracker:
             if self._eta_seconds is None or self._eta_updated_at is None:
                 self._eta_seconds = max(1.0, estimate)
             else:
-                countdown = max(0.0, self._eta_seconds - (now - self._eta_updated_at))
-                self._eta_seconds = max(1.0, min(countdown, estimate))
+                countdown = max(
+                    1.0,
+                    self._eta_seconds - (now - self._eta_updated_at),
+                )
+                self._eta_seconds = max(
+                    1.0,
+                    0.75 * countdown + 0.25 * estimate,
+                )
         self._eta_updated_at = now
         return ProgressUpdate(
             phase=phase,

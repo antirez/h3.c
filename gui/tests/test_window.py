@@ -342,7 +342,7 @@ class MainWindowTests(unittest.TestCase):
             )
             first = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
+                mac_info=MacInfo("Apple M5 Max", 48.0, "arm64", "Metal 4"),
                 runner=FakeRunner(),
                 settings_store=preferences,
             )
@@ -365,7 +365,7 @@ class MainWindowTests(unittest.TestCase):
 
             restored = MainWindow(
                 repo_root=repo,
-                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal supported"),
+                mac_info=MacInfo("Apple M5 Max", 48.0, "arm64", "Metal 4"),
                 runner=FakeRunner(),
                 settings_store=QSettings(
                     str(preferences_path), QSettings.Format.IniFormat
@@ -387,6 +387,65 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(settings.reference_images, ())
             self.assertEqual(restored.input_preview.reference_paths, ())
             restored.close()
+
+    def test_legacy_prompt_and_reference_preferences_are_erased_on_load(self) -> None:
+        from gui.window import MainWindow
+
+        assert QSettings is not None
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            preferences_path = repo / "preferences.ini"
+            preferences = QSettings(
+                str(preferences_path),
+                QSettings.Format.IniFormat,
+            )
+            preferences.setValue("prompt", "A private previous prompt")
+            preferences.setValue("reference_image", "/private/previous.png")
+            preferences.setValue("reference_source", "/private/previous.HEIC")
+            preferences.sync()
+
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                settings_store=preferences,
+            )
+
+            self.assertEqual(window.prompt_edit.toPlainText(), "")
+            self.assertEqual(window.reference_edit.text(), "")
+            for key in ("prompt", "reference_image", "reference_source"):
+                self.assertIsNone(preferences.value(key))
+            window.close()
+
+    def test_int8_row_fc2_requires_m5_metal4_and_ssd_streaming_off(self) -> None:
+        from gui.window import MainWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            m4_window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+            self.assertFalse(m4_window.int8_row_fc2_check.isEnabled())
+            self.assertIn("M5", m4_window.int8_row_fc2_check.toolTip())
+            m4_window.close()
+
+            m5_window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M5 Max", 64.0, "arm64", "Metal 4"),
+                runner=FakeRunner(),
+                load_preferences=False,
+            )
+            self.assertFalse(m5_window.int8_row_fc2_check.isEnabled())
+            m5_window.ssd_streaming_check.setChecked(False)
+            self.assertTrue(m5_window.int8_row_fc2_check.isEnabled())
+            m5_window.int8_row_fc2_check.setChecked(True)
+            m5_window.ssd_streaming_check.setChecked(True)
+            self.assertFalse(m5_window.int8_row_fc2_check.isChecked())
+            self.assertFalse(m5_window.int8_row_fc2_check.isEnabled())
+            m5_window.close()
 
     def test_live_preview_appears_and_resizes_with_the_window(self) -> None:
         from gui.window import MainWindow

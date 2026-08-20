@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,20 @@ class RunnerBridge(QObject):
     finished = Signal(object)
 
 
+@dataclass(slots=True)
+class ReferenceInput:
+    source: Path
+    converted: Path
+
+
 class MainWindow(QMainWindow):
+    _transient_preference_keys = (
+        "prompt",
+        "reference_image",
+        "reference_source",
+        "reference_images",
+    )
+
     def __init__(
         self,
         *,
@@ -85,8 +99,7 @@ class MainWindow(QMainWindow):
         self._preview_received = False
         self._reference_source: Path | None = None
         self._converted_reference: Path | None = None
-        self._additional_reference_sources: list[Path] = []
-        self._additional_reference_images: list[Path] = []
+        self._additional_references: list[ReferenceInput] = []
         self._active_preset = recommended_preset_name(mac_info)
         self._preset_buttons: dict[str, QPushButton] = {}
         self._bridge = RunnerBridge(self)
@@ -254,6 +267,9 @@ class MainWindow(QMainWindow):
         self.reference_size_combo.addItem("Match output canvas", "match")
         self.token_reduction_check = QCheckBox("Token reduction")
         self.int8_row_fc2_check = QCheckBox("Fast INT8 row FC2 (M5)")
+        self.ssd_streaming_check.toggled.connect(
+            self._update_int8_row_fc2_availability
+        )
         fields = (
             ("Step", self.steps_spin),
             ("Layer", self.layers_spin),
@@ -308,6 +324,7 @@ class MainWindow(QMainWindow):
             )
         )
         advanced.addLayout(additional_box, 5, 0, 1, 3)
+        self._update_int8_row_fc2_availability()
         self.advanced_group.setVisible(False)
         controls_layout.addWidget(self.advanced_group)
         controls_layout.addStretch()
@@ -519,8 +536,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._reference_source = None
         self._converted_reference = None
-        self._additional_reference_sources.clear()
-        self._additional_reference_images.clear()
+        self._additional_references.clear()
         self._refresh_additional_reference_list()
         self.model_edit.setText(str(model_dir))
         self.reference_edit.setText(str(reference_image) if reference_image else "")
@@ -556,20 +572,19 @@ class MainWindow(QMainWindow):
 
     def add_reference_images(self, sources: tuple[Path, ...]) -> tuple[Path, ...]:
         primary_count = 1 if self.reference_edit.text().strip() else 0
-        if primary_count + len(self._additional_reference_images) + len(sources) > 9:
+        if primary_count + len(self._additional_references) + len(sources) > 9:
             raise ValueError("H3 supports at most 9 reference images.")
         expanded_sources = tuple(source.expanduser().resolve() for source in sources)
-        converted_images: list[Path] = []
+        new_references: list[ReferenceInput] = []
         for source in expanded_sources:
             converted = self.reference_converter(
                 source,
                 self._reference_output_dir(),
             ).expanduser()
-            converted_images.append(converted)
-        self._additional_reference_sources.extend(expanded_sources)
-        self._additional_reference_images.extend(converted_images)
+            new_references.append(ReferenceInput(source, converted))
+        self._additional_references.extend(new_references)
         self._refresh_additional_reference_list()
-        return tuple(converted_images)
+        return tuple(reference.converted for reference in new_references)
 
     def _choose_additional_references(self) -> None:
         selected, _ = QFileDialog.getOpenFileNames(
@@ -591,16 +606,16 @@ class MainWindow(QMainWindow):
         selected_row = self.additional_references_list.currentRow()
         self.additional_references_list.clear()
         first_picture = 2 if self.reference_edit.text().strip() else 1
-        for index, image in enumerate(
-            self._additional_reference_images,
+        for index, reference in enumerate(
+            self._additional_references,
             start=first_picture,
         ):
             self.additional_references_list.addItem(
-                f"Picture {index} · {image.name}"
+                f"Picture {index} · {reference.converted.name}"
             )
-        if self._additional_reference_images:
+        if self._additional_references:
             self.additional_references_list.setCurrentRow(
-                min(max(selected_row, 0), len(self._additional_reference_images) - 1)
+                min(max(selected_row, 0), len(self._additional_references) - 1)
             )
         self._refresh_input_preview()
 
@@ -610,7 +625,7 @@ class MainWindow(QMainWindow):
         primary_text = self.reference_edit.text().strip()
         paths = (
             (Path(primary_text).expanduser(),) if primary_text else ()
-        ) + tuple(self._additional_reference_images)
+        ) + tuple(reference.converted for reference in self._additional_references)
         self.input_preview.set_references(paths)
         self.preview_tabs.setCurrentWidget(self.input_preview)
 
@@ -618,41 +633,38 @@ class MainWindow(QMainWindow):
         row = self.additional_references_list.currentRow()
         if row < 0:
             return
-        del self._additional_reference_sources[row]
-        del self._additional_reference_images[row]
+        del self._additional_references[row]
         self._refresh_additional_reference_list()
 
     def _move_additional_reference(self, offset: int) -> None:
         row = self.additional_references_list.currentRow()
         destination = row + offset
         if row < 0 or destination < 0 or destination >= len(
-            self._additional_reference_images
+            self._additional_references
         ):
             return
-        for values in (
-            self._additional_reference_sources,
-            self._additional_reference_images,
-        ):
-            values[row], values[destination] = values[destination], values[row]
+        references = self._additional_references
+        references[row], references[destination] = (
+            references[destination],
+            references[row],
+        )
         self._refresh_additional_reference_list()
         self.additional_references_list.setCurrentRow(destination)
 
     def _convert_additional_references(self) -> bool:
         output_dir = self._reference_output_dir().resolve()
         converted_any = False
-        for index, (source, converted) in enumerate(
-            zip(
-                self._additional_reference_sources,
-                self._additional_reference_images,
-            )
-        ):
-            if not requires_png_conversion(source):
+        for reference in self._additional_references:
+            if not requires_png_conversion(reference.source):
                 continue
-            if converted.resolve().parent == output_dir and converted.is_file():
+            if (
+                reference.converted.resolve().parent == output_dir
+                and reference.converted.is_file()
+            ):
                 continue
             try:
-                self._additional_reference_images[index] = self.reference_converter(
-                    source,
+                reference.converted = self.reference_converter(
+                    reference.source,
                     output_dir,
                 ).expanduser()
             except ImageConversionError as error:
@@ -773,6 +785,27 @@ class MainWindow(QMainWindow):
             else ""
         )
 
+    def _supports_int8_row_fc2(self) -> bool:
+        return (
+            "m5" in self.mac_info.chip.lower()
+            and "metal 4" in self.mac_info.metal_support.lower()
+        )
+
+    def _update_int8_row_fc2_availability(self, checked: bool = False) -> None:
+        del checked
+        supported = self._supports_int8_row_fc2()
+        available = supported and not self.ssd_streaming_check.isChecked()
+        if not available:
+            self.int8_row_fc2_check.setChecked(False)
+        self.int8_row_fc2_check.setEnabled(available)
+        if not supported:
+            tooltip = "Requires an M5-class Mac with Metal 4."
+        elif self.ssd_streaming_check.isChecked():
+            tooltip = "Turn off SSD streaming to enable this option."
+        else:
+            tooltip = "Use the faster M5 row-wise INT8 FC2 path."
+        self.int8_row_fc2_check.setToolTip(tooltip)
+
     def _set_advanced_visible(self, visible: bool) -> None:
         self.advanced_group.setVisible(visible)
 
@@ -811,7 +844,9 @@ class MainWindow(QMainWindow):
             ssd_streaming=self.ssd_streaming_check.isChecked(),
             live_preview=self.live_preview_check.isChecked(),
             preview_dir=preview_dir,
-            additional_reference_images=tuple(self._additional_reference_images),
+            additional_reference_images=tuple(
+                reference.converted for reference in self._additional_references
+            ),
             reference_image_size=str(self.reference_size_combo.currentData()),
             token_reduction=self.token_reduction_check.isChecked(),
             use_int8_row_fc2=self.int8_row_fc2_check.isChecked(),
@@ -830,6 +865,10 @@ class MainWindow(QMainWindow):
                 return f"Reference image does not exist: {reference_image}"
         if len(settings.reference_images) > 9:
             return "H3 supports at most 9 reference images."
+        if settings.use_int8_row_fc2 and not self._supports_int8_row_fc2():
+            return "Fast INT8 row FC2 requires an M5-class Mac with Metal 4."
+        if settings.use_int8_row_fc2 and settings.ssd_streaming:
+            return "Fast INT8 row FC2 cannot be combined with SSD streaming."
         if settings.reuse > 1 and settings.core_reuse > 1:
             return "Reuse and core reuse cannot both be greater than 1."
         return None
@@ -987,6 +1026,9 @@ class MainWindow(QMainWindow):
         )
 
     def _load_preferences(self) -> None:
+        for transient_key in self._transient_preference_keys:
+            self._settings.remove(transient_key)
+        self._settings.sync()
         model = self._setting_text("model_dir", self.model_edit.text())
         output = self._setting_text("output_path", self.output_edit.text())
         preset = self._setting_text("preset", self._active_preset)
@@ -1036,10 +1078,8 @@ class MainWindow(QMainWindow):
             )
         )
         self.int8_row_fc2_check.setChecked(
-            self._setting_bool(
-                "use_int8_row_fc2",
-                self.int8_row_fc2_check.isChecked(),
-            )
+            self.int8_row_fc2_check.isEnabled()
+            and self._setting_bool("use_int8_row_fc2", False)
         )
         self.live_preview_check.setChecked(
             self._setting_bool("live_preview", self.live_preview_check.isChecked())
@@ -1078,12 +1118,7 @@ class MainWindow(QMainWindow):
             return
         self._settings.setValue("model_dir", self.model_edit.text())
         self._settings.setValue("output_path", self.output_edit.text())
-        for transient_key in (
-            "prompt",
-            "reference_image",
-            "reference_source",
-            "reference_images",
-        ):
+        for transient_key in self._transient_preference_keys:
             self._settings.remove(transient_key)
         self._settings.setValue("preset", self._active_preset)
         width, height = self.format_combo.currentData()

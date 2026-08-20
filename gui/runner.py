@@ -67,6 +67,12 @@ class ProgressTracker:
         self._started: float | None = None
         self._overall_percent = 0.0
         self._stage_index = 0
+        self._active_phase: str | None = None
+        self._seen_phases: set[str] = set()
+        self._phase_is_repeated = False
+        self._phase_cycle_start = 0.0
+        self._eta_seconds: float | None = None
+        self._eta_updated_at: float | None = None
 
     def consume(self, text: str, *, now: float) -> ProgressUpdate | None:
         match = self._pattern.fullmatch(text.strip("\r\n"))
@@ -80,16 +86,36 @@ class ProgressTracker:
         if self._started is None:
             self._started = now
         stage_index, band_start, band_end = self._band_for(phase)
+        if phase != self._active_phase:
+            self._phase_is_repeated = phase in self._seen_phases
+            self._seen_phases.add(phase)
+            self._active_phase = phase
+            self._phase_cycle_start = self._overall_percent
         self._stage_index = max(self._stage_index, stage_index)
         phase_fraction = completed / total
         mapped_percent = band_start + (band_end - band_start) * phase_fraction
+        if self._phase_is_repeated and stage_index == self._stage_index:
+            stage_end = (stage_index + 1) * self._third
+            repeated_percent = self._phase_cycle_start + (
+                stage_end - self._phase_cycle_start
+            ) * 0.2 * phase_fraction
+            mapped_percent = max(mapped_percent, repeated_percent)
         self._overall_percent = max(self._overall_percent, mapped_percent)
-        eta_seconds: float | None = None
         elapsed = now - self._started
         if self._overall_percent >= 100.0:
-            eta_seconds = 0.0
+            self._eta_seconds = 0.0
         elif elapsed > 0.0 and self._overall_percent > 0.0:
-            eta_seconds = elapsed * (100.0 - self._overall_percent) / self._overall_percent
+            estimate = (
+                elapsed
+                * (100.0 - self._overall_percent)
+                / self._overall_percent
+            )
+            if self._eta_seconds is None or self._eta_updated_at is None:
+                self._eta_seconds = max(1.0, estimate)
+            else:
+                countdown = max(0.0, self._eta_seconds - (now - self._eta_updated_at))
+                self._eta_seconds = max(1.0, min(countdown, estimate))
+        self._eta_updated_at = now
         return ProgressUpdate(
             phase=phase,
             stage=self._stage_names[self._stage_index],
@@ -97,7 +123,7 @@ class ProgressTracker:
             completed=completed,
             total=total,
             percent=self._overall_percent,
-            eta_seconds=eta_seconds,
+            eta_seconds=self._eta_seconds,
         )
 
     def _band_for(self, phase: str) -> tuple[int, float, float]:

@@ -171,6 +171,26 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(completed.percent, 100.0)
         self.assertEqual(completed.eta_seconds, 0.0)
 
+    def test_repeated_reference_phases_advance_and_eta_never_increases(self) -> None:
+        tracker = ProgressTracker()
+
+        updates = [
+            tracker.consume("tokenizer 0/1", now=0.0),
+            tracker.consume("video VAE encoder 154/154", now=10.0),
+            tracker.consume("Qwen vision 80/80", now=20.0),
+            tracker.consume("video VAE encoder 77/154", now=30.0),
+            tracker.consume("video VAE encoder 154/154", now=40.0),
+            tracker.consume("Qwen vision 80/80", now=50.0),
+        ]
+        progress = [item for item in updates if item is not None]
+
+        self.assertGreater(progress[4].percent, progress[2].percent)
+        self.assertGreater(progress[5].percent, progress[4].percent)
+        etas = [item.eta_seconds for item in progress if item.eta_seconds is not None]
+        self.assertTrue(
+            all(later <= earlier for earlier, later in zip(etas, etas[1:]))
+        )
+
 
 class RunnerTests(unittest.TestCase):
     def test_reports_progress_preview_and_completion(self) -> None:

@@ -326,6 +326,45 @@ class MainWindowTests(unittest.TestCase):
             )
             window.close()
 
+    def test_preview_placeholder_reports_failure_before_first_frame(self) -> None:
+        from gui.runner import RunResult
+        from gui.window import MainWindow
+
+        assert QApplication is not None
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            (repo / "h3").touch()
+            model = repo / "MiniMax-H3"
+            model.mkdir()
+            output = repo / "outputs" / "video.mp4"
+            runner = FakeRunner()
+            window = MainWindow(
+                repo_root=repo,
+                mac_info=MacInfo("Apple M4 Pro", 48.0, "arm64", "Metal 4"),
+                runner=runner,
+                load_preferences=False,
+            )
+            window.set_paths(
+                model_dir=model,
+                reference_image=None,
+                output_path=output,
+            )
+            window.set_prompt("A person powers up.")
+            window.live_preview_check.setChecked(True)
+            window.generate_button.click()
+
+            runner.callbacks.on_finished(
+                RunResult(exit_code=1, cancelled=False, output_path=output)
+            )
+            QApplication.processEvents()
+
+            self.assertIs(
+                window.preview_stack.currentWidget(), window.preview_placeholder
+            )
+            self.assertIn("failed", window.preview_placeholder.text().lower())
+            runner.running = False
+            window.close()
+
 
 class FakeRunner:
     running = False

@@ -699,6 +699,10 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.live_preview_check.setEnabled(True)
         self.phase_label.setText("Start error")
+        if self.live_preview_check.isChecked() and not self._preview_received:
+            self.preview_placeholder.setText(
+                "Live preview is unavailable because generation could not start."
+            )
         self._cleanup_preview_temp()
         QMessageBox.critical(self, "Error", message)
 
@@ -745,6 +749,15 @@ class MainWindow(QMainWindow):
             self.phase_label.setText(f"Error · exit code {result.exit_code}")
             self.log_edit.setVisible(True)
             self.log_toggle.setChecked(True)
+        if self.live_preview_check.isChecked() and not self._preview_received:
+            if result.cancelled:
+                preview_message = "Generation stopped before a preview frame was ready."
+            elif result.exit_code == 0:
+                preview_message = "Generation completed without a preview frame."
+            else:
+                preview_message = "Live preview failed because generation ended with an error."
+            self.preview_placeholder.setText(preview_message)
+            self.preview_stack.setCurrentWidget(self.preview_placeholder)
         self._cleanup_preview_temp()
 
     def _open_output(self) -> None:

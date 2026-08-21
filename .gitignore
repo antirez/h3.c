@@ -3,6 +3,12 @@ misc/
 MiniMax-H3/
 outputs/
 .ruff_cache/
+.venv-gui/
+gui/H3Studio.app/
+gui/deployment/
+gui/pysidedeploy.spec
+*.egg-info/
+__pycache__/
 
 # Compiler and test outputs.
 *.o

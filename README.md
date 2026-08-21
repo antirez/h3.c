@@ -26,6 +26,51 @@ mkdir -p outputs
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
+#### Optional macOS desktop interface
+
+H3 Studio is a PySide6 interface for choosing the model, reference images,
+prompt, output format, duration, speed preset, and advanced denoising options.
+It detects the Mac chip, unified memory, architecture, and Metal support; the
+default fast preset keeps live previews off because the resident preview VAE
+adds roughly 10 GiB of temporary model storage.
+
+The interface is English-only and responsive: it uses two resizable columns on
+wide windows, stacks them with scrolling on smaller windows, and includes a
+Custom preset that opens every advanced control without changing its current
+value. The advanced panel can add, remove, and reorder up to nine image
+references; their order is passed to Ref2VA as `Picture 1`, `Picture 2`, and so
+on. It also exposes reference sizing, token reduction, M5 INT8 row FC2, SSD
+streaming, seed, render canvas, layer count, and both reuse controls. The Preview
+column has separate Inputs and Generation tabs, so selected
+photos remain inspectable before denoising begins. Progress is shown as three
+global stages (Preparation, Generation, and Decode & export), while the optional
+live preview follows the available panel size.
+
+Build `h3`, create the isolated GUI environment, and open the window with:
+
+```sh
+make gui
+```
+
+The first run downloads PySide6 into `.venv-gui`. To create a double-clickable
+Apple Silicon application containing the `h3` executable and Metal shader:
+
+```sh
+make gui-app
+open gui/H3Studio.app
+```
+
+![H3 Studio running with its hardware-aware Fast preset](gui/assets/h3-studio-ui.png)
+
+The model weights remain external. Select `MiniMax-H3` on first launch; H3
+Studio remembers model, output, preset, and technical generation choices through
+macOS preferences. Prompts and image references are deliberately session-only,
+so every new window starts with both fields empty. iPhone `.heic` and `.heif`
+references are decoded with their embedded orientation and saved as upright PNG
+copies using macOS `sips` and Qt; originals are left intact and the generated
+files are stored in the `reference-images` folder beside the output selected in
+the GUI. Run the GUI contract tests with `make gui-test`.
+
 Without `-p`, the same binary starts an Iris-style interactive session:
 
 ```sh
@@ -340,6 +385,9 @@ prompt, seed, resolution, frame count, and step count.
   factor without resizing the generated video or the encoded terminal image.
 - `--frames-dir DIR` writes final callback frames as PPM files. Intermediate
   `--show` previews are not written there.
+- `--preview-dir DIR` writes one complete PPM preview after every denoising
+  transition. It is intended for graphical front ends and has the same preview
+  VAE memory and decode cost as `--show`.
 - `-o ''` disables MP4 encoding; combine it with `--frames-dir` when FFmpeg is
   unavailable.
 - `--profile` reports phase wall time, Metal encoding/wait time, peak live

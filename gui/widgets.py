@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QResizeEvent
+from PySide6.QtGui import QImageReader, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -88,7 +88,10 @@ class ReferenceInputPreview(QWidget):
             card_layout = QVBoxLayout(card)
             image_label = QLabel()
             image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pixmap = QPixmap(str(path))
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)
+            image = reader.read()
+            pixmap = QPixmap.fromImage(image)
             if pixmap.isNull():
                 image_label.setText("Preview unavailable")
             else:

@@ -64,10 +64,10 @@ The model weights remain external. Select `MiniMax-H3` on first launch; H3
 Studio remembers model, output, preset, and technical generation choices through
 macOS preferences. Prompts and image references are deliberately session-only,
 so every new window starts with both fields empty. iPhone `.heic` and `.heif`
-references are converted automatically with the macOS `sips` utility; originals
-are left intact and the generated PNG files are stored in the `reference-images`
-folder beside the output selected in the GUI. Run the GUI contract tests with
-`make gui-test`.
+references are decoded with their embedded orientation and saved as upright PNG
+copies using macOS `sips` and Qt; originals are left intact and the generated
+files are stored in the `reference-images` folder beside the output selected in
+the GUI. Run the GUI contract tests with `make gui-test`.
 
 Without `-p`, the same binary starts an Iris-style interactive session:
 

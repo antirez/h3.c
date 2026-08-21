@@ -4286,7 +4286,9 @@ int h3_gpu_gqa_causal_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     if (getenv("H3_MPS_GQA") && h3_gpu_gqa_mps(
             gpu, output, query, key, value, sequence, query_heads,
             kv_heads, head_dim, scale)) return 1;
-    size_t score_bytes = (size_t)sequence * sizeof(float);
+    /* Metal requires threadgroup memory lengths to be 16-byte multiples;
+     * the API validation layer aborts on unaligned lengths. */
+    size_t score_bytes = ((size_t)sequence * sizeof(float) + 15) & ~(size_t)15;
     id<MTLComputePipelineState> pipeline = h3_gpu_pipeline(gpu,
                                                            @"h3_gqa_causal_bf16");
     if (!pipeline) return 0;

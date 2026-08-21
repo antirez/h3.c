@@ -60,6 +60,8 @@ make gui-app
 open gui/H3Studio.app
 ```
 
+![H3 Studio running with its hardware-aware Fast preset](gui/assets/h3-studio-ui.png)
+
 The model weights remain external. Select `MiniMax-H3` on first launch; H3
 Studio remembers model, output, preset, and technical generation choices through
 macOS preferences. Prompts and image references are deliberately session-only,

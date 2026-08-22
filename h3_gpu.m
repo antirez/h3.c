@@ -1631,6 +1631,18 @@ int h3_gpu_sdpa_bf16_head_major_output(
                        1);
 }
 
+int h3_gpu_sdpa_bf16_head_major_io(
+                     h3_gpu *opaque, h3_gpu_tensor *output,
+                     const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+                     const h3_gpu_tensor *value, uint32_t sequence,
+                     uint32_t heads, uint32_t head_dim, float scale) {
+    H3GPU *gpu = GPU(opaque);
+    if (!gpu) return 0;
+    gpu.headMajorSDPAInputs = YES;
+    return h3_gpu_sdpa_bf16_head_major_output(
+        opaque, output, query, key, value, sequence, heads, head_dim, scale);
+}
+
 int h3_gpu_swiglu_f32(h3_gpu *opaque, h3_gpu_tensor *output,
                       const h3_gpu_tensor *fused, uint32_t rows,
                       uint32_t width) {

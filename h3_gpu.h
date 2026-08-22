@@ -503,6 +503,13 @@ int h3_gpu_sdpa_bf16_head_major_output(
                      const h3_gpu_tensor *query, const h3_gpu_tensor *key,
                      const h3_gpu_tensor *value, uint32_t sequence,
                      uint32_t heads, uint32_t head_dim, float scale);
+/* Profiling entry point for Q/K/V already stored as
+ * [head, sequence, dimension], matching the M5 fused QKV fast path. */
+int h3_gpu_sdpa_bf16_head_major_io(
+                     h3_gpu *gpu, h3_gpu_tensor *output,
+                     const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+                     const h3_gpu_tensor *value, uint32_t sequence,
+                     uint32_t heads, uint32_t head_dim, float scale);
 int h3_gpu_swiglu_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                        const h3_gpu_tensor *fused, uint32_t rows,
                        uint32_t width);

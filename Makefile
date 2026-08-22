@@ -18,7 +18,7 @@ LIB_S := h3_shaders_embedded.S
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o) $(LIB_S:.S=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity clean
+.PHONY: all test web-test parity real-parity clean
 
 all: h3 libh3.a
 
@@ -91,6 +91,9 @@ h3_dit_bench: tests/bench_dit.o $(LIB_OBJ)
 h3_dit_bench_864: tests/bench_dit_864.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_sdpa_bench: tests/bench_sdpa.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 tests/bench_dit_864.o: tests/bench_dit.c
 	$(CC) $(CFLAGS) -I. -DH3_BENCH_LATENT_H=30 \
 		-DH3_BENCH_LATENT_W=54 -c $< -o $@
@@ -106,7 +109,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_real_audio_encoder_test \
 	h3_av_mux_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
-	h3_real_multimodal_text_test h3_real_ref_video_text_test
+	h3_real_multimodal_text_test h3_real_ref_video_text_test web-test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -184,6 +187,11 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 		echo "skip: Ref2VA video presentation fixture is not installed"; \
 	fi
 
+web-test: h3
+	python3 -W error::ResourceWarning -m unittest -v \
+		tests/test_server.py tests/test_fold_turbo_lora.py \
+		tests/test_reuse_search.py
+
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors
 	./h3_bf16_tests misc/fixtures/h3_dit_bf16.safetensors
@@ -223,5 +231,5 @@ clean:
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test \
-	h3_dit_bench h3_dit_bench_864 \
+	h3_dit_bench h3_dit_bench_864 h3_sdpa_bench \
 	libh3.a *.o *.d tests/*.o tests/*.d

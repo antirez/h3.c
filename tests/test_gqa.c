@@ -7,7 +7,8 @@
 #include <string.h>
 
 enum {
-    SEQUENCE = 32,
+    /* Also exercises the 16-byte threadgroup-memory alignment path. */
+    SEQUENCE = 35,
     QUERY_HEADS = 8,
     KV_HEADS = 2,
     HEAD_DIM = 128,

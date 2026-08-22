@@ -58,6 +58,7 @@ static void usage(const char *program) {
         "      --show             Display a frame after every denoising step (M5)\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase Metal timing and allocation data\n"
+        "      --worker           Run the persistent stdin worker protocol\n"
         "      --info             Inspect model/device without mapping weights\n"
         "  -h, --help             Show this help\n",
         program, program, program);
@@ -251,7 +252,7 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+           OPT_PROFILE, OPT_WORKER, OPT_INFO };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -303,6 +304,7 @@ int main(int argc, char **argv) {
         {"show", no_argument, NULL, OPT_SHOW},
         {"zoom", required_argument, NULL, OPT_ZOOM},
         {"profile", no_argument, NULL, OPT_PROFILE},
+        {"worker", no_argument, NULL, OPT_WORKER},
         {"info", no_argument, NULL, OPT_INFO},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -316,6 +318,7 @@ int main(int argc, char **argv) {
     cli_state cli = {{0}, 0, -1, -1, H3_TERM_NONE, 0, NULL, 0};
     int show = 0;
     int profile = 0;
+    int worker = 0;
     int info = 0;
     int frames_given = 0;
     int seconds_given = 0;
@@ -460,6 +463,7 @@ int main(int argc, char **argv) {
                 }
                 break;
             case OPT_PROFILE: profile = 1; break;
+            case OPT_WORKER: worker = 1; break;
             case OPT_INFO: info = 1; break;
             default: usage(argv[0]); return 2;
         }
@@ -470,6 +474,10 @@ int main(int argc, char **argv) {
     }
     if (frames_given && seconds_given) {
         fprintf(stderr, "h3: --seconds and --frames are mutually exclusive\n");
+        return 2;
+    }
+    if (worker && (prompt || info)) {
+        fprintf(stderr, "h3: --worker cannot be combined with --prompt or --info\n");
         return 2;
     }
     if (prompt && params.steps >= 2 && params.steps <= 7 &&
@@ -522,7 +530,8 @@ int main(int argc, char **argv) {
         if (cli.frames_dir)
             fprintf(stderr, "h3: wrote frames to %s\n", cli.frames_dir);
     } else if (!info) {
-        int cli_status = h3_cli_run(ctx, model_dir, &params, show, seed_given);
+        int cli_status = h3_cli_run(
+            ctx, model_dir, &params, show, seed_given, worker);
         h3_free(ctx);
         return cli_status;
     }

@@ -665,6 +665,11 @@ static void h3_vae_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "video VAE load", completed, total);
 }
 
+static void h3_vae_decode_progress_bridge(int completed, int total,
+                                          void *opaque) {
+    h3_progress_emit(opaque, "video VAE decode", completed, total);
+}
+
 static void h3_preview_vae_progress_bridge(int completed, int total,
                                            void *opaque) {
     h3_progress_emit(opaque, "preview VAE load", completed, total);
@@ -769,6 +774,8 @@ static int h3_deliver_denoise_preview(int completed_steps, int total_steps,
     h3_video_frames decoded;
     memset(&decoded, 0, sizeof(decoded));
     int frame_index = 0;
+    h3_video_vae_decoder_set_progress(
+        preview->decoder, h3_preview_vae_progress_bridge, preview->progress);
     if (!h3_video_vae_decoder_preview(
             preview->decoder, video_latent, preview->latent_t,
             &decoded, &frame_index, detail, sizeof(detail))) {
@@ -1614,6 +1621,9 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             goto cleanup;
         }
     }
+    if (preview_decoder)
+        h3_video_vae_decoder_set_progress(
+            preview_decoder, h3_vae_decode_progress_bridge, &progress);
     int video_ok = preview_decoder ?
         h3_video_vae_decoder_decode(
             preview_decoder, video, temporal.video_t, &frames,

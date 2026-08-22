@@ -1,0 +1,2317 @@
+<title>H3 Studio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --bg-primary: #0C0D10;
+  --bg-secondary: #141519;
+  --bg-tertiary: #1A1C23;
+  --bg-elevated: #21232C;
+  --border-subtle: #282A34;
+  --border-default: #363846;
+  --text-primary: #E8E9ED;
+  --text-secondary: #9B9DAB;
+  --text-muted: #5E6070;
+  --accent: #F59E0B;
+  --accent-hover: #FBBF24;
+  --accent-dim: rgba(245, 158, 11, 0.10);
+  --accent-glow: rgba(245, 158, 11, 0.20);
+  --danger: #EF4444;
+  --success: #10B981;
+  --success-dim: rgba(16, 185, 129, 0.10);
+  --code-bg: #14151C;
+  --shadow: 0 8px 32px rgba(0,0,0,0.5);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --font-display: 'Noto Sans SC', 'Inter', system-ui, sans-serif;
+  --font-body: 'Noto Sans SC', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg-primary: #F5F6F8;
+    --bg-secondary: #FFFFFF;
+    --bg-tertiary: #EDEEF2;
+    --bg-elevated: #E2E4EA;
+    --border-subtle: #D6D8E0;
+    --border-default: #C2C5D0;
+    --text-primary: #14151C;
+    --text-secondary: #5E6070;
+    --text-muted: #9B9DAB;
+    --accent: #D97706;
+    --accent-hover: #B45309;
+    --accent-dim: rgba(217, 119, 6, 0.08);
+    --accent-glow: rgba(217, 119, 6, 0.15);
+    --code-bg: #EDEEF2;
+    --shadow: 0 8px 32px rgba(0,0,0,0.10);
+  }
+}
+:root[data-theme="light"] {
+  --bg-primary: #F5F6F8;
+  --bg-secondary: #FFFFFF;
+  --bg-tertiary: #EDEEF2;
+  --bg-elevated: #E2E4EA;
+  --border-subtle: #D6D8E0;
+  --border-default: #C2C5D0;
+  --text-primary: #14151C;
+  --text-secondary: #5E6070;
+  --text-muted: #9B9DAB;
+  --accent: #D97706;
+  --accent-hover: #B45309;
+  --accent-dim: rgba(217, 119, 6, 0.08);
+  --accent-glow: rgba(217, 119, 6, 0.15);
+  --code-bg: #EDEEF2;
+  --shadow: 0 8px 32px rgba(0,0,0,0.10);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--font-body);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* ===== Sidebar ===== */
+.sidebar {
+  width: 220px; flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column;
+  padding: 0;
+}
+.sidebar .logo {
+  font-family: var(--font-display); font-weight: 700; font-size: 16px;
+  letter-spacing: -0.2px;
+  padding: 20px 20px 16px;
+  display: flex; align-items: center; gap: 10px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.sidebar .logo svg { width: 20px; height: 20px; color: var(--accent); }
+.sidebar-nav { padding: 12px; display: flex; flex-direction: column; gap: 2px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer; transition: all 0.15s;
+  border: none; background: none; width: 100%; text-align: left;
+  font-family: var(--font-body);
+}
+.nav-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.nav-item.active { background: var(--accent-dim); color: var(--accent); }
+.nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+.nav-divider { flex: 1; }
+.sidebar-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px; color: var(--text-muted);
+  line-height: 1.6;
+}
+/* ===== Main ===== */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.header {
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; background: var(--bg-secondary);
+  gap: 12px;
+}
+.header h1 { font-family: var(--font-display); font-weight: 600; font-size: 15px; }
+.header .device-badge {
+  font-size: 11px; color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.content {
+  flex: 1; display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+.content.output-view { grid-template-columns: 1fr; }
+.content.output-view .panel { display: none; }
+.content.output-view #outputList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.content.output-view .output-card { margin-bottom: 0; }
+.panel {
+  overflow-y: auto; padding: 20px 24px;
+  border-right: 1px solid var(--border-subtle);
+}
+.panel::-webkit-scrollbar { width: 4px; }
+.panel::-webkit-scrollbar-track { background: transparent; }
+.panel::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+.section-label {
+  font-family: var(--font-display); font-weight: 600; font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+/* ===== Mode Cards ===== */
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+.mode-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  font-family: var(--font-body);
+  position: relative;
+}
+.mode-card:hover { border-color: var(--border-default); background: var(--bg-elevated); }
+.mode-card.unavailable {
+  opacity: 0.48; cursor: not-allowed; background: var(--bg-secondary);
+}
+.mode-card.unavailable:hover { border-color: var(--border-subtle); background: var(--bg-secondary); }
+.mode-card.unavailable .mode-desc::after { content: ' · Ref2VA 未安装'; color: var(--danger); }
+.mode-card.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
+}
+.mode-card .mode-name {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  margin-bottom: 1px;
+}
+.mode-card .mode-desc {
+  font-size: 11px; color: var(--text-muted); line-height: 1.4;
+}
+.mode-card .mode-check {
+  position: absolute; top: 8px; right: 8px;
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid var(--border-subtle);
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+}
+.mode-card.active .mode-check {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.mode-card.active .mode-check::after {
+  content: ''; display: block;
+  width: 4px; height: 8px;
+  border: solid #1A1B23;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-1px);
+}
+/* ===== Prompt ===== */
+.prompt-wrap {
+  position: relative;
+  margin-bottom: 16px;
+}
+.prompt-area {
+  width: 100%; min-height: 80px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--font-body); font-size: 13px;
+  color: var(--text-primary);
+  resize: vertical; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  line-height: 1.6;
+}
+.prompt-area:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.prompt-area::placeholder { color: var(--text-muted); }
+/* ===== File Drop ===== */
+.file-section { margin-bottom: 16px; }
+.file-group { margin-bottom: 10px; }
+.file-group-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.file-group-label {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.file-group-count {
+  font-size: 10px; color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.file-group-actions { display: flex; align-items: center; gap: 8px; }
+.file-add-button {
+  border: 0; background: transparent; color: var(--accent); cursor: pointer;
+  padding: 2px 0; font: 600 10px var(--font-body); transition: color 0.15s, opacity 0.15s;
+}
+.file-add-button:hover { color: var(--accent-hover); }
+.file-add-button:disabled { color: var(--text-muted); cursor: default; opacity: 0.55; }
+.file-dropzone {
+  border: 1.5px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--bg-tertiary);
+  position: relative;
+}
+.file-dropzone:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.file-dropzone.has-file {
+  border-style: solid;
+  border-color: var(--success);
+  background: var(--success-dim);
+}
+.file-dropzone .drop-icon {
+  font-size: 20px; margin-bottom: 4px; opacity: 0.4;
+}
+.file-dropzone .drop-text {
+  font-size: 12px; color: var(--text-muted);
+}
+.file-dropzone.has-file .drop-text { color: var(--success); }
+.file-dropzone.is-full { cursor: default; opacity: 0.7; }
+.file-items { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.file-items.visual-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+}
+.file-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-xs);
+  font-size: 11px; font-family: var(--font-mono);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+.file-item.visual {
+  display: block; padding: 0; position: relative; overflow: hidden;
+  background: var(--bg-tertiary); border-radius: var(--radius-sm);
+}
+.file-preview {
+  width: 100%; aspect-ratio: 4 / 3; display: block; object-fit: cover;
+  background: var(--code-bg);
+}
+.file-preview-caption {
+  padding: 7px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 10px var(--font-mono); color: var(--text-secondary);
+}
+.file-kind-icon {
+  width: 26px; height: 26px; border-radius: 6px; flex: 0 0 auto;
+  display: grid; place-items: center; background: var(--accent-dim);
+  color: var(--accent); font: 700 9px var(--font-mono);
+}
+.file-item .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .file-remove {
+  color: var(--text-muted); cursor: pointer;
+  border: none; background: none; font-size: 14px; line-height: 1;
+  padding: 0 2px; transition: color 0.1s;
+}
+.file-item .file-remove:hover { color: var(--danger); }
+.file-item.visual .file-remove {
+  position: absolute; top: 5px; right: 5px; width: 24px; height: 24px;
+  padding: 0; display: grid; place-items: center; border-radius: 50%;
+  color: #fff; background: rgba(10, 13, 18, 0.76); backdrop-filter: blur(6px);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.28);
+}
+.file-item.visual .file-remove:hover { color: #fff; background: var(--danger); }
+/* ===== Presets ===== */
+.presets {
+  display: flex; gap: 6px; margin-bottom: 20px;
+}
+.preset {
+  flex: 1;
+  padding: 8px 8px; border-radius: var(--radius-sm);
+  font-size: 11px; font-weight: 600;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  cursor: pointer; transition: all 0.15s;
+  font-family: var(--font-body);
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+.preset:hover { border-color: var(--border-default); color: var(--text-primary); background: var(--bg-elevated); }
+.preset.active {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
+}
+.preset .preset-speed {
+  display: block; font-size: 10px; font-weight: 400; color: var(--text-muted); margin-top: 1px;
+}
+.preset.active .preset-speed { color: var(--accent); opacity: 0.7; }
+/* ===== Config Grid ===== */
+.config-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 10px; margin-bottom: 12px;
+}
+.config-group { display: flex; flex-direction: column; gap: 3px; }
+.config-group label {
+  font-size: 10px; font-weight: 600; color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+.config-group input, .config-group select {
+  padding: 7px 10px; background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs); color: var(--text-primary);
+  font-size: 12px; font-family: var(--font-mono);
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+  -webkit-appearance: none; appearance: none;
+}
+.config-group select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%235E6070' fill='none' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 8px center;
+  padding-right: 28px;
+}
+.config-group input:focus, .config-group select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+/* ===== Aspect Ratio ===== */
+.aspect-selector {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 6px; margin-bottom: 10px;
+}
+.aspect-option {
+  min-width: 0; padding: 9px 6px 8px;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  font-family: var(--font-body); cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
+}
+.aspect-option:hover {
+  border-color: var(--border-default); background: var(--bg-elevated);
+  color: var(--text-primary); transform: translateY(-1px);
+}
+.aspect-option.active {
+  border-color: var(--accent); background: var(--accent-dim); color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-dim);
+}
+.aspect-frame-wrap {
+  height: 25px; display: flex; align-items: center; justify-content: center;
+}
+.aspect-frame {
+  display: block; width: var(--frame-w); height: var(--frame-h);
+  border: 1.5px solid currentColor; border-radius: 2px; opacity: 0.75;
+  position: relative;
+}
+.aspect-frame::after {
+  content: ''; position: absolute; inset: 3px;
+  border: 1px solid currentColor; border-radius: 1px; opacity: 0.28;
+}
+.aspect-label { font: 600 11px/1 var(--font-mono); }
+.aspect-name { font-size: 9px; line-height: 1; color: var(--text-muted); }
+.aspect-option.active .aspect-name { color: var(--accent); opacity: 0.7; }
+.resolution-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px; align-items: end; margin-bottom: 12px;
+}
+.resolution-readout {
+  min-width: 108px; height: 33px; padding: 0 10px;
+  display: flex; flex-direction: column; justify-content: center; align-items: flex-end;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-xs);
+  background: var(--code-bg); font-family: var(--font-mono);
+}
+.resolution-readout strong { font-size: 11px; color: var(--text-secondary); font-weight: 500; }
+.resolution-readout span { font-size: 9px; color: var(--text-muted); }
+/* ===== Advanced ===== */
+.advanced-toggle {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 500; color: var(--text-muted); cursor: pointer;
+  margin: 4px 0 8px; padding: 4px 0;
+  border: none; background: none; font-family: var(--font-body);
+  transition: color 0.15s;
+}
+.advanced-toggle:hover { color: var(--text-secondary); }
+.advanced-toggle svg { width: 12px; height: 12px; transition: transform 0.2s ease; }
+.advanced-toggle.open svg { transform: rotate(90deg); }
+.advanced-panel {
+  display: none; margin-bottom: 12px;
+  padding: 12px; border-radius: var(--radius-sm);
+  background: var(--bg-tertiary); border: 1px solid var(--border-subtle);
+}
+.advanced-panel.open { display: block; }
+.advanced-option { min-width: 0; }
+.advanced-option-help {
+  min-height: 32px; margin-top: 2px;
+  color: var(--text-muted); font-size: 9px; line-height: 1.45;
+}
+.advanced-option-help strong { color: var(--text-secondary); font-weight: 600; }
+.config-group select:disabled {
+  opacity: 0.45; cursor: not-allowed; background-color: var(--bg-secondary);
+}
+/* ===== Buttons ===== */
+.actions { display: flex; gap: 8px; margin-top: 16px; }
+.btn {
+  padding: 10px 20px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600; border: none; cursor: pointer;
+  font-family: var(--font-body); transition: all 0.15s;
+  display: flex; align-items: center; gap: 6px;
+  justify-content: center;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: #1A1B23;
+  flex: 1;
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px var(--accent-glow); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.btn-secondary {
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+.btn-secondary:hover { border-color: var(--border-default); color: var(--text-primary); background: var(--bg-elevated); }
+/* ===== Command Preview ===== */
+.command-preview {
+  margin-top: 12px; background: var(--code-bg);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  padding: 10px 12px; font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-secondary); line-height: 1.6;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+}
+/* ===== Progress ===== */
+.progress-meta {
+  display: none; margin-top: 12px; align-items: center; justify-content: space-between;
+  gap: 12px; color: var(--text-muted); font: 10px var(--font-mono);
+}
+.progress-meta.active { display: flex; }
+.progress-meta strong { color: var(--text-secondary); font-weight: 600; }
+.progress-bar {
+  height: 5px; background: var(--bg-tertiary);
+  border-radius: 3px; overflow: hidden; margin-top: 6px; display: none;
+}
+.progress-bar.active { display: block; }
+.progress-bar-fill {
+  height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  width: 0%; transition: width 0.4s ease; border-radius: 2px;
+}
+.generation-status {
+  display: none; margin-top: 10px; padding: 10px 12px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  background: var(--bg-tertiary); color: var(--text-secondary);
+}
+.generation-status.visible { display: block; }
+.generation-status.running { border-color: var(--accent); background: var(--accent-dim); }
+.generation-status.succeeded { border-color: var(--success); background: var(--success-dim); }
+.generation-status.failed { border-color: var(--danger); background: rgba(239, 68, 68, 0.08); }
+.generation-status-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.generation-status-detail {
+  margin-top: 3px; font: 10px/1.5 var(--font-mono); color: var(--text-muted);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 100px; overflow-y: auto;
+}
+.job-queue { display: none; margin-top: 10px; }
+.job-queue.visible { display: block; }
+.job-queue-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 6px; font-size: 11px; font-weight: 600; color: var(--text-secondary);
+}
+.job-queue-limit { font: 10px var(--font-mono); color: var(--text-muted); }
+.job-queue-list { display: flex; flex-direction: column; gap: 5px; }
+.job-queue-item {
+  display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 8px;
+  padding: 7px 9px; border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs); background: var(--bg-tertiary);
+}
+.job-queue-state {
+  font-size: 9px; font-weight: 700; text-align: center; padding: 2px 5px;
+  border-radius: 4px; color: var(--text-muted); background: var(--bg-elevated);
+}
+.job-queue-item.running .job-queue-state { color: var(--accent); background: var(--accent-dim); }
+.job-queue-prompt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.job-queue-output { color: var(--text-muted); font: 9px var(--font-mono); }
+/* ===== Gallery ===== */
+.gallery { overflow-y: auto; padding: 20px 24px; background: var(--bg-primary); }
+.gallery::-webkit-scrollbar { width: 4px; }
+.gallery::-webkit-scrollbar-track { background: transparent; }
+.gallery::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+.gallery-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 16px;
+}
+.gallery-count { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.gallery-empty {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 70%; text-align: center; gap: 12px;
+  color: var(--text-muted);
+}
+.gallery-empty .empty-icon {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: var(--bg-tertiary); border: 1px solid var(--border-subtle);
+  display: flex; align-items: center; justify-content: center;
+  margin-bottom: 4px;
+}
+.gallery-empty .empty-icon svg { width: 26px; height: 26px; opacity: 0.3; }
+.gallery-empty h3 { font-family: var(--font-display); font-weight: 600; font-size: 15px; color: var(--text-secondary); }
+.gallery-empty p { font-size: 12px; max-width: 240px; line-height: 1.5; color: var(--text-muted); }
+.output-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 12px;
+  transition: border-color 0.15s;
+}
+.output-card:hover { border-color: var(--border-default); }
+.output-card.failed { border-color: rgba(239, 68, 68, 0.45); }
+.output-thumb {
+  width: 100%; aspect-ratio: 16/9;
+  background: var(--bg-tertiary);
+  display: flex; align-items: center; justify-content: center;
+  position: relative; overflow: hidden;
+}
+.output-thumb video { width: 100%; height: 100%; object-fit: cover; }
+.output-failure {
+  padding: 24px; text-align: center; color: var(--danger);
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.output-thumb .dur-badge {
+  position: absolute; bottom: 8px; right: 8px;
+  background: rgba(0,0,0,0.75); padding: 2px 8px; border-radius: 4px;
+  font-size: 10px; font-family: var(--font-mono); color: #fff;
+  backdrop-filter: blur(4px);
+}
+.output-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.output-title-row { display: flex; align-items: flex-start; gap: 8px; }
+.output-prompt {
+  font-size: 12px; font-weight: 500; color: var(--text-primary); line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  flex: 1; min-width: 0;
+}
+.output-delete-btn {
+  flex: 0 0 auto; width: 26px; height: 26px; margin-top: -4px; margin-right: -5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.output-delete-btn:hover {
+  color: var(--danger); border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+}
+.output-delete-btn:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+.output-delete-btn:disabled { opacity: 0.4; cursor: wait; }
+.output-delete-btn svg { width: 14px; height: 14px; }
+.output-card.deleting {
+  opacity: 0.55; pointer-events: none; transition: opacity 0.15s;
+}
+.output-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.output-mode-badge {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 6px; border-radius: 3px;
+  background: var(--accent-dim); color: var(--accent);
+}
+.output-mode-badge.failed { background: rgba(239, 68, 68, 0.10); color: var(--danger); }
+.output-params {
+  font-size: 10px; color: var(--text-muted); font-family: var(--font-mono);
+  display: flex; gap: 8px; font-variant-numeric: tabular-nums;
+}
+.output-time { font-size: 10px; color: var(--text-muted); }
+/* ===== Status Bar ===== */
+.status-bar {
+  padding: 6px 20px; background: var(--bg-secondary);
+  border-top: 1px solid var(--border-subtle);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; font-size: 11px; color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.status-bar .status-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 6px;
+}
+.status-dot.idle { background: var(--text-muted); }
+.status-dot.running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.status-dot.done { background: var(--success); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+/* ===== SenseNova Image Lab ===== */
+.image-workspace {
+  display: none; flex: 1; min-height: 0; overflow: hidden;
+  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  background:
+    radial-gradient(circle at 75% 8%, rgba(245,158,11,0.08), transparent 32%),
+    var(--bg-primary);
+}
+.image-workspace.active { display: grid; }
+.image-controls {
+  overflow-y: auto; padding: 22px 24px 28px;
+  border-right: 1px solid var(--border-subtle); background: var(--bg-secondary);
+}
+.image-controls::-webkit-scrollbar, .image-stage::-webkit-scrollbar { width: 4px; }
+.image-controls::-webkit-scrollbar-thumb, .image-stage::-webkit-scrollbar-thumb {
+  background: var(--border-default); border-radius: 3px;
+}
+.image-kicker {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 14px;
+}
+.image-kicker strong { font: 600 11px var(--font-display); letter-spacing: 0.08em; color: var(--text-muted); }
+.image-runtime-badge {
+  padding: 3px 7px; border: 1px solid var(--border-subtle); border-radius: 999px;
+  color: var(--text-muted); background: var(--bg-tertiary); font: 9px var(--font-mono);
+}
+.image-runtime-badge.ready { color: var(--success); border-color: rgba(16,185,129,0.35); background: var(--success-dim); }
+.image-task-switch {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+  padding: 4px; margin-bottom: 18px; border: 1px solid var(--border-subtle);
+  border-radius: 10px; background: var(--bg-tertiary);
+}
+.image-task-button {
+  border: 0; border-radius: 7px; padding: 9px 6px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+  font: 600 11px var(--font-body); transition: 0.15s ease;
+}
+.image-task-button:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.image-task-button.active { color: #17130b; background: var(--accent); box-shadow: 0 3px 12px var(--accent-glow); }
+.image-field { margin-bottom: 14px; }
+.image-field > label {
+  display: flex; justify-content: space-between; margin-bottom: 5px;
+  color: var(--text-secondary); font-size: 11px; font-weight: 600;
+}
+.image-field .field-note { color: var(--text-muted); font: 9px var(--font-mono); font-weight: 400; }
+.image-field textarea {
+  width: 100%; min-height: 106px; resize: vertical; outline: none;
+  border: 1px solid var(--border-subtle); border-radius: 10px;
+  padding: 11px 12px; background: var(--bg-tertiary); color: var(--text-primary);
+  font: 12px/1.6 var(--font-body); transition: 0.15s;
+}
+.image-field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.image-upload { display: none; margin-bottom: 14px; }
+.image-upload.visible { display: block; }
+.image-dropzone {
+  min-height: 112px; padding: 12px; border: 1px dashed var(--border-default);
+  border-radius: 10px; background: var(--bg-tertiary); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  color: var(--text-muted); transition: 0.15s ease; overflow: hidden;
+}
+.image-dropzone:hover, .image-dropzone.dragging { border-color: var(--accent); background: var(--accent-dim); }
+.image-dropzone img { width: 100%; max-height: 210px; object-fit: contain; border-radius: 7px; }
+.image-drop-copy strong { display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 3px; }
+.image-drop-copy span { font-size: 10px; }
+.image-config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 14px; }
+.image-config-grid .config-group { min-width: 0; }
+.image-run {
+  width: 100%; min-height: 42px; border: 0; border-radius: 9px; cursor: pointer;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: #17130b; font: 700 12px var(--font-display); box-shadow: 0 4px 18px var(--accent-glow);
+  transition: 0.15s ease;
+}
+.image-run:hover { transform: translateY(-1px); }
+.image-run:disabled { opacity: 0.42; cursor: wait; transform: none; }
+.image-job-status {
+  display: none; margin-top: 11px; padding: 10px 11px; border-radius: 8px;
+  border: 1px solid var(--border-subtle); background: var(--bg-tertiary);
+}
+.image-job-status.visible { display: block; }
+.image-job-status strong { display: block; color: var(--text-secondary); font-size: 11px; }
+.image-job-status span { color: var(--text-muted); font: 9px/1.5 var(--font-mono); white-space: pre-wrap; }
+.image-mini-progress { height: 4px; margin-top: 8px; overflow: hidden; border-radius: 3px; background: var(--bg-elevated); }
+.image-mini-progress > i { display: block; width: 0; height: 100%; background: var(--accent); transition: width 0.35s; }
+.image-queue { display: none; margin-top: 12px; }
+.image-queue.visible { display: block; }
+.image-queue-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 6px; color: var(--text-secondary); font-size: 11px; font-weight: 600;
+}
+.image-queue-header span:last-child { color: var(--text-muted); font: 9px var(--font-mono); }
+.image-queue-list { display: flex; flex-direction: column; gap: 5px; }
+.image-queue-item {
+  display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px;
+  padding: 8px 9px; border: 1px solid var(--border-subtle); border-radius: 8px;
+  background: var(--bg-tertiary);
+}
+.image-queue-state {
+  align-self: start; padding: 2px 5px; border-radius: 4px; text-align: center;
+  background: var(--bg-elevated); color: var(--text-muted); font: 700 9px var(--font-mono);
+}
+.image-queue-item.running { border-color: rgba(245,158,11,0.4); background: var(--accent-dim); }
+.image-queue-item.running .image-queue-state { background: var(--accent); color: #17130b; }
+.image-queue-main { min-width: 0; }
+.image-queue-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.image-queue-task { overflow: hidden; color: var(--text-primary); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.image-queue-model { flex: 0 0 auto; color: var(--accent); font: 9px var(--font-mono); }
+.image-queue-output { margin-top: 3px; overflow: hidden; color: var(--text-muted); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.image-stage { overflow-y: auto; padding: 26px; min-width: 0; }
+.image-stage-hero {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
+  margin-bottom: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--border-subtle);
+}
+.image-stage-hero h2 { font: 600 20px/1.2 var(--font-display); letter-spacing: -0.35px; }
+.image-stage-hero p { max-width: 540px; margin-top: 5px; color: var(--text-muted); font-size: 11px; }
+.image-stage-stat { flex: 0 0 auto; text-align: right; color: var(--text-muted); font: 9px/1.55 var(--font-mono); }
+.image-results {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;
+}
+.image-result-card {
+  overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 12px;
+  background: var(--bg-secondary); box-shadow: 0 12px 32px rgba(0,0,0,0.18);
+}
+.image-result-open {
+  display: block; width: 100%; padding: 0; border: 0; background: var(--bg-tertiary);
+  cursor: zoom-in; overflow: hidden; position: relative;
+}
+.image-result-open::after {
+  content: '点击放大'; position: absolute; right: 9px; bottom: 9px;
+  padding: 3px 7px; border-radius: 5px; background: rgba(0,0,0,0.68);
+  color: #fff; font: 9px var(--font-mono); opacity: 0; transform: translateY(4px);
+  transition: 0.15s ease; pointer-events: none;
+}
+.image-result-open:hover::after, .image-result-open:focus-visible::after { opacity: 1; transform: translateY(0); }
+.image-result-card img { display: block; width: 100%; aspect-ratio: 1/1; object-fit: contain; background: var(--bg-tertiary); transition: transform 0.25s ease; }
+.image-result-open:hover img { transform: scale(1.018); }
+.image-result-copy { padding: 12px 13px; }
+.image-result-title-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+.image-result-copy strong { display: block; flex: 1; min-width: 0; font-size: 11px; }
+.image-result-copy p { color: var(--text-muted); font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.image-result-meta { margin-top: 8px; color: var(--text-muted); font: 9px var(--font-mono); }
+.image-result-delete {
+  flex: 0 0 auto; width: 25px; height: 25px; margin: -5px -5px 0 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 6px; background: transparent;
+  color: var(--text-muted); cursor: pointer; transition: 0.15s;
+}
+.image-result-delete:hover { color: var(--danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
+.image-result-delete:disabled { opacity: 0.35; cursor: wait; }
+.image-result-delete svg { width: 13px; height: 13px; }
+.image-lightbox {
+  position: fixed; inset: 0; z-index: 1000; display: none;
+  align-items: center; justify-content: center; padding: 34px;
+  background: rgba(4,5,8,0.90); backdrop-filter: blur(14px);
+}
+.image-lightbox.visible { display: flex; animation: lightbox-in 0.18s ease-out; }
+@keyframes lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+.image-lightbox-figure {
+  width: min(92vw, 1400px); height: min(88vh, 1100px); position: relative;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+.image-lightbox img {
+  max-width: 100%; max-height: calc(100% - 42px); object-fit: contain;
+  border-radius: 10px; box-shadow: 0 24px 80px rgba(0,0,0,0.55); background: #111;
+}
+.image-lightbox-caption { margin-top: 11px; color: rgba(255,255,255,0.7); font: 10px var(--font-mono); text-align: center; }
+.image-lightbox-close {
+  position: absolute; top: 0; right: 0; width: 36px; height: 36px;
+  border: 1px solid rgba(255,255,255,0.18); border-radius: 50%;
+  background: rgba(0,0,0,0.45); color: #fff; cursor: pointer; font-size: 21px;
+}
+.image-empty {
+  min-height: 420px; border: 1px dashed var(--border-subtle); border-radius: 14px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  color: var(--text-muted); text-align: center; background: rgba(20,21,25,0.45);
+}
+.image-empty svg { width: 42px; height: 42px; margin-bottom: 12px; opacity: 0.24; }
+.image-empty strong { color: var(--text-secondary); font-size: 13px; margin-bottom: 4px; }
+.image-empty span { font-size: 10px; }
+/* ===== Responsive ===== */
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .content { grid-template-columns: 1fr; }
+  .mode-grid { grid-template-columns: 1fr; }
+  .image-workspace { grid-template-columns: 1fr; overflow-y: auto; }
+  .image-controls, .image-stage { overflow: visible; }
+  .image-controls { border-right: 0; border-bottom: 1px solid var(--border-subtle); }
+}
+@media (max-width: 520px) {
+  .aspect-selector { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+
+<div class="sidebar">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="5 3 19 12 5 21 5 3"/>
+    </svg>
+    H3 Studio
+  </div>
+  <div class="sidebar-nav">
+    <button class="nav-item active" type="button" data-view="generate" aria-current="page" aria-controls="mainContent">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/></svg>
+      生成
+    </button>
+    <button class="nav-item" type="button" data-view="images" aria-controls="imageWorkspace">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><circle cx="9" cy="9" r="2"/><path d="M20 15l-4-4L6 20"/></svg>
+      图像
+    </button>
+    <button class="nav-item" type="button" data-view="outputs" aria-controls="mainContent">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      输出
+    </button>
+  </div>
+  <div class="nav-divider"></div>
+  <div class="sidebar-footer">
+    h3-metal 0.1.0-dev<br>
+    MiniMax-H3 · FL2VA<br>
+    Apple M5 Pro
+  </div>
+</div>
+
+<div class="main">
+  <div class="header">
+    <h1 id="pageTitle">新建生成</h1>
+    <div class="device-badge" id="deviceBadge">M5 Pro · 64 GB · 1024×576</div>
+  </div>
+
+  <div class="content" id="mainContent">
+    <div class="panel">
+      <!-- 生成模式 -->
+      <div class="section-label">生成模式</div>
+      <div class="mode-grid" id="modeGrid">
+        <div class="mode-card active" data-mode="text">
+          <div class="mode-name">文生视频</div>
+          <div class="mode-desc">仅凭文字描述生成视频+音频</div>
+          <div class="mode-check"></div>
+        </div>
+        <div class="mode-card" data-mode="frame-anchor">
+          <div class="mode-name">首尾帧控制</div>
+          <div class="mode-desc">指定首帧/末帧，补全中间运动</div>
+          <div class="mode-check"></div>
+        </div>
+        <div class="mode-card" data-mode="ref-image">
+          <div class="mode-name">参考图片</div>
+          <div class="mode-desc">以参考图为基础生成，可引用多张</div>
+          <div class="mode-check"></div>
+        </div>
+        <div class="mode-card" data-mode="ref-video">
+          <div class="mode-name">参考视频</div>
+          <div class="mode-desc">以参考视频为基础生成</div>
+          <div class="mode-check"></div>
+        </div>
+        <div class="mode-card" data-mode="ref-audio">
+          <div class="mode-name">参考音频</div>
+          <div class="mode-desc">音频条件生成，需搭配参考图片</div>
+          <div class="mode-check"></div>
+        </div>
+        <div class="mode-card" data-mode="multi-ref">
+          <div class="mode-name">混合引用</div>
+          <div class="mode-desc">图片+视频+音频混合，最多12项</div>
+          <div class="mode-check"></div>
+        </div>
+      </div>
+
+      <!-- 提示词 -->
+      <div class="section-label">提示词</div>
+      <div class="prompt-wrap">
+        <textarea class="prompt-area" id="prompt" placeholder="描述你想要生成的场景&#10;例如：一只红狐狸在松林的雪地里行走，中景跟拍，冬日自然光线，皮毛细节清晰"></textarea>
+      </div>
+
+      <!-- 文件上传 -->
+      <div class="file-section" id="fileSection">
+        <div id="fileUploads"></div>
+      </div>
+
+      <!-- 质量预设 -->
+      <div class="section-label">质量预设</div>
+      <div class="presets" id="presets">
+        <button class="preset" data-steps="4" data-layers="45" data-reuse="3">快速预览<span class="preset-speed">~4秒/步</span></button>
+        <button class="preset active" data-steps="20" data-layers="45" data-reuse="2">均衡<span class="preset-speed">~20步/45层</span></button>
+        <button class="preset" data-steps="20" data-layers="50" data-reuse="1">高质量<span class="preset-speed">~20步/50层</span></button>
+        <button class="preset" data-steps="50" data-layers="50" data-reuse="1">参考级<span class="preset-speed">~50步/50层</span></button>
+      </div>
+
+      <!-- 基本配置 -->
+      <div class="section-label">基本配置</div>
+      <div class="aspect-selector" id="aspectSelector" role="radiogroup" aria-label="画面比例">
+        <button class="aspect-option active" type="button" data-ratio="16:9" role="radio" aria-checked="true">
+          <span class="aspect-frame-wrap"><span class="aspect-frame" style="--frame-w:36px;--frame-h:20px"></span></span>
+          <span class="aspect-label">16:9</span><span class="aspect-name">横屏</span>
+        </button>
+        <button class="aspect-option" type="button" data-ratio="9:16" role="radio" aria-checked="false">
+          <span class="aspect-frame-wrap"><span class="aspect-frame" style="--frame-w:15px;--frame-h:25px"></span></span>
+          <span class="aspect-label">9:16</span><span class="aspect-name">竖屏</span>
+        </button>
+        <button class="aspect-option" type="button" data-ratio="4:3" role="radio" aria-checked="false">
+          <span class="aspect-frame-wrap"><span class="aspect-frame" style="--frame-w:32px;--frame-h:24px"></span></span>
+          <span class="aspect-label">4:3</span><span class="aspect-name">横幅</span>
+        </button>
+        <button class="aspect-option" type="button" data-ratio="3:4" role="radio" aria-checked="false">
+          <span class="aspect-frame-wrap"><span class="aspect-frame" style="--frame-w:18px;--frame-h:24px"></span></span>
+          <span class="aspect-label">3:4</span><span class="aspect-name">竖幅</span>
+        </button>
+      </div>
+      <div class="resolution-row">
+        <div class="config-group">
+          <label for="resolution">分辨率</label>
+          <select id="resolution" aria-describedby="resolutionMeta"></select>
+        </div>
+        <div class="resolution-readout" id="resolutionMeta" aria-live="polite">
+          <strong>16:9 · 标准</strong><span>0.59 MP · 合法画布</span>
+        </div>
+      </div>
+      <input type="hidden" id="width" value="1024">
+      <input type="hidden" id="height" value="576">
+      <div class="config-grid">
+        <div class="config-group">
+          <label>帧数</label>
+          <select id="frames">
+            <option value="22">22 (0.9秒)</option>
+            <option value="39">39 (1.6秒)</option>
+            <option value="56" selected>56 (2.3秒)</option>
+            <option value="107">107 (4.5秒)</option>
+            <option value="243">243 (10秒)</option>
+            <option value="362">362 (15秒)</option>
+          </select>
+        </div>
+        <div class="config-group">
+          <label>步数</label>
+          <input type="number" id="steps" value="20" min="4" max="100">
+        </div>
+      </div>
+
+      <!-- 高级选项 -->
+      <button class="advanced-toggle" id="advancedToggle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        高级选项
+      </button>
+      <div class="advanced-panel" id="advancedPanel">
+        <div class="config-grid">
+          <div class="config-group">
+            <label>层数</label>
+            <input type="number" id="layers" value="45" min="35" max="50">
+          </div>
+          <div class="config-group">
+            <label>复用率</label>
+            <select id="reuse">
+              <option value="1">1 (无复用)</option>
+              <option value="2" selected>2 (均衡)</option>
+              <option value="3">3 (极速)</option>
+            </select>
+          </div>
+          <div class="config-group">
+            <label>随机种子</label>
+            <input type="number" id="seed" placeholder="随机">
+          </div>
+          <div class="config-group">
+            <label>输出路径</label>
+            <input type="text" id="output" value="outputs/generation.mp4">
+          </div>
+        </div>
+        <div class="config-grid" style="margin-top:10px">
+          <div class="config-group advanced-option">
+            <label for="ssdStreaming">SSD 流式</label>
+            <select id="ssdStreaming" aria-describedby="ssdStreamingHelp">
+              <option value="0">关闭</option>
+              <option value="1">开启</option>
+            </select>
+            <p class="advanced-option-help" id="ssdStreamingHelp"><strong>省内存</strong> · 权重从 SSD 分层读取，画质不变，但生成更慢。</p>
+          </div>
+          <div class="config-group advanced-option">
+            <label for="int8Row">Int8 FC2</label>
+            <select id="int8Row" aria-describedby="int8RowHelp">
+              <option value="0">关闭</option>
+              <option value="1">开启</option>
+            </select>
+            <p class="advanced-option-help" id="int8RowHelp"><strong>小幅提速</strong> · 仅 M5 / Metal 4；可能有轻微画质差异。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="progress-meta" id="progressMeta">
+        <strong id="progressPhase">等待执行</strong>
+        <span id="progressPercent">0% · 估算</span>
+      </div>
+      <div class="progress-bar" id="progressBar" role="progressbar" aria-label="视频生成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="progress-bar-fill" id="progressFill"></div>
+      </div>
+      <div class="generation-status" id="generationStatus" role="status" aria-live="polite">
+        <div class="generation-status-title" id="generationStatusTitle"></div>
+        <div class="generation-status-detail" id="generationStatusDetail"></div>
+      </div>
+      <div class="job-queue" id="jobQueue" aria-live="polite">
+        <div class="job-queue-header">
+          <span>任务队列</span>
+          <span class="job-queue-limit">并行数 1 · 串行执行</span>
+        </div>
+        <div class="job-queue-list" id="jobQueueList"></div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="generateBtn">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M8 5v14l11-7z"/></svg>
+          加入生成队列
+        </button>
+        <button class="btn btn-secondary" id="copyBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          复制命令
+        </button>
+      </div>
+
+      <div class="command-preview" id="commandPreview">./h3 --profile -d ./MiniMax-H3 -p "your prompt" --width 864 --height 480 --frames 56 --steps 20 --layers 45 --reuse 2 -o outputs/generation.mp4</div>
+    </div>
+
+    <!-- 输出 -->
+    <div class="gallery" id="gallery">
+      <div class="gallery-header">
+        <div class="section-label" style="margin:0">输出</div>
+        <span class="gallery-count" id="galleryCount">0 个文件</span>
+      </div>
+      <div class="gallery-empty" id="galleryEmpty">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        </div>
+        <h3>还没有输出</h3>
+        <p>配置好提示词后点击「开始生成」，视频会显示在这里</p>
+      </div>
+      <div id="outputList"></div>
+    </div>
+  </div>
+
+  <section class="image-workspace" id="imageWorkspace" aria-label="SenseNova 图像工作台">
+    <div class="image-controls">
+      <div class="image-kicker">
+        <strong>SENSENOVA · LOCAL IMAGE LAB</strong>
+        <span class="image-runtime-badge" id="imageRuntimeBadge">检测运行时</span>
+      </div>
+      <div class="image-task-switch" role="tablist" aria-label="图像任务">
+        <button class="image-task-button active" type="button" data-image-task="t2i" role="tab" aria-selected="true">文生图</button>
+        <button class="image-task-button" type="button" data-image-task="edit" role="tab" aria-selected="false">图片编辑</button>
+        <button class="image-task-button" type="button" data-image-task="vqa" role="tab" aria-selected="false">VQA</button>
+      </div>
+
+      <div class="image-field">
+        <label for="imagePrompt"><span id="imagePromptLabel">画面描述</span><span class="field-note" id="imagePromptNote">支持中英文</span></label>
+        <textarea id="imagePrompt" placeholder="描述你想生成的画面，例如：雨后的上海街头，一只橘猫坐在霓虹灯下，电影感摄影"></textarea>
+      </div>
+
+      <div class="image-upload" id="imageUpload">
+        <div class="image-field">
+          <label><span id="imageUploadLabel">输入图片</span><span class="field-note">PNG · JPEG · WEBP</span></label>
+          <div class="image-dropzone" id="imageDropzone" role="button" tabindex="0">
+            <div class="image-drop-copy" id="imageDropCopy"><strong>拖拽图片到这里</strong><span>或点击选择本地文件</span></div>
+          </div>
+          <input id="imageFileInput" type="file" accept="image/*" hidden>
+        </div>
+      </div>
+
+      <div class="image-config-grid">
+        <div class="config-group">
+          <label for="imageQuant">量化模型</label>
+          <select id="imageQuant">
+            <option value="Q4_0">Q4 · 快速</option>
+            <option value="Q5_0">Q5 · 均衡</option>
+            <option value="Q6_K">Q6 · 高质量</option>
+            <option value="Q8_0">Q8 · 接近原版</option>
+          </select>
+        </div>
+        <div class="config-group" id="imageResolutionGroup">
+          <label for="imageResolution">原生分辨率</label>
+          <select id="imageResolution">
+            <option value="2048x2048">2048 × 2048 · 1:1</option>
+            <option value="2720x1536">2720 × 1536 · 16:9</option>
+            <option value="1536x2720">1536 × 2720 · 9:16</option>
+            <option value="2496x1664">2496 × 1664 · 3:2</option>
+            <option value="1664x2496">1664 × 2496 · 2:3</option>
+            <option value="2368x1760">2368 × 1760 · 4:3</option>
+            <option value="1760x2368">1760 × 2368 · 3:4</option>
+          </select>
+        </div>
+        <div class="config-group" id="imageStepsGroup">
+          <label for="imageSteps">采样步数</label>
+          <select id="imageSteps">
+            <option value="4">4 · 快速预览</option>
+            <option value="16" selected>16 · 均衡</option>
+            <option value="50">50 · 完整质量</option>
+          </select>
+        </div>
+        <div class="config-group">
+          <label for="imageSeed">随机种子</label>
+          <input id="imageSeed" type="number" value="42">
+        </div>
+      </div>
+
+      <button class="image-run" id="imageRunBtn" type="button">开始文生图</button>
+      <div class="image-job-status" id="imageJobStatus" aria-live="polite">
+        <strong id="imageJobTitle">等待任务</strong>
+        <span id="imageJobDetail"></span>
+        <div class="image-mini-progress"><i id="imageJobProgress"></i></div>
+      </div>
+      <div class="image-queue" id="imageQueue" aria-live="polite">
+        <div class="image-queue-header"><span>图像任务队列</span><span id="imageQueueCount">0 个任务</span></div>
+        <div class="image-queue-list" id="imageQueueList"></div>
+      </div>
+    </div>
+
+    <div class="image-stage">
+      <div class="image-stage-hero">
+        <div>
+          <h2>统一图像工作台</h2>
+          <p>同一套 Final 权重完成生成、编辑与视觉问答。任务与视频共用串行队列，保护统一内存和 MPS 稳定性。</p>
+        </div>
+        <div class="image-stage-stat" id="imageStageStat">FINAL · MPS<br>本地运行 · 无上传云端</div>
+      </div>
+      <div class="image-results" id="imageResults">
+        <div class="image-empty" id="imageEmpty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-4-4L6 21"/></svg>
+          <strong>还没有图像任务</strong>
+          <span>左侧选择能力并提交，结果会保留在这里</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="image-lightbox" id="imageLightbox" role="dialog" aria-modal="true" aria-label="图片放大预览" aria-hidden="true">
+    <figure class="image-lightbox-figure">
+      <button class="image-lightbox-close" id="imageLightboxClose" type="button" aria-label="关闭图片预览">×</button>
+      <img id="imageLightboxImage" alt="">
+      <figcaption class="image-lightbox-caption" id="imageLightboxCaption"></figcaption>
+    </figure>
+  </div>
+
+  <div class="status-bar">
+    <span><span class="status-dot idle" id="statusDot"></span><span id="statusText">就绪</span></span>
+    <span id="statusTime"></span>
+  </div>
+</div>
+
+<script>
+const MODE_CONFIG = {
+  'text': {
+    label: '文生视频',
+    cliLabel: '文生视频',
+    files: [],
+    hint: '仅凭文字描述生成视频+音频。',
+  },
+  'frame-anchor': {
+    label: '首尾帧控制',
+    cliLabel: '首尾帧控制',
+    files: [
+      { key: 'first_frame', label: '首帧图片', accept: 'image/*', max: 1, desc: '视频的第一帧画面' },
+      { key: 'last_frame', label: '末帧图片', accept: 'image/*', max: 1, desc: '视频的最后一帧画面' },
+    ],
+    hint: '指定首帧和/或末帧。不能与 Ref2VA 引用混用。',
+  },
+  'ref-image': {
+    label: '参考图片',
+    cliLabel: '参考图片',
+    files: [
+      { key: 'ref_image', label: '参考图片', accept: 'image/*', max: 9, desc: '最多9张。在提示词中用 <Picture N> 引用' },
+    ],
+    hint: '图片条件生成，通过 Ref2VA 模型。',
+  },
+  'ref-video': {
+    label: '参考视频',
+    cliLabel: '参考视频',
+    files: [
+      { key: 'ref_video', label: '参考视频', accept: 'video/*', max: 1, desc: '含嵌入音轨的视频' },
+    ],
+    hint: '视频条件生成，通过 Ref2VA 模型。',
+  },
+  'ref-audio': {
+    label: '参考音频',
+    cliLabel: '参考音频',
+    files: [
+      { key: 'ref_image_audio', label: '参考图片', accept: 'image/*', max: 1, desc: '必须搭配一张图片' },
+      { key: 'ref_audio', label: '参考音频', accept: 'audio/*', max: 3, desc: '音频片段（2-15秒），最多3个' },
+    ],
+    hint: '音频条件生成，必须同时提供参考图片。',
+  },
+  'multi-ref': {
+    label: '混合引用',
+    cliLabel: '混合引用',
+    files: [
+      { key: 'ref_image', label: '参考图片', accept: 'image/*', max: 9, desc: '最多9张' },
+      { key: 'ref_video', label: '参考视频', accept: 'video/*', max: 3, desc: '最多3个' },
+      { key: 'ref_audio', label: '参考音频', accept: 'audio/*', max: 3, desc: '最多3个' },
+    ],
+    hint: '混合引用，总量不超过12项。',
+  },
+};
+
+const RESOLUTION_PRESETS = {
+  '16:9': [
+    { width: 512, height: 288, tier: '预览' },
+    { width: 1024, height: 576, tier: '标准' },
+  ],
+  '9:16': [
+    { width: 288, height: 512, tier: '预览' },
+    { width: 576, height: 1024, tier: '标准' },
+  ],
+  '4:3': [
+    { width: 512, height: 384, tier: '预览' },
+    { width: 768, height: 576, tier: '快速' },
+    { width: 1024, height: 768, tier: '标准' },
+    { width: 1152, height: 864, tier: '高分辨率' },
+  ],
+  '3:4': [
+    { width: 384, height: 512, tier: '预览' },
+    { width: 576, height: 768, tier: '快速' },
+    { width: 768, height: 1024, tier: '标准' },
+    { width: 864, height: 1152, tier: '高分辨率' },
+  ],
+};
+
+let currentMode = 'text';
+let currentRatio = '16:9';
+let files = {};
+let outputs = [];
+let isGenerating = false;
+let statusSyncInFlight = false;
+let modelCapabilities = { fl2va: true, ref2va: null };
+const filePreviewUrls = new WeakMap();
+const knownJobStates = new Map();
+const REF2VA_MODES = new Set(['ref-image', 'ref-video', 'ref-audio', 'multi-ref']);
+
+const modeCards = document.querySelectorAll('.mode-card');
+const presets = document.querySelectorAll('.preset');
+const prompt = document.getElementById('prompt');
+const width = document.getElementById('width');
+const height = document.getElementById('height');
+const resolution = document.getElementById('resolution');
+const resolutionMeta = document.getElementById('resolutionMeta');
+const aspectOptions = document.querySelectorAll('.aspect-option');
+const deviceBadge = document.getElementById('deviceBadge');
+const frames = document.getElementById('frames');
+const steps = document.getElementById('steps');
+const layers = document.getElementById('layers');
+const reuse = document.getElementById('reuse');
+const seed = document.getElementById('seed');
+const output = document.getElementById('output');
+const ssdStreaming = document.getElementById('ssdStreaming');
+const int8Row = document.getElementById('int8Row');
+const commandPreview = document.getElementById('commandPreview');
+const generateBtn = document.getElementById('generateBtn');
+const copyBtn = document.getElementById('copyBtn');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const progressMeta = document.getElementById('progressMeta');
+const progressPhase = document.getElementById('progressPhase');
+const progressPercent = document.getElementById('progressPercent');
+const generationStatus = document.getElementById('generationStatus');
+const generationStatusTitle = document.getElementById('generationStatusTitle');
+const generationStatusDetail = document.getElementById('generationStatusDetail');
+const jobQueue = document.getElementById('jobQueue');
+const jobQueueList = document.getElementById('jobQueueList');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const statusTime = document.getElementById('statusTime');
+const galleryEmpty = document.getElementById('galleryEmpty');
+const outputList = document.getElementById('outputList');
+const galleryCount = document.getElementById('galleryCount');
+const advancedToggle = document.getElementById('advancedToggle');
+const advancedPanel = document.getElementById('advancedPanel');
+const fileUploads = document.getElementById('fileUploads');
+const navItems = document.querySelectorAll('.nav-item[data-view]');
+const pageTitle = document.getElementById('pageTitle');
+const mainContent = document.getElementById('mainContent');
+const imageWorkspace = document.getElementById('imageWorkspace');
+const imageRuntimeBadge = document.getElementById('imageRuntimeBadge');
+const imageTaskButtons = document.querySelectorAll('.image-task-button');
+const imagePrompt = document.getElementById('imagePrompt');
+const imagePromptLabel = document.getElementById('imagePromptLabel');
+const imagePromptNote = document.getElementById('imagePromptNote');
+const imageUpload = document.getElementById('imageUpload');
+const imageUploadLabel = document.getElementById('imageUploadLabel');
+const imageDropzone = document.getElementById('imageDropzone');
+const imageDropCopy = document.getElementById('imageDropCopy');
+const imageFileInput = document.getElementById('imageFileInput');
+const imageQuant = document.getElementById('imageQuant');
+const imageResolution = document.getElementById('imageResolution');
+const imageResolutionGroup = document.getElementById('imageResolutionGroup');
+const imageSteps = document.getElementById('imageSteps');
+const imageStepsGroup = document.getElementById('imageStepsGroup');
+const imageSeed = document.getElementById('imageSeed');
+const imageRunBtn = document.getElementById('imageRunBtn');
+const imageJobStatus = document.getElementById('imageJobStatus');
+const imageJobTitle = document.getElementById('imageJobTitle');
+const imageJobDetail = document.getElementById('imageJobDetail');
+const imageJobProgress = document.getElementById('imageJobProgress');
+const imageQueue = document.getElementById('imageQueue');
+const imageQueueCount = document.getElementById('imageQueueCount');
+const imageQueueList = document.getElementById('imageQueueList');
+const imageResults = document.getElementById('imageResults');
+const imageEmpty = document.getElementById('imageEmpty');
+const imageStageStat = document.getElementById('imageStageStat');
+const imageLightbox = document.getElementById('imageLightbox');
+const imageLightboxImage = document.getElementById('imageLightboxImage');
+const imageLightboxCaption = document.getElementById('imageLightboxCaption');
+const imageLightboxClose = document.getElementById('imageLightboxClose');
+let currentImageTask = 't2i';
+let currentImageFile = null;
+let currentImagePreview = null;
+let imageCapabilities = null;
+let imageLightboxReturnFocus = null;
+let imageResultsSignature = '';
+let imageQueueSignature = '';
+
+// 主页面切换
+function setView(view, updateHash = true) {
+  const nextView = ['outputs', 'images'].includes(view) ? view : 'generate';
+  navItems.forEach(item => {
+    const active = item.dataset.view === nextView;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  });
+  mainContent.style.display = nextView === 'images' ? 'none' : '';
+  mainContent.classList.toggle('output-view', nextView === 'outputs');
+  imageWorkspace.classList.toggle('active', nextView === 'images');
+  pageTitle.textContent = nextView === 'outputs' ? '输出' : nextView === 'images' ? 'SenseNova 图像' : '新建生成';
+  if (nextView === 'images') {
+    deviceBadge.textContent = `${imageQuant.value} · MPS · 本地 Final`;
+  } else if (nextView === 'generate') {
+    applyResolution();
+  }
+  if (updateHash && location.hash !== '#' + nextView) {
+    history.pushState(null, '', '#' + nextView);
+  }
+}
+
+navItems.forEach(item => {
+  item.addEventListener('click', () => setView(item.dataset.view));
+});
+
+window.addEventListener('popstate', () => setView(location.hash.slice(1), false));
+
+function applyResolution() {
+  const selected = RESOLUTION_PRESETS[currentRatio].find(
+    item => `${item.width}x${item.height}` === resolution.value
+  ) || RESOLUTION_PRESETS[currentRatio][2];
+  width.value = selected.width;
+  height.value = selected.height;
+  const megapixels = (selected.width * selected.height / 1000000).toFixed(2);
+  resolutionMeta.innerHTML = `<strong>${currentRatio} · ${selected.tier}</strong><span>${megapixels} MP · 合法画布</span>`;
+  deviceBadge.textContent = `M5 Pro · 64 GB · ${selected.width}×${selected.height}`;
+  updateCommand();
+}
+
+function selectAspectRatio(ratio, tierIndex = resolution.selectedIndex) {
+  if (!RESOLUTION_PRESETS[ratio]) return;
+  currentRatio = ratio;
+  aspectOptions.forEach(option => {
+    const active = option.dataset.ratio === ratio;
+    option.classList.toggle('active', active);
+    option.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  const presets = RESOLUTION_PRESETS[ratio];
+  const defaultIndex = Math.min(2, presets.length - 1);
+  const index = tierIndex >= 0 && tierIndex < presets.length ? tierIndex : defaultIndex;
+  resolution.innerHTML = presets.map((item, itemIndex) =>
+    `<option value="${item.width}x${item.height}"${itemIndex === index ? ' selected' : ''}>${item.width} × ${item.height} · ${item.tier}</option>`
+  ).join('');
+  applyResolution();
+}
+
+aspectOptions.forEach(option => {
+  option.addEventListener('click', () => selectAspectRatio(option.dataset.ratio));
+});
+resolution.addEventListener('change', applyResolution);
+
+// 模式切换
+modeCards.forEach(card => {
+  card.addEventListener('click', () => {
+    if (card.classList.contains('unavailable')) {
+      showGenerationStatus(
+        'failed',
+        '参考模式暂不可用',
+        '当前模型目录缺少 Ref2VA 检查点。文生视频和首尾帧控制仍可使用。'
+      );
+      return;
+    }
+    modeCards.forEach(c => c.classList.remove('active'));
+    card.classList.add('active');
+    currentMode = card.dataset.mode;
+    releaseAllFilePreviews();
+    files = {};
+    renderFileUploads();
+    updateCommand();
+  });
+});
+
+function updateModeAvailability(capabilities) {
+  if (!capabilities || typeof capabilities.ref2va !== 'boolean') return;
+  modelCapabilities = capabilities;
+  modeCards.forEach(card => {
+    const unavailable = REF2VA_MODES.has(card.dataset.mode) && !capabilities.ref2va;
+    card.classList.toggle('unavailable', unavailable);
+    card.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
+  });
+}
+
+function renderFileUploads() {
+  const config = MODE_CONFIG[currentMode];
+  if (!config.files.length) {
+    fileUploads.innerHTML = '';
+    return;
+  }
+  let html = `<div class="section-label">参考文件</div>`;
+  config.files.forEach(f => {
+    const count = (files[f.key] || []).length;
+    html += `
+      <div class="file-group">
+        <div class="file-group-header">
+          <span class="file-group-label">${f.label}</span>
+          <div class="file-group-actions">
+            <button class="file-add-button" type="button" data-key="${f.key}"${count >= f.max ? ' disabled' : ''}>＋ 添加</button>
+            <span class="file-group-count" id="count-${f.key}">${count}/${f.max}</span>
+          </div>
+        </div>
+        <div class="file-dropzone" role="button" tabindex="0" data-key="${f.key}" data-accept="${f.accept}" data-max="${f.max}">
+          <div class="drop-icon">📁</div>
+          <div class="drop-text">${count > 0 ? '继续拖拽或点击添加' : '拖拽文件到此处，或点击选择'}</div>
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:3px">${f.desc}</div>
+        <div class="file-items" id="fileList-${f.key}"></div>
+      </div>
+    `;
+  });
+  fileUploads.innerHTML = html;
+
+  document.querySelectorAll('.file-add-button').forEach(button => {
+    button.addEventListener('click', () => chooseFiles(button.dataset.key));
+  });
+
+  document.querySelectorAll('.file-dropzone').forEach(dz => {
+    const key = dz.dataset.key;
+    dz.addEventListener('click', () => chooseFiles(key));
+    dz.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        chooseFiles(key);
+      }
+    });
+
+    dz.addEventListener('dragover', e => { e.preventDefault(); dz.style.borderColor = 'var(--accent)'; dz.style.background = 'var(--accent-dim)'; });
+    dz.addEventListener('dragleave', () => { dz.style.borderColor = ''; dz.style.background = ''; });
+    dz.addEventListener('drop', e => {
+      e.preventDefault();
+      dz.style.borderColor = ''; dz.style.background = '';
+      addFiles(key, Array.from(e.dataTransfer.files));
+    });
+  });
+
+  renderFileLists();
+}
+
+function chooseFiles(key) {
+  const config = MODE_CONFIG[currentMode].files.find(item => item.key === key);
+  if (!config || (files[key] || []).length >= config.max) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = config.accept || '';
+  input.multiple = config.max - (files[key] || []).length > 1;
+  input.onchange = () => addFiles(key, Array.from(input.files || []));
+  input.click();
+}
+
+function acceptsFile(file, accept) {
+  if (!accept) return true;
+  if (accept === 'image/*') return file.type.startsWith('image/');
+  if (accept === 'video/*') return file.type.startsWith('video/');
+  if (accept === 'audio/*') return file.type.startsWith('audio/');
+  return true;
+}
+
+function getFilePreviewUrl(file) {
+  if (!filePreviewUrls.has(file)) filePreviewUrls.set(file, URL.createObjectURL(file));
+  return filePreviewUrls.get(file);
+}
+
+function releaseFilePreview(file) {
+  const url = filePreviewUrls.get(file);
+  if (url) URL.revokeObjectURL(url);
+  filePreviewUrls.delete(file);
+}
+
+function releaseAllFilePreviews() {
+  Object.values(files).flat().forEach(releaseFilePreview);
+}
+
+function addFiles(key, newFiles) {
+  const config = MODE_CONFIG[currentMode].files.find(f => f.key === key);
+  const max = config.max;
+  if (!files[key]) files[key] = [];
+  const remaining = max - files[key].length;
+  if (remaining <= 0) return;
+  const accepted = newFiles.filter(file => acceptsFile(file, config.accept));
+  files[key] = files[key].concat(accepted.slice(0, remaining));
+  renderFileLists();
+  updateCommand();
+}
+
+function removeFile(key, index) {
+  if (files[key]) {
+    const [removed] = files[key].splice(index, 1);
+    if (removed) releaseFilePreview(removed);
+  }
+  renderFileLists();
+  updateCommand();
+}
+
+function renderFileLists() {
+  MODE_CONFIG[currentMode].files.forEach(f => {
+    const list = document.getElementById('fileList-' + f.key);
+    const count = document.getElementById('count-' + f.key);
+    if (!list) return;
+    const items = files[f.key] || [];
+    const visual = items.some(file => file.type.startsWith('image/') || file.type.startsWith('video/'));
+    list.classList.toggle('visual-grid', visual);
+    list.innerHTML = items.map((file, i) => {
+      const name = escapeHtml(file.name);
+      const title = escapeAttr(file.name);
+      const remove = `<button class="file-remove" type="button" data-index="${i}" title="移除 ${title}" aria-label="移除 ${title}">×</button>`;
+      if (file.type.startsWith('image/')) {
+        return `<div class="file-item visual"><img class="file-preview" src="${escapeAttr(getFilePreviewUrl(file))}" alt="${title}"><div class="file-preview-caption" title="${title}">${name}</div>${remove}</div>`;
+      }
+      if (file.type.startsWith('video/')) {
+        return `<div class="file-item visual"><video class="file-preview" src="${escapeAttr(getFilePreviewUrl(file))}" muted preload="metadata"></video><div class="file-preview-caption" title="${title}">${name}</div>${remove}</div>`;
+      }
+      return `<div class="file-item"><span class="file-kind-icon">音频</span><span class="file-name" title="${title}">${name}</span>${remove}</div>`;
+    }).join('');
+    list.querySelectorAll('.file-remove').forEach(button => {
+      button.addEventListener('click', () => removeFile(f.key, parseInt(button.dataset.index)));
+    });
+    if (count) count.textContent = items.length + '/' + f.max;
+
+    const addButton = document.querySelector(`.file-add-button[data-key="${f.key}"]`);
+    if (addButton) addButton.disabled = items.length >= f.max;
+
+    const dz = document.querySelector(`.file-dropzone[data-key="${f.key}"]`);
+    if (dz) {
+      const text = dz.querySelector('.drop-text');
+      if (items.length > 0) {
+        text.textContent = items.length >= f.max ? '已达到上限' : '继续拖拽或点击添加';
+        dz.classList.add('has-file');
+      } else {
+        text.textContent = '拖拽文件到此处，或点击选择';
+        dz.classList.remove('has-file');
+      }
+      dz.classList.toggle('is-full', items.length >= f.max);
+      dz.setAttribute('aria-disabled', items.length >= f.max ? 'true' : 'false');
+    }
+  });
+}
+
+// 预设
+presets.forEach(p => {
+  p.addEventListener('click', () => {
+    presets.forEach(x => x.classList.remove('active'));
+    p.classList.add('active');
+    steps.value = p.dataset.steps;
+    layers.value = p.dataset.layers;
+    reuse.value = p.dataset.reuse;
+    updateCommand();
+  });
+});
+
+// 配置变更
+document.querySelectorAll('select, input, #prompt').forEach(el => {
+  el.addEventListener('change', updateCommand);
+  el.addEventListener('input', updateCommand);
+});
+
+function syncAccelerationOptions(changedOption) {
+  if (changedOption === ssdStreaming && ssdStreaming.value === '1') {
+    int8Row.value = '0';
+  } else if (changedOption === int8Row && int8Row.value === '1') {
+    ssdStreaming.value = '0';
+  }
+  int8Row.disabled = ssdStreaming.value === '1';
+  ssdStreaming.disabled = int8Row.value === '1';
+  int8Row.title = int8Row.disabled ? 'SSD 流式使用原始 BF16 权重，不能同时开启 Int8 FC2' : '';
+  ssdStreaming.title = ssdStreaming.disabled ? 'Int8 FC2 与 SSD 流式不能同时开启' : '';
+  updateCommand();
+}
+
+ssdStreaming.addEventListener('change', () => syncAccelerationOptions(ssdStreaming));
+int8Row.addEventListener('change', () => syncAccelerationOptions(int8Row));
+
+// 高级选项
+advancedToggle.addEventListener('click', () => {
+  advancedToggle.classList.toggle('open');
+  advancedPanel.classList.toggle('open');
+});
+
+function buildCommand() {
+  const p = prompt.value || 'your prompt';
+  const w = width.value;
+  const h = height.value;
+  const f = frames.value;
+  const s = steps.value;
+  const l = layers.value;
+  const r = reuse.value;
+  const o = output.value || 'outputs/generation.mp4';
+
+  let cmd = `./h3 --profile -d ./MiniMax-H3 -p "${p.replace(/"/g, '\\"')}" --width ${w} --height ${h} --frames ${f} --steps ${s} --layers ${l} --reuse ${r}`;
+
+  const mode = currentMode;
+  if (mode === 'frame-anchor') {
+    const first = (files['first_frame'] || [])[0];
+    const last = (files['last_frame'] || [])[0];
+    if (first) cmd += ` --first-frame "${first.name}"`;
+    if (last) cmd += ` --last-frame "${last.name}"`;
+  } else if (mode === 'ref-image') {
+    (files['ref_image'] || []).forEach(f => cmd += ` --ref-image "${f.name}"`);
+  } else if (mode === 'ref-video') {
+    (files['ref_video'] || []).forEach(f => cmd += ` --ref-video "${f.name}"`);
+  } else if (mode === 'ref-audio') {
+    (files['ref_image_audio'] || []).forEach(f => cmd += ` --ref-image "${f.name}"`);
+    (files['ref_audio'] || []).forEach(f => cmd += ` --ref-audio "${f.name}"`);
+  } else if (mode === 'multi-ref') {
+    (files['ref_image'] || []).forEach(f => cmd += ` --ref-image "${f.name}"`);
+    (files['ref_video'] || []).forEach(f => cmd += ` --ref-video "${f.name}"`);
+    (files['ref_audio'] || []).forEach(f => cmd += ` --ref-audio "${f.name}"`);
+  }
+
+  if (seed.value) cmd += ` --seed ${seed.value}`;
+  if (ssdStreaming.value === '1') cmd += ` --ssd-streaming`;
+  if (int8Row.value === '1') cmd += ` --use-int8-row-fc2`;
+  cmd += ` -o ${o}`;
+  return cmd;
+}
+
+function updateCommand() {
+  commandPreview.textContent = buildCommand();
+}
+
+// 复制
+copyBtn.addEventListener('click', () => {
+  navigator.clipboard.writeText(buildCommand()).then(() => {
+    copyBtn.textContent = '已复制!';
+    setTimeout(() => {
+      copyBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> 复制命令';
+    }, 2000);
+  });
+});
+
+function showGenerationStatus(kind, title, detail = '') {
+  generationStatus.className = 'generation-status visible ' + kind;
+  generationStatusTitle.textContent = title;
+  generationStatusDetail.textContent = detail;
+  generationStatusDetail.style.display = detail ? 'block' : 'none';
+}
+
+async function fetchJSON(url, options) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; }
+  catch (_) { data = { error: text || `HTTP ${response.status}` }; }
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+function setImageTask(task) {
+  currentImageTask = ['t2i', 'edit', 'vqa'].includes(task) ? task : 't2i';
+  imageTaskButtons.forEach(button => {
+    const active = button.dataset.imageTask === currentImageTask;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  const needsImage = currentImageTask !== 't2i';
+  imageUpload.classList.toggle('visible', needsImage);
+  imageResolutionGroup.style.display = currentImageTask === 'vqa' ? 'none' : '';
+  imageStepsGroup.style.display = currentImageTask === 'vqa' ? 'none' : '';
+  if (currentImageTask === 't2i') {
+    imagePromptLabel.textContent = '画面描述';
+    imagePromptNote.textContent = '支持中英文';
+    imagePrompt.placeholder = '描述你想生成的画面，例如：雨后的上海街头，一只橘猫坐在霓虹灯下，电影感摄影';
+    imageRunBtn.textContent = '开始文生图';
+  } else if (currentImageTask === 'edit') {
+    imagePromptLabel.textContent = '编辑指令';
+    imagePromptNote.textContent = '明确写出需保留内容';
+    imagePrompt.placeholder = '例如：把红色苹果改成绿色，保持形状、背景、光线、阴影和构图不变';
+    imageUploadLabel.textContent = '待编辑图片';
+    imageRunBtn.textContent = '开始图片编辑';
+  } else {
+    imagePromptLabel.textContent = '视觉问题';
+    imagePromptNote.textContent = '视觉理解 · OCR · 描述';
+    imagePrompt.placeholder = '例如：图中主体是什么？请描述颜色、构图和光线。';
+    imageUploadLabel.textContent = '待理解图片';
+    imageRunBtn.textContent = '开始视觉问答';
+  }
+}
+
+function setImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  if (currentImagePreview) URL.revokeObjectURL(currentImagePreview);
+  currentImageFile = file;
+  currentImagePreview = URL.createObjectURL(file);
+  imageDropCopy.style.display = 'none';
+  imageDropzone.querySelector('img')?.remove();
+  const preview = document.createElement('img');
+  preview.src = currentImagePreview;
+  preview.alt = file.name;
+  imageDropzone.appendChild(preview);
+}
+
+imageTaskButtons.forEach(button => button.addEventListener('click', () => setImageTask(button.dataset.imageTask)));
+imageDropzone.addEventListener('click', () => imageFileInput.click());
+imageDropzone.addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); imageFileInput.click(); }
+});
+imageFileInput.addEventListener('change', () => setImageFile(imageFileInput.files?.[0]));
+imageDropzone.addEventListener('dragover', event => { event.preventDefault(); imageDropzone.classList.add('dragging'); });
+imageDropzone.addEventListener('dragleave', () => imageDropzone.classList.remove('dragging'));
+imageDropzone.addEventListener('drop', event => {
+  event.preventDefault(); imageDropzone.classList.remove('dragging'); setImageFile(event.dataTransfer.files?.[0]);
+});
+
+function updateImageCapabilities(capabilities) {
+  imageCapabilities = capabilities || null;
+  const runtimeReady = Boolean(capabilities?.runtime && Object.values(capabilities.tasks || {}).every(Boolean));
+  imageRuntimeBadge.textContent = runtimeReady ? 'MPS 运行时就绪' : '运行时未就绪';
+  imageRuntimeBadge.classList.toggle('ready', runtimeReady);
+  const variants = capabilities?.variants || {};
+  Array.from(imageQuant.options).forEach(option => {
+    const ready = Boolean(variants[option.value]?.ready);
+    option.disabled = !ready;
+    if (!option.dataset.baseLabel) option.dataset.baseLabel = option.textContent;
+    option.textContent = option.dataset.baseLabel + (ready ? '' : ' · 未安装');
+  });
+  if (imageQuant.selectedOptions[0]?.disabled) {
+    const preferred = ['Q8_0', 'Q6_K', 'Q5_0', 'Q4_0'].find(name => variants[name]?.ready);
+    if (preferred) imageQuant.value = preferred;
+  }
+  const readyNames = ['Q4_0', 'Q5_0', 'Q6_K', 'Q8_0'].filter(name => variants[name]?.ready);
+  imageStageStat.innerHTML = `FINAL · ${readyNames.join(' / ') || '未安装'}<br>MPS · 本地运行`;
+  if (location.hash === '#images') deviceBadge.textContent = `${imageQuant.value} · MPS · 本地 Final`;
+}
+
+async function uploadImageInput() {
+  if (!currentImageFile) return null;
+  const form = new FormData();
+  form.append('file', currentImageFile, currentImageFile.name);
+  const uploaded = await fetchJSON('/api/uploads', { method: 'POST', body: form });
+  return uploaded.token;
+}
+
+imageRunBtn.addEventListener('click', async () => {
+  const text = imagePrompt.value.trim();
+  if (!text) { imagePrompt.focus(); return; }
+  if (currentImageTask !== 't2i' && !currentImageFile) {
+    imageJobStatus.classList.add('visible');
+    imageJobTitle.textContent = '请选择输入图片';
+    imageJobDetail.textContent = '图片编辑和 VQA 都需要一张本地图片。';
+    return;
+  }
+  if (imageQuant.selectedOptions[0]?.disabled) return;
+
+  imageRunBtn.disabled = true;
+  imageRunBtn.textContent = '正在提交…';
+  imageJobStatus.classList.add('visible');
+  imageJobTitle.textContent = currentImageTask === 'vqa' ? '正在上传图片' : '正在准备任务';
+  imageJobDetail.textContent = '任务会与视频共享串行队列';
+  imageJobProgress.style.width = '3%';
+  try {
+    const token = await uploadImageInput();
+    const [widthValue, heightValue] = imageResolution.value.split('x').map(Number);
+    const suffix = currentImageTask === 'vqa' ? 'txt' : 'png';
+    const payload = {
+      task: currentImageTask,
+      prompt: currentImageTask === 'vqa' ? undefined : text,
+      question: currentImageTask === 'vqa' ? text : undefined,
+      images: token ? [token] : [],
+      quant: imageQuant.value,
+      width: widthValue,
+      height: heightValue,
+      steps: parseInt(imageSteps.value),
+      seed: parseInt(imageSeed.value || '42'),
+      cfg_scale: 4.0,
+      max_new_tokens: 128,
+      output: `images/${currentImageTask}-${Date.now()}.${suffix}`,
+    };
+    const job = await fetchJSON('/api/image/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    imageJobTitle.textContent = '图像任务已加入队列';
+    imageJobDetail.textContent = `${job.quant} · ${job.output}`;
+    imageJobProgress.style.width = '5%';
+    await syncServerState();
+  } catch (error) {
+    imageJobTitle.textContent = '任务提交失败';
+    imageJobDetail.textContent = error.message;
+    imageJobProgress.style.width = '0%';
+  } finally {
+    imageRunBtn.disabled = false;
+    setImageTask(currentImageTask);
+  }
+});
+
+function imageTaskLabel(task) {
+  return task === 'vqa' ? '视觉问答' : task === 'edit' ? '图片编辑' : '文生图';
+}
+
+function openImageLightbox(url, caption, sourceButton) {
+  if (!url) return;
+  imageLightboxReturnFocus = sourceButton || null;
+  imageLightboxImage.src = url;
+  imageLightboxImage.alt = caption || '图片预览';
+  imageLightboxCaption.textContent = caption || '';
+  imageLightbox.classList.add('visible');
+  imageLightbox.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+  imageLightboxClose.focus();
+}
+
+function closeImageLightbox() {
+  if (!imageLightbox.classList.contains('visible')) return;
+  imageLightbox.classList.remove('visible');
+  imageLightbox.setAttribute('aria-hidden', 'true');
+  imageLightboxImage.removeAttribute('src');
+  document.body.style.overflow = '';
+  imageLightboxReturnFocus?.focus();
+  imageLightboxReturnFocus = null;
+}
+
+imageLightboxClose.addEventListener('click', closeImageLightbox);
+imageLightbox.addEventListener('click', event => {
+  if (event.target === imageLightbox) closeImageLightbox();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeImageLightbox();
+});
+
+async function deleteImageOutput(outputName, label, button) {
+  if (!outputName) return;
+  if (!window.confirm(`确定删除“${label}”吗？\n将同时删除磁盘文件，此操作无法撤销。`)) return;
+  button.disabled = true;
+  try {
+    await fetchJSON('/api/image/outputs/' + encodeURIComponent(outputName), { method: 'DELETE' });
+    await syncServerState();
+  } catch (error) {
+    button.disabled = false;
+    imageJobStatus.classList.add('visible');
+    imageJobTitle.textContent = '删除失败';
+    imageJobDetail.textContent = error.message;
+  }
+}
+
+function renderImageJobs(snapshot) {
+  const jobs = (snapshot.outputs || []).filter(job => job.kind === 'image');
+  const terminal = jobs.filter(job => job.status === 'succeeded' || job.status === 'failed').reverse();
+  const nextResultsSignature = JSON.stringify(terminal.map(job => [
+    job.job_id, job.status, job.output, job.image, job.answer, job.error,
+    job.prompt, job.quant, job.duration, job.finished_at,
+  ]));
+  if (nextResultsSignature !== imageResultsSignature) {
+    imageResultsSignature = nextResultsSignature;
+    if (!terminal.length) {
+      imageResults.innerHTML = `<div class="image-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-4-4L6 21"/></svg><strong>还没有图像任务</strong><span>左侧选择能力并提交，结果会保留在这里</span></div>`;
+    } else {
+      imageResults.innerHTML = terminal.map(job => {
+        const title = imageTaskLabel(job.task);
+        const media = job.status === 'failed'
+          ? `<div class="output-failure">${escapeHtml(job.error || '任务失败')}</div>`
+          : job.task === 'vqa'
+            ? ''
+            : `<button class="image-result-open" type="button" data-image="${escapeAttr(job.image || '')}" data-caption="${escapeAttr(job.prompt || title)}" aria-label="放大查看 ${escapeAttr(job.prompt || title)}"><img src="${escapeAttr(job.image || '')}" alt="${escapeAttr(job.prompt || title)}" loading="lazy"></button>`;
+        const body = job.task === 'vqa' && job.status === 'succeeded' ? (job.answer || '无回答') : (job.prompt || '');
+        const deleteButton = job.output ? `<button class="image-result-delete" type="button" data-output="${escapeAttr(job.output)}" data-label="${escapeAttr(title)}" title="删除输出" aria-label="删除 ${escapeAttr(title)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg></button>` : '';
+        return `<article class="image-result-card">${media}<div class="image-result-copy"><div class="image-result-title-row"><strong>${escapeHtml(title)} · ${escapeHtml(job.quant || '')}</strong>${deleteButton}</div><p>${escapeHtml(body)}</p><div class="image-result-meta">${escapeHtml(job.duration || '')} · ${escapeHtml(job.finished_at || job.created_at || '')}</div></div></article>`;
+      }).join('');
+      imageResults.querySelectorAll('.image-result-open').forEach(button => {
+        button.addEventListener('click', () => openImageLightbox(button.dataset.image, button.dataset.caption, button));
+      });
+      imageResults.querySelectorAll('.image-result-delete').forEach(button => {
+        button.addEventListener('click', () => deleteImageOutput(button.dataset.output, button.dataset.label, button));
+      });
+    }
+  }
+
+  const activeJobs = jobs
+    .filter(job => job.status === 'running' || job.status === 'queued')
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'running' ? -1 : 1;
+      return (a.queue_position || 0) - (b.queue_position || 0);
+    });
+  imageQueue.classList.toggle('visible', activeJobs.length > 0);
+  const runningCount = activeJobs.filter(job => job.status === 'running').length;
+  const queuedCount = activeJobs.filter(job => job.status === 'queued').length;
+  imageQueueCount.textContent = `${runningCount} 运行 · ${queuedCount} 排队`;
+  const nextQueueSignature = JSON.stringify(activeJobs.map(job => [
+    job.job_id, job.status, job.queue_position, job.task, job.quant, job.output,
+  ]));
+  if (nextQueueSignature !== imageQueueSignature) {
+    imageQueueSignature = nextQueueSignature;
+    imageQueueList.innerHTML = activeJobs.map(job => {
+      const running = job.status === 'running';
+      const state = running ? '运行中' : `#${job.queue_position || '?'}`;
+      return `<div class="image-queue-item ${running ? 'running' : 'queued'}"><span class="image-queue-state">${state}</span><div class="image-queue-main"><div class="image-queue-line"><span class="image-queue-task">${escapeHtml(imageTaskLabel(job.task))}</span><span class="image-queue-model">${escapeHtml(job.quant || '—')}</span></div><div class="image-queue-output" title="${escapeAttr(job.output || '')}">${escapeHtml(job.output || '等待分配输出')}</div></div></div>`;
+    }).join('');
+  }
+
+  const active = activeJobs[0];
+  if (active) {
+    const percent = active.status === 'running' ? Math.max(1, Number(active.progress_percent) || 1) : 0;
+    imageJobStatus.classList.add('visible');
+    imageJobTitle.textContent = active.status === 'running' ? (active.phase_label || '正在处理图像') : '图像任务等待执行';
+    imageJobDetail.textContent = `${active.quant || ''} · ${active.output || ''}${active.queue_position ? ` · 队列 ${active.queue_position}` : ''}`;
+    imageJobProgress.style.width = `${Math.min(100, percent)}%`;
+  } else {
+    imageJobStatus.classList.remove('visible');
+    imageJobProgress.style.width = '0%';
+  }
+}
+
+function syncImageState(snapshot) {
+  updateImageCapabilities(snapshot.image_capabilities);
+  renderImageJobs(snapshot);
+}
+
+async function uploadReferenceFiles() {
+  const entries = Object.entries(files);
+  const total = entries.reduce((sum, [, selected]) => sum + selected.length, 0);
+  if (!total) return {};
+
+  const uploaded = {};
+  let completed = 0;
+  for (const [key, selected] of entries) {
+    uploaded[key] = [];
+    for (const file of selected) {
+      showGenerationStatus(
+        'running',
+        '正在上传参考文件',
+        `${completed + 1}/${total} · ${file.name}`
+      );
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const result = await fetchJSON('/api/uploads', {
+        method: 'POST',
+        body: form,
+      });
+      uploaded[key].push(result.token);
+      completed += 1;
+    }
+  }
+  return uploaded;
+}
+
+function validateReferenceSelection() {
+  const count = key => (files[key] || []).length;
+  if (currentMode === 'frame-anchor' && count('first_frame') + count('last_frame') === 0) {
+    return '请至少选择首帧或末帧图片';
+  }
+  if (currentMode === 'ref-image' && count('ref_image') === 0) {
+    return '请选择至少一张参考图片';
+  }
+  if (currentMode === 'ref-video' && count('ref_video') === 0) {
+    return '请选择参考视频';
+  }
+  if (currentMode === 'ref-audio') {
+    if (count('ref_image_audio') !== 1) return '参考音频模式需要一张参考图片';
+    if (count('ref_audio') === 0) return '请选择至少一个参考音频';
+  }
+  if (currentMode === 'multi-ref') {
+    const total = count('ref_image') + count('ref_video') + count('ref_audio');
+    if (total < 1 || total > 12) return '混合引用需要 1 到 12 个参考文件';
+  }
+  return '';
+}
+
+// 生成
+generateBtn.addEventListener('click', async () => {
+  if (generateBtn.disabled) return;
+  if (!prompt.value.trim()) { prompt.focus(); return; }
+  if (REF2VA_MODES.has(currentMode) && modelCapabilities.ref2va === false) {
+    showGenerationStatus(
+      'failed',
+      '参考模式暂不可用',
+      '当前模型目录缺少 Ref2VA 检查点，任务未上传、未加入队列。'
+    );
+    return;
+  }
+  const selectionError = validateReferenceSelection();
+  if (selectionError) {
+    showGenerationStatus('failed', '参考文件不完整', selectionError);
+    return;
+  }
+
+  generateBtn.disabled = true;
+  generateBtn.textContent = '提交中...';
+  try {
+    const payload = {
+      mode: currentMode,
+      prompt: prompt.value,
+      width: parseInt(width.value),
+      height: parseInt(height.value),
+      frames: parseInt(frames.value),
+      steps: parseInt(steps.value),
+      layers: parseInt(layers.value),
+      reuse: parseInt(reuse.value),
+      seed: seed.value ? parseInt(seed.value) : null,
+      output: output.value || 'outputs/generation.mp4',
+      ssd_streaming: ssdStreaming.value === '1',
+      int8_row_fc2: int8Row.value === '1',
+      files: {}
+    };
+    payload.files = await uploadReferenceFiles();
+
+    const job = await fetchJSON('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    knownJobStates.set(job.job_id, 'queued');
+    showGenerationStatus('running', '任务已加入队列', `输出: ${job.output}`);
+    await syncServerState();
+  } catch (error) {
+    statusDot.className = 'status-dot idle';
+    statusText.textContent = '提交失败';
+    showGenerationStatus('failed', '任务提交失败', error.message);
+  } finally {
+    generateBtn.disabled = false;
+    generateBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M8 5v14l11-7z"/></svg> 加入生成队列';
+  }
+});
+
+function addOutput(result) {
+  const key = result.job_id || result.output;
+  if (outputs.some(item => (item.job_id || item.output) === key)) return;
+
+  const succeeded = result.status === 'succeeded' || result.success === true;
+  const params = result.params || {};
+  const paramParts = [];
+  if (params.width && params.height) paramParts.push(`${params.width}×${params.height}`);
+  if (params.frames) paramParts.push(`${params.frames}帧`);
+  if (params.steps) paramParts.push(`${params.steps}步`);
+  if (!paramParts.length && result.output) paramParts.push(result.output);
+  const mode = MODE_CONFIG[result.mode] || MODE_CONFIG.text;
+  const ts = result.finished_at || result.created_at || new Date().toLocaleString();
+  const errorText = (result.error || result.log || '生成失败').slice(-1000);
+
+  galleryEmpty.style.display = 'none';
+  const card = document.createElement('div');
+  card.className = 'output-card' + (succeeded ? '' : ' failed');
+  card.dataset.jobId = key || '';
+  card.dataset.output = result.output || '';
+  const media = succeeded
+    ? `<video src="${escapeAttr(result.video || '')}" controls preload="metadata"></video><span class="dur-badge">${escapeHtml(result.duration || '--')}</span>`
+    : `<div class="output-failure">生成失败\n${escapeHtml(errorText)}</div>`;
+  card.innerHTML = `
+    <div class="output-thumb">${media}</div>
+    <div class="output-body">
+      <div class="output-title-row">
+        <div class="output-prompt">${escapeHtml(result.prompt || result.output || '未命名任务')}</div>
+        ${result.output ? `
+          <button class="output-delete-btn" type="button" title="删除视频" aria-label="删除 ${escapeAttr(result.prompt || result.output || '视频')}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>
+          </button>` : ''}
+      </div>
+      <div class="output-meta">
+        <span class="output-mode-badge${succeeded ? '' : ' failed'}">${succeeded ? escapeHtml(mode.cliLabel) : '失败'}</span>
+        <span class="output-params">${escapeHtml(paramParts.join(' · '))}</span>
+      </div>
+      <div class="output-time">${escapeHtml(ts)}</div>
+    </div>
+  `;
+  const deleteButton = card.querySelector('.output-delete-btn');
+  if (deleteButton) {
+    deleteButton.addEventListener('click', () => deleteOutput(result, card, deleteButton));
+  }
+  outputList.prepend(card);
+  outputs.push(result);
+  updateGallerySummary();
+}
+
+function updateGallerySummary() {
+  const successCount = outputs.filter(item => item.status === 'succeeded' || item.success === true).length;
+  const failedCount = outputs.length - successCount;
+  galleryCount.textContent = failedCount
+    ? `${successCount} 个成功 · ${failedCount} 个失败`
+    : `${successCount} 个文件`;
+  galleryEmpty.style.display = outputs.length ? 'none' : 'flex';
+}
+
+async function deleteOutput(result, card, button) {
+  const name = result.prompt || result.output || '此视频';
+  if (!window.confirm(`确定永久删除“${name}”吗？\n此操作会同时删除磁盘上的视频文件，无法撤销。`)) return;
+
+  button.disabled = true;
+  card.classList.add('deleting');
+  try {
+    await fetchJSON('/api/outputs/' + encodeURIComponent(result.output), { method: 'DELETE' });
+    const video = card.querySelector('video');
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+    outputs = outputs.filter(item => item.output !== result.output);
+    document.querySelectorAll('.output-card').forEach(item => {
+      if (item.dataset.output === result.output) item.remove();
+    });
+    updateGallerySummary();
+    if (!isGenerating) {
+      statusDot.className = 'status-dot idle';
+      statusText.textContent = '已删除视频';
+      statusTime.textContent = result.output;
+    }
+  } catch (error) {
+    card.classList.remove('deleting');
+    button.disabled = false;
+    if (!isGenerating) {
+      statusDot.className = 'status-dot idle';
+      statusText.textContent = '删除失败: ' + error.message;
+    }
+  }
+}
+
+function formatSeconds(value) {
+  const seconds = Math.max(0, Math.round(Number(value) || 0));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRest = minutes % 60;
+  return minuteRest ? `${hours} 小时 ${minuteRest} 分` : `${hours} 小时`;
+}
+
+function renderJobQueue(snapshot) {
+  const activeJobs = (snapshot.outputs || [])
+    .filter(job => job.kind !== 'image' && (job.status === 'running' || job.status === 'queued'))
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'running' ? -1 : 1;
+      return (a.queue_position || 0) - (b.queue_position || 0);
+    });
+  isGenerating = activeJobs.length > 0;
+  jobQueue.classList.toggle('visible', isGenerating);
+  jobQueueList.innerHTML = activeJobs.map(job => {
+    const running = job.status === 'running';
+    const percent = Math.max(0, Math.min(100, Number(job.progress_percent) || 0));
+    const label = running ? `${Math.round(percent)}% · 估算` : `排队 ${job.queue_position || ''}`.trim();
+    return `
+      <div class="job-queue-item ${running ? 'running' : 'queued'}" data-job-id="${escapeAttr(job.job_id)}">
+        <span class="job-queue-state">${label}</span>
+        <span class="job-queue-prompt" title="${escapeAttr(job.prompt || '')}">${escapeHtml(job.prompt || '未命名任务')}</span>
+        <span class="job-queue-output">${escapeHtml(running ? (job.phase_label || '正在生成') : (job.output || ''))}</span>
+      </div>`;
+  }).join('');
+
+  if (isGenerating) {
+    const running = activeJobs.find(job => job.status === 'running');
+    const queuedCount = activeJobs.filter(job => job.status === 'queued').length;
+    const percent = running ? Math.max(1, Math.min(99.5, Number(running.progress_percent) || 1)) : 0;
+    const phase = running ? (running.phase_label || '正在生成') : '等待执行';
+    progressBar.classList.add('active');
+    progressMeta.classList.add('active');
+    progressFill.style.width = `${percent}%`;
+    progressBar.setAttribute('aria-valuenow', String(Math.round(percent)));
+    progressPhase.textContent = phase;
+    progressPercent.textContent = `${Math.round(percent)}% · 估算`;
+    statusDot.className = 'status-dot running';
+    statusText.textContent = running
+      ? `${phase}${queuedCount ? ` · ${queuedCount} 个排队` : ''}`
+      : `${queuedCount} 个任务排队`;
+    statusTime.textContent = running ? `${Math.round(percent)}% · 已用 ${formatSeconds(running.elapsed_seconds)}` : '';
+    const phaseUnits = running && running.phase_total > 1
+      ? `${running.phase_completed}/${running.phase_total}`
+      : '';
+    const timing = running
+      ? `已用 ${formatSeconds(running.elapsed_seconds)} · ${running.eta_seconds == null ? '预计时间重新计算中' : `预计剩余 ${formatSeconds(running.eta_seconds)}`}`
+      : '';
+    showGenerationStatus(
+      'running',
+      running ? `正在生成视频 · ${Math.round(percent)}%（估算）` : '任务等待执行',
+      running
+        ? `${phase}${phaseUnits ? ` · ${phaseUnits}` : ''}\n${timing}${queuedCount ? `\n后面还有 ${queuedCount} 个任务` : ''}`
+        : `队列中有 ${queuedCount} 个任务`
+    );
+  } else {
+    progressFill.style.width = '0%';
+    progressBar.setAttribute('aria-valuenow', '0');
+    progressBar.classList.remove('active');
+    progressMeta.classList.remove('active');
+  }
+}
+
+async function syncServerState(initial = false) {
+  if (statusSyncInFlight) return;
+  statusSyncInFlight = true;
+  try {
+    const snapshot = await fetchJSON('/api/status');
+    updateModeAvailability(snapshot.capabilities);
+    syncImageState(snapshot);
+    const terminalJobs = (snapshot.outputs || [])
+      .filter(job => job.kind !== 'image' && (job.status === 'succeeded' || job.status === 'failed'));
+    const serverKeys = new Set(terminalJobs.map(job => job.job_id || job.output));
+
+    outputs = outputs.filter(item => {
+      const keep = serverKeys.has(item.job_id || item.output);
+      if (!keep) {
+        document.querySelectorAll('.output-card').forEach(card => {
+          if (card.dataset.jobId === (item.job_id || item.output)) card.remove();
+        });
+      }
+      return keep;
+    });
+
+    terminalJobs.forEach(job => {
+      const previous = knownJobStates.get(job.job_id);
+      addOutput(job);
+      if (!initial && previous && previous !== job.status) {
+        if (job.status === 'succeeded') {
+          statusDot.className = 'status-dot done';
+          statusText.textContent = '生成成功';
+          statusTime.textContent = job.duration || '';
+          showGenerationStatus('succeeded', '视频生成成功', `输出: ${job.output}\n耗时: ${job.duration || '--'}`);
+        } else {
+          statusDot.className = 'status-dot idle';
+          statusText.textContent = '生成失败';
+          statusTime.textContent = '';
+          showGenerationStatus('failed', '视频生成失败', job.error || '后端进程返回失败状态');
+        }
+      }
+      knownJobStates.set(job.job_id, job.status);
+    });
+    (snapshot.outputs || []).forEach(job => {
+      if (!knownJobStates.has(job.job_id)) knownJobStates.set(job.job_id, job.status);
+    });
+    updateGallerySummary();
+    renderJobQueue(snapshot);
+
+    if (!isGenerating && snapshot.status === 'idle') {
+      statusDot.className = 'status-dot idle';
+      if (initial) {
+        statusText.textContent = '就绪';
+        statusTime.textContent = '';
+      }
+    }
+  } catch (error) {
+    showGenerationStatus('failed', '无法连接生成服务', error.message);
+  } finally {
+    statusSyncInFlight = false;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = String(text);
+  return div.innerHTML;
+}
+
+function escapeAttr(text) {
+  return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+renderFileUploads();
+setImageTask('t2i');
+imageQuant.addEventListener('change', () => {
+  if (location.hash === '#images') deviceBadge.textContent = `${imageQuant.value} · MPS · 本地 Final`;
+});
+selectAspectRatio('16:9', 2);
+syncAccelerationOptions();
+setView(location.hash.slice(1), false);
+syncServerState(true);
+setInterval(() => syncServerState(false), 1000);
+</script>

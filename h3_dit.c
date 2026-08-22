@@ -92,6 +92,7 @@ struct h3_dit {
     int fused_patch_projection;
     int fused_patch_pack;
     int token_reduction;
+    h3_token_reduction_axis token_reduction_axis;
     int token_reduction_active;
     unsigned token_reduction_begin;
     unsigned token_reduction_end;
@@ -375,6 +376,81 @@ static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
     return 1;
 }
 
+int h3_dit_token_reduction_shape(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis,
+        uint32_t *full_rows, uint32_t *reduced_rows) {
+    if (latent_t < 1 || latent_h < 2 || latent_w < 2 ||
+        latent_h % 2 || latent_w % 2 || !full_rows || !reduced_rows ||
+        (axis != H3_TOKEN_REDUCTION_HORIZONTAL &&
+         axis != H3_TOKEN_REDUCTION_TIME)) return 0;
+    uint64_t spatial_height = (uint64_t)(unsigned)latent_h / 2;
+    uint64_t spatial_width = (uint64_t)(unsigned)latent_w / 2;
+    uint64_t spatial = spatial_height * spatial_width;
+    uint64_t full = (uint64_t)(unsigned)latent_t * spatial;
+    uint64_t reduced = axis == H3_TOKEN_REDUCTION_HORIZONTAL ?
+        (uint64_t)(unsigned)latent_t * spatial_height *
+            ((spatial_width + 1) / 2) :
+        (1u + (uint64_t)(unsigned)latent_t / 2u) * spatial;
+    if (!spatial || full > UINT32_MAX || reduced > UINT32_MAX) return 0;
+    *full_rows = (uint32_t)full;
+    *reduced_rows = (uint32_t)reduced;
+    return 1;
+}
+
+int h3_dit_token_reduction_pair(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis, uint32_t reduced_row,
+        uint32_t *first, uint32_t *second) {
+    uint32_t full_rows, reduced_rows;
+    if (!first || !second ||
+        !h3_dit_token_reduction_shape(
+            latent_t, latent_h, latent_w, axis, &full_rows, &reduced_rows) ||
+        reduced_row >= reduced_rows) return 0;
+    uint32_t spatial_height = (uint32_t)latent_h / 2;
+    uint32_t spatial_width = (uint32_t)latent_w / 2;
+    if (axis == H3_TOKEN_REDUCTION_HORIZONTAL) {
+        uint32_t reduced_width = (spatial_width + 1) / 2;
+        uint32_t source = (reduced_row / reduced_width) * spatial_width +
+                          (reduced_row % reduced_width) * 2;
+        *first = source;
+        *second = source + (source % spatial_width + 1 < spatial_width ? 1u : 0u);
+    } else {
+        uint32_t spatial = spatial_height * spatial_width;
+        uint32_t reduced_time = reduced_row / spatial;
+        uint32_t spatial_index = reduced_row % spatial;
+        uint32_t source_time = reduced_time ? 1u + (reduced_time - 1u) * 2u : 0u;
+        *first = source_time * spatial + spatial_index;
+        *second = reduced_time && source_time + 1u < (uint32_t)latent_t ?
+            *first + spatial : *first;
+    }
+    return *first < full_rows && *second < full_rows;
+}
+
+int h3_dit_token_reduction_parent(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis, uint32_t full_row,
+        uint32_t *parent) {
+    uint32_t full_rows, reduced_rows;
+    if (!parent ||
+        !h3_dit_token_reduction_shape(
+            latent_t, latent_h, latent_w, axis, &full_rows, &reduced_rows) ||
+        full_row >= full_rows) return 0;
+    uint32_t spatial_height = (uint32_t)latent_h / 2;
+    uint32_t spatial_width = (uint32_t)latent_w / 2;
+    if (axis == H3_TOKEN_REDUCTION_HORIZONTAL) {
+        uint32_t reduced_width = (spatial_width + 1) / 2;
+        *parent = (full_row / spatial_width) * reduced_width +
+                  (full_row % spatial_width) / 2;
+    } else {
+        uint32_t spatial = spatial_height * spatial_width;
+        uint32_t time = full_row / spatial;
+        uint32_t reduced_time = time ? 1u + (time - 1u) / 2u : 0u;
+        *parent = reduced_time * spatial + full_row % spatial;
+    }
+    return *parent < reduced_rows;
+}
+
 static int configure_token_reduction(h3_dit *dit, int requested,
                                      char *error, size_t error_size) {
     const char *enabled = getenv("H3_TOKEN_REDUCTION");
@@ -444,31 +520,45 @@ static int configure_token_reduction(h3_dit *dit, int requested,
             return 0;
         }
     }
-    uint32_t spatial_height = (uint32_t)dit->latent_h / 2;
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint64_t reduced_video =
-        (uint64_t)(uint32_t)dit->latent_t * spatial_height * reduced_width;
-    if (!spatial_height || !spatial_width ||
-        (uint64_t)(uint32_t)dit->latent_t * spatial_height * spatial_width !=
-            dit->video_rows ||
+    h3_token_reduction_axis axis = H3_TOKEN_REDUCTION_HORIZONTAL;
+    const char *axis_text = getenv("H3_TOKEN_REDUCTION_AXIS");
+    if (axis_text && *axis_text) {
+        if (!strcmp(axis_text, "horizontal"))
+            axis = H3_TOKEN_REDUCTION_HORIZONTAL;
+        else if (!strcmp(axis_text, "time"))
+            axis = H3_TOKEN_REDUCTION_TIME;
+        else {
+            fail(error, error_size,
+                 "H3_TOKEN_REDUCTION_AXIS must be horizontal or time");
+            return 0;
+        }
+    }
+    uint32_t full_video, reduced_video;
+    if (!h3_dit_token_reduction_shape(
+            dit->latent_t, dit->latent_h, dit->latent_w, axis,
+            &full_video, &reduced_video) ||
+        full_video != dit->video_rows ||
         dit->video_target_start + dit->video_rows != dit->sequence ||
-        reduced_video > UINT32_MAX ||
         reduced_video > UINT32_MAX - dit->video_target_start) {
         fail(error, error_size,
              "token reduction requires the target video to end the packed layout");
         return 0;
     }
     dit->token_reduction = 1;
+    dit->token_reduction_axis = axis;
     dit->token_reduction_begin = begin;
     dit->token_reduction_end = end;
     dit->token_reduction_early_steps = early_steps;
     dit->token_reduction_early_end = early_end;
     dit->token_reduction_scale = scale;
-    dit->reduced_video_rows = (uint32_t)reduced_video;
+    dit->reduced_video_rows = reduced_video;
     dit->token_baseline_rows = dit->video_rows - dit->reduced_video_rows;
     dit->reduced_sequence = dit->video_target_start +
                             dit->reduced_video_rows;
+    if (getenv("H3_PROFILE"))
+        fprintf(stderr, "h3: %s token reduction %u -> %u target rows\n",
+                axis == H3_TOKEN_REDUCTION_TIME ? "temporal" : "horizontal",
+                full_video, reduced_video);
     return 1;
 }
 
@@ -479,24 +569,24 @@ static void token_pool_sources(const h3_dit *dit, uint32_t reduced_row,
         *second = reduced_row;
         return;
     }
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint32_t local = reduced_row - dit->video_target_start;
-    uint32_t source = dit->video_target_start +
-        (local / reduced_width) * spatial_width +
-        (local % reduced_width) * 2;
-    *first = source;
-    *second = source + ((source - dit->video_target_start) % spatial_width + 1 <
-                        spatial_width ? 1u : 0u);
+    uint32_t local_first, local_second;
+    int ok = h3_dit_token_reduction_pair(
+        dit->latent_t, dit->latent_h, dit->latent_w,
+        dit->token_reduction_axis,
+        reduced_row - dit->video_target_start,
+        &local_first, &local_second);
+    *first = ok ? dit->video_target_start + local_first : reduced_row;
+    *second = ok ? dit->video_target_start + local_second : reduced_row;
 }
 
 static uint32_t token_reduced_parent(const h3_dit *dit, uint32_t full_row) {
     if (full_row < dit->video_target_start) return full_row;
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint32_t local = full_row - dit->video_target_start;
-    return dit->video_target_start + (local / spatial_width) * reduced_width +
-           (local % spatial_width) / 2;
+    uint32_t parent;
+    int ok = h3_dit_token_reduction_parent(
+        dit->latent_t, dit->latent_h, dit->latent_w,
+        dit->token_reduction_axis,
+        full_row - dit->video_target_start, &parent);
+    return ok ? dit->video_target_start + parent : full_row;
 }
 
 static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,

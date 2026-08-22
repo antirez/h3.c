@@ -509,6 +509,9 @@ therefore opt-in rather than the close-reference default.
 `H3_TOKEN_REDUCTION_BLOCKS` can override the later `4:30` interval;
 `H3_TOKEN_REDUCTION_EARLY=STEPS:END` overrides the early schedule and `0`
 disables it. `H3_DISABLE_TOKEN_REDUCTION=1` provides an in-context exact oracle.
+`H3_TOKEN_REDUCTION_AXIS=time` is an experimental long-video mode: it preserves
+the first temporal latent and pairs subsequent adjacent temporal latents while
+leaving every spatial position intact. The default remains `horizontal`.
 `H3_DISABLE_FUSED_TOKEN_POOL_ADALN=1` and
 `H3_DISABLE_FUSED_TOKEN_ADALN=1` independently restore the two-kernel entry and
 exit boundaries for diagnosis.

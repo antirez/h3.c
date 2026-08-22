@@ -70,6 +70,7 @@ typedef struct {
 struct h3_dit {
     h3_gpu *gpu;
     h3_weight_store *weights;
+    h3_weight_store *int8_weights;
     h3_dit_schedule *schedule;
     int fused_mlp;
     int nax_mlp;
@@ -262,6 +263,28 @@ static h3_gpu_tensor *f2(h3_dit *dit, const char *name, uint64_t rows,
     uint64_t shape[] = {rows, columns};
     return h3_weight_load_f32(dit->weights, dit->gpu, name, 2, shape,
                               error, error_size);
+}
+
+static h3_gpu_tensor *sidecar_i8_2(h3_dit *dit, const char *name,
+                                   uint64_t rows, uint64_t columns,
+                                   char *error, size_t error_size) {
+    uint64_t shape[] = {rows, columns};
+    return h3_weight_load_i8(dit->int8_weights, dit->gpu, name, 2, shape,
+                             error, error_size);
+}
+
+static h3_gpu_tensor *sidecar_scale(h3_dit *dit, const char *name,
+                                    uint64_t rows,
+                                    char *error, size_t error_size) {
+    char scale_name[192];
+    int length = snprintf(scale_name, sizeof(scale_name), "%s.h3_scale", name);
+    if (length < 0 || (size_t)length >= sizeof(scale_name)) {
+        fail(error, error_size, "INT8 sidecar tensor name is too long");
+        return NULL;
+    }
+    uint64_t shape[] = {rows};
+    return h3_weight_load_f32(dit->int8_weights, dit->gpu, scale_name, 1,
+                              shape, error, error_size);
 }
 
 static int copy_layout(h3_dit *dit, const h3_layout *layout,
@@ -597,21 +620,39 @@ static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,
     block->field = bf1(dit, name, width, error, error_size);                    \
     if (!block->field) return 0;                                                \
 } while (0)
-#define LOAD2(field, suffix, rows, columns) do {                               \
+#define LOAD_MATRIX(field, int8_field, scales_field, suffix, rows, columns,    \
+                    enabled, keep_bf16) do {                                   \
     snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
-    block->field = bf2(dit, name, rows, columns, error, error_size);            \
-    if (!block->field) return 0;                                                \
+    if ((enabled) && dit->int8_weights) {                                      \
+        block->int8_field = sidecar_i8_2(                                      \
+            dit, name, rows, columns, error, error_size);                      \
+        block->scales_field = sidecar_scale(                                   \
+            dit, name, rows, error, error_size);                               \
+        if (!block->int8_field || !block->scales_field) return 0;              \
+        if (keep_bf16) {                                                       \
+            block->field = bf2(dit, name, rows, columns, error, error_size);   \
+            if (!block->field) return 0;                                       \
+        }                                                                      \
+    } else {                                                                   \
+        block->field = bf2(dit, name, rows, columns, error, error_size);       \
+        if (!block->field) return 0;                                           \
+    }                                                                          \
 } while (0)
     LOAD1(norm1, "norm1.weight", HIDDEN);
     LOAD1(norm2, "norm2.weight", HIDDEN);
-    LOAD2(qkv, "attn.qkv_proj.weight", INNER * 3, HIDDEN);
+    LOAD_MATRIX(qkv, qkv_int8, qkv_scales, "attn.qkv_proj.weight",
+                INNER * 3, HIDDEN, dit->int8_qkv, dit->keep_bf16_qkv);
     LOAD1(q_norm, "attn.q_norm.weight", HEAD_DIM);
     LOAD1(k_norm, "attn.k_norm.weight", HEAD_DIM);
-    LOAD2(out, "attn.out_proj.weight", HIDDEN, INNER);
-    LOAD2(fc1, "mlp.fc1.weight", FFN * 2, HIDDEN);
-    LOAD2(fc2, "mlp.fc2.weight", HIDDEN, FFN);
+    LOAD_MATRIX(out, out_int8, out_scales, "attn.out_proj.weight",
+                HIDDEN, INNER, dit->int8_attention_out,
+                dit->keep_bf16_attention_out);
+    LOAD_MATRIX(fc1, fc1_int8, fc1_scales, "mlp.fc1.weight",
+                FFN * 2, HIDDEN, dit->int8_mlp, dit->keep_bf16_mlp);
+    LOAD_MATRIX(fc2, fc2_int8, fc2_scales, "mlp.fc2.weight",
+                HIDDEN, FFN, dit->int8_mlp, dit->keep_bf16_mlp);
 #undef LOAD1
-#undef LOAD2
+#undef LOAD_MATRIX
     return 1;
 }
 
@@ -1346,13 +1387,13 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
         } else {
             if (!load_block(dit, &dit->blocks[index], prefix,
                             error, error_size)) return 0;
-            if (dit->int8_mlp &&
+            if (dit->int8_mlp && !dit->blocks[index].fc1_int8 &&
                 !quantize_block_mlp(dit, &dit->blocks[index],
                                     error, error_size)) return 0;
-            if (dit->int8_qkv &&
+            if (dit->int8_qkv && !dit->blocks[index].qkv_int8 &&
                 !quantize_block_qkv(dit, &dit->blocks[index],
                                     error, error_size)) return 0;
-            if (dit->int8_attention_out &&
+            if (dit->int8_attention_out && !dit->blocks[index].out_int8 &&
                 !quantize_block_attention_out(
                     dit, &dit->blocks[index], error, error_size)) return 0;
         }
@@ -1752,6 +1793,21 @@ static h3_dit *load_dit(const char *weight_directory,
         (getenv("H3_INT8_KEEP_BF16_MLP") ||
          getenv("H3_BENCH_INT8_MLP_AB") ||
          getenv("H3_INT8_MLP_STAGE"));
+    const char *int8_sidecar = getenv("H3_INT8_SIDECAR");
+    if (int8_sidecar && *int8_sidecar) {
+        if (dit->ssd_streaming ||
+            (!dit->int8_mlp && !dit->int8_qkv && !dit->int8_attention_out)) {
+            fail(error, error_size,
+                 "H3_INT8_SIDECAR requires the resident M5 INT8 path");
+            goto failed;
+        }
+        dit->int8_weights = h3_weight_store_open(
+            int8_sidecar, error, error_size);
+        if (!dit->int8_weights) goto failed;
+        if (getenv("H3_PROFILE"))
+            fprintf(stderr, "h3: loading prequantized INT8 weights from %s\n",
+                    int8_sidecar);
+    }
     h3_gpu_profile_set_label(dit->gpu, "H3 DiT");
     report(progress, progress_opaque, "refine text", 0, 1);
     if (!refine_text(dit, text, error, error_size)) goto failed;
@@ -3146,6 +3202,7 @@ void h3_dit_free(h3_dit *dit) {
                 dit->stream_wait_seconds);
     }
     h3_gpu_free(dit->gpu);
+    h3_weight_store_free(dit->int8_weights);
     h3_weight_store_free(dit->weights);
     h3_layout_free(&dit->layout);
     free(dit);

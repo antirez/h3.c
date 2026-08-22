@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 非均匀 reuse 搜索 | 已实现，等待模型验证 | `tools/search_reuse_schedule.py` |
 | 独立 SDPA 基准 | 已实现并完成首轮 M5 Pro 测试 | `make h3_sdpa_bench` |
-| INT8 sidecar | 设计完成，待实现 | 第5节 |
+| INT8 sidecar | 离线转换器与C直载路径已实现，等待完整模型一致性验证 | `H3_INT8_SIDECAR` |
 | 时间维 token reduction | host映射已实现，等待模型质量验证 | `H3_TOKEN_REDUCTION_AXIS=time` |
 | 稀疏/量化 attention | 等长序列完整 DiT profile 后决策 | 第7节 |
 | M3 INT8、在线FBCache、K/V缓存 | 暂缓 | 第8节 |

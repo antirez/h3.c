@@ -727,6 +727,21 @@ releases each block's BF16 FC1/FC2 buffers after their submitted quantization
 finishes, reducing measured peak tensor storage to 25.9 GiB from the BF16
 path's 36.4 GiB. Runtime weight quantization still adds startup time.
 
+The experimental sidecar path prequantizes the four large matrix families and
+loads their I8 weights and F32 row scales directly on later runs:
+
+```sh
+python3 tools/build_int8_sidecar.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --out MiniMax-H3/FL2VA/transformer/.h3-int8
+
+H3_INT8_SIDECAR=MiniMax-H3/FL2VA/transformer/.h3-int8 \
+  ./h3 -d MiniMax-H3 -p "A person walks" -o outputs/walk.mp4
+```
+
+This path is M5-only, incompatible with `--ssd-streaming`, and currently
+opt-in while full-checkpoint parity and manifest validation are completed.
+
 The fastest M5 path also quantizes each DiT QKV projection and writes its
 Q/K/V tiles directly in head-major attention layout before the existing Q/K
 normalization and RoPE kernel. In a fixed 50-layer, 19-transition 512x512

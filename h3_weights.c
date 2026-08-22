@@ -177,6 +177,9 @@ static h3_gpu_tensor *load_tensor(const h3_weight_store *store, h3_gpu *gpu,
     h3_gpu_tensor *result = dtype == H3_DTYPE_BF16 ?
         h3_gpu_tensor_load_bf16(gpu, header->path, tensor->file_offset,
                                 (size_t)elements) :
+        dtype == H3_DTYPE_I8 ?
+        h3_gpu_tensor_load_i8(gpu, header->path, tensor->file_offset,
+                              (size_t)elements) :
         h3_gpu_tensor_load_f32(gpu, header->path, tensor->file_offset,
                                (size_t)elements);
     if (!result) {
@@ -190,6 +193,14 @@ h3_gpu_tensor *h3_weight_load_bf16(const h3_weight_store *store, h3_gpu *gpu,
                                    const uint64_t *shape,
                                    char *error, size_t error_size) {
     return load_tensor(store, gpu, name, ndim, shape, H3_DTYPE_BF16,
+                       error, error_size);
+}
+
+h3_gpu_tensor *h3_weight_load_i8(const h3_weight_store *store, h3_gpu *gpu,
+                                 const char *name, int ndim,
+                                 const uint64_t *shape,
+                                 char *error, size_t error_size) {
+    return load_tensor(store, gpu, name, ndim, shape, H3_DTYPE_I8,
                        error, error_size);
 }
 

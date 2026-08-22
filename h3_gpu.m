@@ -633,7 +633,8 @@ static h3_gpu_tensor *h3_gpu_tensor_load_file(h3_gpu *opaque, const char *path,
     size_t bytes = elements * item_size;
     if ((uint64_t)bytes > (uint64_t)INT64_MAX - file_offset) return NULL;
     const char *zero_copy = getenv("H3_ZERO_COPY_WEIGHTS");
-    int transformer_weight = strstr(path, "/transformer/") != NULL;
+    int transformer_weight = strstr(path, "/transformer/") != NULL ||
+                             dtype == H3_GPU_I8;
     int m5 = [gpu.device.name rangeOfString:@"M5"].location != NSNotFound;
     int map_weight = bytes &&
         ((zero_copy && !strcmp(zero_copy, "1")) ||
@@ -731,6 +732,12 @@ h3_gpu_tensor *h3_gpu_tensor_load_bf16(h3_gpu *opaque, const char *path,
                                        uint64_t file_offset, size_t elements) {
     return h3_gpu_tensor_load_file(opaque, path, file_offset, elements,
                                    sizeof(uint16_t), H3_GPU_BF16, "BF16");
+}
+
+h3_gpu_tensor *h3_gpu_tensor_load_i8(h3_gpu *opaque, const char *path,
+                                     uint64_t file_offset, size_t elements) {
+    return h3_gpu_tensor_load_file(opaque, path, file_offset, elements,
+                                   sizeof(int8_t), H3_GPU_I8, "I8");
 }
 
 h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *opaque, const char *path,

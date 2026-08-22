@@ -190,7 +190,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 web-test: h3
 	python3 -W error::ResourceWarning -m unittest -v \
 		tests/test_server.py tests/test_fold_turbo_lora.py \
-		tests/test_reuse_search.py
+		tests/test_reuse_search.py tests/test_int8_sidecar.py
 
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors

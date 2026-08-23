@@ -307,6 +307,7 @@ body {
   width: 100%; aspect-ratio: 4 / 3; display: block; object-fit: cover;
   background: var(--code-bg);
 }
+video.file-preview { object-fit: contain; }
 .file-preview-caption {
   padding: 7px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 10px var(--font-mono); color: var(--text-secondary);
@@ -571,12 +572,15 @@ body {
 .output-card:hover { border-color: var(--border-default); }
 .output-card.failed { border-color: rgba(239, 68, 68, 0.45); }
 .output-thumb {
-  width: 100%; aspect-ratio: 16/9;
+  width: 100%; aspect-ratio: var(--video-aspect, 16/9);
   background: var(--bg-tertiary);
   display: flex; align-items: center; justify-content: center;
   position: relative; overflow: hidden;
 }
-.output-thumb video { width: 100%; height: 100%; object-fit: cover; }
+.output-thumb video {
+  width: 100%; height: 100%; object-fit: contain;
+  background: #050606;
+}
 .output-failure {
   padding: 24px; text-align: center; color: var(--danger);
   font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -1615,6 +1619,15 @@ function renderFileLists() {
     list.querySelectorAll('.file-remove').forEach(button => {
       button.addEventListener('click', () => removeFile(f.key, parseInt(button.dataset.index)));
     });
+    list.querySelectorAll('video.file-preview').forEach(video => {
+      const syncVideoAspect = () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          video.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+        }
+      };
+      video.addEventListener('loadedmetadata', syncVideoAspect);
+      if (video.readyState >= 1) syncVideoAspect();
+    });
     if (count) count.textContent = items.length + '/' + f.max;
 
     const addButton = document.querySelector(`.file-add-button[data-key="${f.key}"]`);
@@ -2128,6 +2141,11 @@ function addOutput(result) {
   const mode = MODE_CONFIG[result.mode] || MODE_CONFIG.text;
   const ts = result.finished_at || result.created_at || new Date().toLocaleString();
   const errorText = (result.error || result.log || '生成失败').slice(-1000);
+  const mediaWidth = Number(params.width);
+  const mediaHeight = Number(params.height);
+  const aspectStyle = mediaWidth > 0 && mediaHeight > 0
+    ? ` style="--video-aspect:${mediaWidth} / ${mediaHeight}"`
+    : '';
 
   galleryEmpty.style.display = 'none';
   const card = document.createElement('div');
@@ -2138,7 +2156,7 @@ function addOutput(result) {
     ? `<video src="${escapeAttr(result.video || '')}" controls preload="metadata"></video><span class="dur-badge">${escapeHtml(result.duration || '--')}</span>`
     : `<div class="output-failure">生成失败\n${escapeHtml(errorText)}</div>`;
   card.innerHTML = `
-    <div class="output-thumb">${media}</div>
+    <div class="output-thumb"${aspectStyle}>${media}</div>
     <div class="output-body">
       <div class="output-title-row">
         <div class="output-prompt">${escapeHtml(result.prompt || result.output || '未命名任务')}</div>
@@ -2154,6 +2172,18 @@ function addOutput(result) {
       <div class="output-time">${escapeHtml(ts)}</div>
     </div>
   `;
+  const video = card.querySelector('.output-thumb video');
+  if (video) {
+    const syncVideoAspect = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        video.closest('.output-thumb').style.setProperty(
+          '--video-aspect', `${video.videoWidth} / ${video.videoHeight}`
+        );
+      }
+    };
+    video.addEventListener('loadedmetadata', syncVideoAspect);
+    if (video.readyState >= 1) syncVideoAspect();
+  }
   const deleteButton = card.querySelector('.output-delete-btn');
   if (deleteButton) {
     deleteButton.addEventListener('click', () => deleteOutput(result, card, deleteButton));

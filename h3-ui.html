@@ -418,6 +418,27 @@ video.file-preview { object-fit: contain; }
 .aspect-label { font: 600 11px/1 var(--font-mono); }
 .aspect-name { font-size: 9px; line-height: 1; color: var(--text-muted); }
 .aspect-option.active .aspect-name { color: var(--accent); opacity: 0.7; }
+.source-aspect-sync {
+  display: none; align-items: center; gap: 10px; margin: 9px 0 11px;
+  padding: 9px 11px; border: 1px solid var(--border-subtle); border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-tertiary) 88%, var(--accent) 12%);
+  cursor: pointer;
+}
+.source-aspect-sync.visible { display: flex; }
+.source-aspect-sync input { position: absolute; opacity: 0; pointer-events: none; }
+.source-aspect-switch {
+  width: 30px; height: 17px; padding: 2px; border-radius: 999px;
+  background: var(--border-default); transition: background 0.18s ease;
+}
+.source-aspect-switch::after {
+  content: ''; display: block; width: 13px; height: 13px; border-radius: 50%;
+  background: var(--text-primary); transition: transform 0.18s ease;
+}
+.source-aspect-sync input:checked + .source-aspect-switch { background: var(--accent); }
+.source-aspect-sync input:checked + .source-aspect-switch::after { transform: translateX(13px); }
+.source-aspect-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.source-aspect-copy strong { color: var(--text-secondary); font-size: 11px; }
+.source-aspect-copy span { color: var(--text-muted); font-size: 9px; }
 .resolution-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px; align-items: end; margin-bottom: 12px;
@@ -949,6 +970,14 @@ video.file-preview { object-fit: contain; }
           <span class="aspect-label">3:4</span><span class="aspect-name">竖幅</span>
         </button>
       </div>
+      <label class="source-aspect-sync" id="sourceAspectSync">
+        <input type="checkbox" id="matchInputAspect" checked>
+        <span class="source-aspect-switch" aria-hidden="true"></span>
+        <span class="source-aspect-copy">
+          <strong>输出比例跟随输入图片</strong>
+          <span id="sourceAspectStatus">上传首帧或参考图后自动选择合法画布</span>
+        </span>
+      </label>
       <div class="resolution-row">
         <div class="config-group">
           <label for="resolution">分辨率</label>
@@ -1262,6 +1291,8 @@ const RESOLUTION_PRESETS = {
 
 let currentMode = 'text';
 let currentRatio = '16:9';
+let manualRatio = '16:9';
+let sourceAspectRequest = 0;
 let files = {};
 let outputs = [];
 let isGenerating = false;
@@ -1282,6 +1313,9 @@ const height = document.getElementById('height');
 const resolution = document.getElementById('resolution');
 const resolutionMeta = document.getElementById('resolutionMeta');
 const aspectOptions = document.querySelectorAll('.aspect-option');
+const sourceAspectSync = document.getElementById('sourceAspectSync');
+const matchInputAspect = document.getElementById('matchInputAspect');
+const sourceAspectStatus = document.getElementById('sourceAspectStatus');
 const deviceBadge = document.getElementById('deviceBadge');
 const frames = document.getElementById('frames');
 const steps = document.getElementById('steps');
@@ -1386,6 +1420,18 @@ navItems.forEach(item => {
 window.addEventListener('popstate', () => setView(location.hash.slice(1), false));
 
 function applyResolution() {
+  if (currentRatio === 'source') {
+    const [selectedWidth, selectedHeight] = resolution.value.split('x').map(Number);
+    if (selectedWidth > 0 && selectedHeight > 0) {
+      width.value = selectedWidth;
+      height.value = selectedHeight;
+      const megapixels = (selectedWidth * selectedHeight / 1000000).toFixed(2);
+      resolutionMeta.innerHTML = `<strong>原图比例 · 自动</strong><span>${megapixels} MP · 合法画布</span>`;
+      deviceBadge.textContent = `M5 Pro · 64 GB · ${selectedWidth}×${selectedHeight}`;
+      updateCommand();
+    }
+    return;
+  }
   const selected = RESOLUTION_PRESETS[currentRatio].find(
     item => `${item.width}x${item.height}` === resolution.value
   ) || RESOLUTION_PRESETS[currentRatio][2];
@@ -1400,6 +1446,7 @@ function applyResolution() {
 function selectAspectRatio(ratio, tierIndex = resolution.selectedIndex) {
   if (!RESOLUTION_PRESETS[ratio]) return;
   currentRatio = ratio;
+  manualRatio = ratio;
   aspectOptions.forEach(option => {
     const active = option.dataset.ratio === ratio;
     option.classList.toggle('active', active);
@@ -1415,9 +1462,110 @@ function selectAspectRatio(ratio, tierIndex = resolution.selectedIndex) {
 }
 
 aspectOptions.forEach(option => {
-  option.addEventListener('click', () => selectAspectRatio(option.dataset.ratio));
+  option.addEventListener('click', () => {
+    matchInputAspect.checked = false;
+    selectAspectRatio(option.dataset.ratio);
+    updateSourceAspectVisibility();
+  });
 });
 resolution.addEventListener('change', applyResolution);
+
+function legalCanvasForAspect(sourceWidth, sourceHeight, targetPixels) {
+  const sourceRatio = sourceWidth / sourceHeight;
+  const maximumPixels = 768 * 1344;
+  const wantedPixels = Math.min(maximumPixels, Math.max(32 * 32, targetPixels));
+  let best = null;
+  for (let candidateWidth = 32; candidateWidth <= 1344; candidateWidth += 32) {
+    for (let candidateHeight = 32; candidateHeight <= 1344; candidateHeight += 32) {
+      const pixels = candidateWidth * candidateHeight;
+      if (pixels > maximumPixels) continue;
+      const ratioError = Math.abs(Math.log((candidateWidth / candidateHeight) / sourceRatio));
+      const areaError = Math.abs(Math.log(pixels / wantedPixels));
+      const score = ratioError * 100 + areaError;
+      if (!best || score < best.score || (score === best.score && pixels > best.pixels)) {
+        best = { width: candidateWidth, height: candidateHeight, pixels, score };
+      }
+    }
+  }
+  return best;
+}
+
+function primaryAspectFile() {
+  const keys = {
+    'frame-anchor': ['first_frame', 'last_frame'],
+    'ref-image': ['ref_image'],
+    'ref-audio': ['ref_image_audio'],
+    'multi-ref': ['ref_image'],
+  }[currentMode] || [];
+  for (const key of keys) {
+    const selected = files[key] || [];
+    if (selected.length) return selected[0];
+  }
+  return null;
+}
+
+async function imageDimensions(file) {
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const dimensions = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return dimensions;
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      image.onerror = () => reject(new Error('浏览器无法读取图片尺寸'));
+      image.src = url;
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function updateSourceAspectVisibility() {
+  const supportsImage = MODE_CONFIG[currentMode].files.some(item => item.accept === 'image/*');
+  sourceAspectSync.classList.toggle('visible', supportsImage);
+  if (!supportsImage) sourceAspectStatus.textContent = '当前模式没有图片输入';
+}
+
+async function syncOutputAspectFromInput() {
+  const request = ++sourceAspectRequest;
+  if (!matchInputAspect.checked) return;
+  const file = primaryAspectFile();
+  if (!file) {
+    sourceAspectStatus.textContent = '上传首帧或参考图后自动选择合法画布';
+    return;
+  }
+  try {
+    const dimensions = await imageDimensions(file);
+    if (request !== sourceAspectRequest || file !== primaryAspectFile() ||
+        !matchInputAspect.checked) return;
+    const targetPixels = Math.max(32 * 32, Number(width.value) * Number(height.value));
+    const canvas = legalCanvasForAspect(dimensions.width, dimensions.height, targetPixels);
+    currentRatio = 'source';
+    aspectOptions.forEach(option => {
+      option.classList.remove('active');
+      option.setAttribute('aria-checked', 'false');
+    });
+    resolution.innerHTML = `<option value="${canvas.width}x${canvas.height}" selected>${canvas.width} × ${canvas.height} · 跟随原图</option>`;
+    width.value = canvas.width;
+    height.value = canvas.height;
+    const divisor = (a, b) => b ? divisor(b, a % b) : a;
+    const common = divisor(dimensions.width, dimensions.height);
+    sourceAspectStatus.textContent = `${dimensions.width / common}:${dimensions.height / common} → ${canvas.width}×${canvas.height}，人物比例不拉伸`;
+    applyResolution();
+  } catch (error) {
+    sourceAspectStatus.textContent = `${error.message}；服务端提交时仍会校正比例`;
+  }
+}
+
+matchInputAspect.addEventListener('change', () => {
+  if (matchInputAspect.checked) syncOutputAspectFromInput();
+  else if (currentRatio === 'source') selectAspectRatio(manualRatio);
+  updateSourceAspectVisibility();
+});
 
 // 模式切换
 modeCards.forEach(card => {
@@ -1437,6 +1585,8 @@ modeCards.forEach(card => {
     files = {};
     applyRecommendedDefaults();
     renderFileUploads();
+    updateSourceAspectVisibility();
+    syncOutputAspectFromInput();
     updateCommand();
   });
 });
@@ -1584,6 +1734,7 @@ function addFiles(key, newFiles) {
   const accepted = newFiles.filter(file => acceptsFile(file, config.accept));
   files[key] = files[key].concat(accepted.slice(0, remaining));
   renderFileLists();
+  syncOutputAspectFromInput();
   updateCommand();
 }
 
@@ -1593,6 +1744,7 @@ function removeFile(key, index) {
     if (removed) releaseFilePreview(removed);
   }
   renderFileLists();
+  syncOutputAspectFromInput();
   updateCommand();
 }
 
@@ -2105,6 +2257,7 @@ generateBtn.addEventListener('click', async () => {
       output: output.value || 'outputs/generation.mp4',
       ssd_streaming: ssdStreaming.value === '1',
       int8_row_fc2: int8Row.value === '1',
+      match_input_aspect: matchInputAspect.checked,
       files: {}
     };
     payload.files = await uploadReferenceFiles();
@@ -2376,6 +2529,7 @@ function escapeAttr(text) {
 }
 
 renderFileUploads();
+updateSourceAspectVisibility();
 setImageTask('t2i');
 imageQuant.addEventListener('change', () => {
   if (location.hash === '#images') deviceBadge.textContent = `${imageQuant.value} · MPS · 本地 Final`;

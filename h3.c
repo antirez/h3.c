@@ -1232,7 +1232,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             keyframes[keyframe_count++] = 0;
             if (!h3_ffmpeg_read_image_f32(
                     params->first_frame, render_width, render_height,
-                    H3_IMAGE_FIT_STRETCH, &condition_pixels[visual_count],
+                    H3_IMAGE_FIT_COVER, &condition_pixels[visual_count],
                     detail, sizeof(detail))) {
                 h3_set_error(ctx, "%s", detail);
                 goto cleanup;

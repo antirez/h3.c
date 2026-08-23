@@ -160,6 +160,7 @@ def normalize_video_params(params, defaults=None):
         "seed": integer("seed", defaults.get("seed", 42), 0, (1 << 64) - 1),
         "ssd_streaming": boolean("ssd_streaming"),
         "int8_row_fc2": boolean("int8_row_fc2"),
+        "match_input_aspect": boolean("match_input_aspect"),
     }
     width, height = normalized["width"], normalized["height"]
     if width % 32 or height % 32:
@@ -173,6 +174,79 @@ def normalize_video_params(params, defaults=None):
     if normalized["ssd_streaming"] and normalized["int8_row_fc2"]:
         raise ValueError("SSD streaming cannot be combined with int8 row FC2")
     return normalized
+
+
+def legal_canvas_for_aspect(source_width, source_height, target_pixels,
+                            max_pixels=768 * 1344, max_edge=1344):
+    """Choose a legal 32-pixel canvas closest to the source aspect and area."""
+    if source_width < 1 or source_height < 1 or target_pixels < 32 * 32:
+        raise ValueError("invalid source dimensions for aspect matching")
+    source_ratio = source_width / source_height
+    target_pixels = min(max_pixels, target_pixels)
+    best = None
+    for candidate_width in range(32, max_edge + 1, 32):
+        for candidate_height in range(32, max_edge + 1, 32):
+            pixels = candidate_width * candidate_height
+            if pixels > max_pixels:
+                continue
+            ratio_error = abs(math.log(
+                (candidate_width / candidate_height) / source_ratio
+            ))
+            area_error = abs(math.log(pixels / target_pixels))
+            score = ratio_error * 100.0 + area_error
+            candidate = (score, area_error, -pixels,
+                         candidate_width, candidate_height)
+            if best is None or candidate < best:
+                best = candidate
+    if best is None:
+        raise ValueError("cannot find a legal output canvas")
+    return best[3], best[4]
+
+
+def primary_image_reference(mode, files):
+    """Return the image that controls output aspect for an image workflow."""
+    keys = {
+        "frame-anchor": ("first_frame", "last_frame"),
+        "ref-image": ("ref_image",),
+        "ref-audio": ("ref_image_audio",),
+        "multi-ref": ("ref_image",),
+    }.get(mode, ())
+    for key in keys:
+        values = files.get(key, [])
+        if values:
+            return values[0]
+    return None
+
+
+def probe_display_size(path, ffprobe):
+    """Read display-oriented dimensions, including common rotation metadata."""
+    command = [
+        ffprobe, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+        "-of", "json", str(path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise ValueError("cannot inspect input image dimensions")
+    try:
+        stream = json.loads(result.stdout)["streams"][0]
+        width, height = int(stream["width"]), int(stream["height"])
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("input image has invalid dimensions") from exc
+    rotation = stream.get("tags", {}).get("rotate", 0)
+    for side_data in stream.get("side_data_list", []):
+        if "rotation" in side_data:
+            rotation = side_data["rotation"]
+            break
+    try:
+        quarter_turn = round(float(rotation) / 90.0)
+    except (TypeError, ValueError):
+        quarter_turn = 0
+    if quarter_turn % 2:
+        width, height = height, width
+    if width < 1 or height < 1:
+        raise ValueError("input image has invalid dimensions")
+    return width, height
 
 
 def worker_hex(value):
@@ -933,6 +1007,30 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({"error": str(exc)}, 400)
             return
 
+        if video_params["match_input_aspect"]:
+            source_image = primary_image_reference(mode, user_files)
+            if source_image:
+                try:
+                    source_width, source_height = probe_display_size(
+                        source_image, self.server.process_env["H3_FFPROBE"]
+                    )
+                    matched_width, matched_height = legal_canvas_for_aspect(
+                        source_width, source_height,
+                        video_params["width"] * video_params["height"],
+                    )
+                except ValueError as exc:
+                    self._json_response({"error": str(exc)}, 400)
+                    return
+                video_params["width"] = matched_width
+                video_params["height"] = matched_height
+                video_params["source_aspect"] = f"{source_width}:{source_height}"
+
+        job_public_params = {key: video_params[key] for key in
+                             ["width", "height", "frames", "steps", "layers", "reuse"]}
+        if video_params.get("source_aspect"):
+            job_public_params["source_aspect"] = video_params["source_aspect"]
+            job_public_params["match_input_aspect"] = True
+
         job_id = uuid.uuid4().hex
         with job_lock:
             # Never let queued jobs or existing files overwrite one another.
@@ -952,8 +1050,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                 "success": None,
                 "prompt": prompt,
                 "mode": mode,
-                "params": {key: video_params[key] for key in
-                           ["width", "height", "frames", "steps", "layers", "reuse"]},
+                "params": job_public_params,
                 "output": output_name,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "estimated_total_seconds": estimate_job_seconds(video_params, mode),

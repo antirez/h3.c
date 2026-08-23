@@ -700,8 +700,8 @@ waveform agrees with the corrected MLX oracle to relative L2 `6.94e-5`.
 `--first-frame`, `--last-frame`, and their combination use the released visual
 VAE encoder, Qwen3-VL vision tower and three-deepstack multimodal presentation,
 0.999 condition augmentation, and fixed condition rows in the native DiT. The
-first image is stretched to the target canvas; the last image is aspect-cover
-scaled and center cropped, matching the reference implementation. `--ref-image`
+first and last images are aspect-cover scaled and center cropped to prevent
+geometric distortion when their source ratio differs from the target. `--ref-image`
 selects the distinct Ref2VA transformer, preserves ordered `<Picture N>`
 presentation, and uses the released down-only aspect-preserving reference canvas.
 `--ref-silent-video` additionally performs bounded 24 fps decoding, the visual

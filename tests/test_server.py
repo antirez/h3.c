@@ -13,6 +13,7 @@ class VideoParameterTests(unittest.TestCase):
         params = server.normalize_video_params({"seed": ""})
         self.assertEqual(params["seed"], 42)
         self.assertEqual((params["width"], params["height"]), (864, 480))
+        self.assertFalse(params["match_input_aspect"])
 
     def test_rejects_invalid_canvas_and_conflicting_memory_modes(self):
         with self.assertRaisesRegex(ValueError, "multiples of 32"):
@@ -24,6 +25,34 @@ class VideoParameterTests(unittest.TestCase):
             })
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
             server.normalize_video_params({"ssd_streaming": "false"})
+
+    def test_source_aspect_selects_legal_canvas_near_target_area(self):
+        self.assertEqual(
+            server.legal_canvas_for_aspect(1920, 1080, 1024 * 576),
+            (1024, 576),
+        )
+        self.assertEqual(
+            server.legal_canvas_for_aspect(3024, 4032, 1024 * 576),
+            (672, 896),
+        )
+        width, height = server.legal_canvas_for_aspect(1000, 667, 1024 * 576)
+        self.assertEqual(width % 32, 0)
+        self.assertEqual(height % 32, 0)
+        self.assertLess(abs(width / height - 1000 / 667), 0.02)
+
+    def test_primary_aspect_image_follows_workflow_order(self):
+        files = {
+            "first_frame": ["first.jpg"],
+            "last_frame": ["last.jpg"],
+            "ref_image": ["reference.jpg"],
+        }
+        self.assertEqual(
+            server.primary_image_reference("frame-anchor", files), "first.jpg"
+        )
+        self.assertEqual(
+            server.primary_image_reference("ref-image", files), "reference.jpg"
+        )
+        self.assertIsNone(server.primary_image_reference("text", files))
 
     def test_maps_real_video_vae_decode_progress(self):
         job = {

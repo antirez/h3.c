@@ -419,17 +419,19 @@ H3_DISABLE_RUNTIME_LORA=1
 
 出现异常时忽略所有 runtime LoRA 参数并给出明确错误，不修改已有 checkpoint 或 sidecar。
 
-## 14. 2026-08-23 实施记录
+## 13. 2026-08-23 实施记录
 
 - C API、三类格式解析、F16/BF16/F32、alpha/rank、SHA-256、shape、重复映射和非有限值检查已实现。
 - 加载时按64行分块执行有序 `B @ A`，每个 adapter 后舍入 BF16；小型 fixture 与预期逐字节一致，实测 host scratch 为 6.1–12.3 MiB。
 - CLI、prepared cache signature、scope、SSD/sidecar冲突及回滚开关已接通。
 - worker 协议、SHA-256 catalog、路径隐藏和 Web 排序/scale/scope UI 已实现。
-- `Mini_Dick_Fix_V1` 已完成 256×256、22帧、2步真实生成 smoke。
+- `Mini_Dick_Fix_V1`、`HMNSFW_AIO_V2`、`riding_pose_H3_i2v_v1.0` 均已完成 FL2VA 256×256、22帧、2步真实生成 smoke；Riding Pose 也已完成显式 `ref2va` scope 的参考图生成。
 - 259个真实 Turbo 目标 tensor 已与 folded checkpoint 逐字节一致。修正 `SGEMM beta=1` 的融合舍入顺序后，基础模型加 runtime Turbo 与 folded Turbo 的 256×256×22、5步 MP4 SHA-256 均为 `6ef511dc6615a6d2c3f3adbeb16d0ce4cd13276807dd4f0ed5f888374dfed8ae`。
+- 常驻 worker 在相同 Riding Pose 配置下首轮35秒量级，第二轮2.53秒；第二轮同时命中 prepared DiT 和 VideoVAE cache，两个输出 MP4 SHA-256 一致。
+- 核心测试、parser/overlay测试、Python服务测试、LoRA Web UI Chrome回归均通过。
 - 三个 Downloads LoRA 已复制到 `MiniMax-H3/loras/runtime/`；原文件保留。Turbo adapter 已移至 `baked/`，旧路径为兼容符号链接。
 
-## 13. 推荐实施顺序
+## 14. 推荐实施顺序
 
 1. 先完成阶段 A 的 parser、C API 和单 LoRA 分块合并。
 2. 用 Turbo adapter 对比当前已验证的离线 folded 模型，建立逐字节 oracle。

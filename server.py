@@ -4,7 +4,7 @@
 Serves the frontend and provides an API to run h3-metal generation.
 
 Usage:
-  python3 server.py [--port 8080] [--model-dir ./MiniMax-H3]
+  python3 server.py [--port 8080] [--model-dir PATH]
 """
 
 import argparse
@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 
 HERE = Path(__file__).parent
+BASE_MODEL_DIR = HERE / "MiniMax-H3"
+TURBO_MODEL_DIR = BASE_MODEL_DIR / "turbo-v4-step600-ema"
 OUTPUTS = HERE / "outputs"
 OUTPUTS.mkdir(exist_ok=True)
 IMAGE_OUTPUTS = OUTPUTS / "images"
@@ -113,8 +115,17 @@ def estimate_job_seconds(params, mode="text"):
     return round(max(20.0, seconds), 1)
 
 
-def normalize_video_params(params):
+def normalize_video_params(params, defaults=None):
     """Validate UI values before mutating the persistent worker session."""
+    defaults = defaults or {
+        "width": 864,
+        "height": 480,
+        "frames": 56,
+        "steps": 20,
+        "layers": 45,
+        "reuse": 2,
+        "seed": 42,
+    }
     def integer(name, default, minimum, maximum):
         raw = params.get(name, default)
         if raw is None or raw == "":
@@ -140,13 +151,13 @@ def normalize_video_params(params):
         raise ValueError(f"{name} must be a boolean")
 
     normalized = {
-        "width": integer("width", 864, 32, 768 * 1344),
-        "height": integer("height", 480, 32, 768 * 1344),
-        "frames": integer("frames", 56, 5, 362),
-        "steps": integer("steps", 20, 2, 1000),
-        "layers": integer("layers", 45, 35, 50),
-        "reuse": integer("reuse", 2, 1, 3),
-        "seed": integer("seed", 42, 0, (1 << 64) - 1),
+        "width": integer("width", defaults.get("width", 864), 32, 768 * 1344),
+        "height": integer("height", defaults.get("height", 480), 32, 768 * 1344),
+        "frames": integer("frames", defaults.get("frames", 56), 5, 362),
+        "steps": integer("steps", defaults.get("steps", 20), 2, 1000),
+        "layers": integer("layers", defaults.get("layers", 45), 35, 50),
+        "reuse": integer("reuse", defaults.get("reuse", 2), 1, 3),
+        "seed": integer("seed", defaults.get("seed", 42), 0, (1 << 64) - 1),
         "ssd_streaming": boolean("ssd_streaming"),
         "int8_row_fc2": boolean("int8_row_fc2"),
     }
@@ -554,6 +565,32 @@ def model_capabilities(model_dir):
     }
 
 
+def generation_profile(model_dir):
+    """Describe safe UI defaults for the selected model tree."""
+    resolved = Path(model_dir).resolve()
+    turbo = (resolved == TURBO_MODEL_DIR.resolve() or
+             resolved.name == "turbo-v4-step600-ema")
+    try:
+        model_arg = "./" + resolved.relative_to(HERE.resolve()).as_posix()
+    except ValueError:
+        model_arg = str(resolved)
+    return {
+        "name": "turbo-v4-step600-ema" if turbo else "base",
+        "model_dir": str(resolved),
+        "model_arg": model_arg,
+        "turbo": turbo,
+        "int8_sidecar": (
+            resolved / "FL2VA/transformer/.h3-int8/source.tsv"
+        ).is_file(),
+        "text_defaults": {
+            "steps": 5 if turbo else 20,
+            "layers": 50 if turbo else 45,
+            "reuse": 1 if turbo else 2,
+        },
+        "reference_defaults": {"steps": 20, "layers": 45, "reuse": 2},
+    }
+
+
 def public_job(job, include_log=True):
     """Return a JSON-safe snapshot without exposing the command arguments."""
     if job is None:
@@ -734,6 +771,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                 "queue_length": len(queued),
                 "outputs": jobs,
                 "capabilities": model_capabilities(self.server.model_dir),
+                "generation_profile": generation_profile(self.server.model_dir),
                 "image_capabilities": image_capabilities(),
                 "video_worker": self.server.video_worker.status(),
             })
@@ -875,7 +913,10 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            video_params = normalize_video_params(params)
+            profile = generation_profile(self.server.model_dir)
+            defaults = (profile["reference_defaults"] if mode in REF2VA_MODES
+                        else profile["text_defaults"])
+            video_params = normalize_video_params(params, defaults)
         except ValueError as exc:
             self._json_response({"error": str(exc)}, 400)
             return
@@ -1367,12 +1408,14 @@ class H3Server(http.server.ThreadingHTTPServer):
 def main():
     parser = argparse.ArgumentParser(description="H3 Studio Web UI Server")
     parser.add_argument("--port", type=int, default=8080, help="Port to listen on")
-    parser.add_argument("--model-dir", default="./MiniMax-H3", help="Path to MiniMax-H3 model directory")
+    parser.add_argument("--model-dir", default=None,
+                        help="Path to MiniMax-H3 model directory (default: local Turbo when available)")
     parser.add_argument("--job-timeout", type=int, default=3600,
                         help="Maximum seconds for one queued generation")
     args = parser.parse_args()
 
-    model_dir = Path(args.model_dir).resolve()
+    preferred = TURBO_MODEL_DIR if checkpoint_ready(TURBO_MODEL_DIR, "FL2VA") else BASE_MODEL_DIR
+    model_dir = Path(args.model_dir).resolve() if args.model_dir else preferred.resolve()
     if not (model_dir / "FL2VA").exists():
         print(f"Warning: {model_dir}/FL2VA not found. Model may not load correctly.")
 

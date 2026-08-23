@@ -55,6 +55,28 @@ class VideoParameterTests(unittest.TestCase):
         anchor = next(line for line in commands if line.startswith("!worker-anchor"))
         self.assertEqual(bytes.fromhex(anchor.split()[2]).decode(), "/tmp/a b.jpg")
 
+    def test_turbo_profile_selects_safe_mode_specific_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "turbo-v4-step600-ema"
+            (root / "FL2VA/transformer/.h3-int8").mkdir(parents=True)
+            (root / "FL2VA/transformer/.h3-int8/source.tsv").write_text("ok")
+            profile = server.generation_profile(root)
+            self.assertTrue(profile["turbo"])
+            self.assertTrue(profile["int8_sidecar"])
+            self.assertEqual(profile["text_defaults"], {
+                "steps": 5, "layers": 50, "reuse": 1,
+            })
+            self.assertEqual(profile["reference_defaults"], {
+                "steps": 20, "layers": 45, "reuse": 2,
+            })
+            normalized = server.normalize_video_params(
+                {}, profile["text_defaults"]
+            )
+            self.assertEqual(
+                (normalized["steps"], normalized["layers"], normalized["reuse"]),
+                (5, 50, 1),
+            )
+
 
 class PersistentWorkerTests(unittest.TestCase):
     @staticmethod

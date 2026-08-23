@@ -919,8 +919,8 @@ body {
       <!-- 质量预设 -->
       <div class="section-label">质量预设</div>
       <div class="presets" id="presets">
-        <button class="preset" data-steps="4" data-layers="45" data-reuse="3">快速预览<span class="preset-speed">~4秒/步</span></button>
-        <button class="preset active" data-steps="20" data-layers="45" data-reuse="2">均衡<span class="preset-speed">~20步/45层</span></button>
+        <button class="preset active" data-profile="turbo" data-steps="5" data-layers="50" data-reuse="1">Turbo 默认<span class="preset-speed">5步/50层</span></button>
+        <button class="preset" data-steps="20" data-layers="45" data-reuse="2">均衡<span class="preset-speed">20步/45层</span></button>
         <button class="preset" data-steps="20" data-layers="50" data-reuse="1">高质量<span class="preset-speed">~20步/50层</span></button>
         <button class="preset" data-steps="50" data-layers="50" data-reuse="1">参考级<span class="preset-speed">~50步/50层</span></button>
       </div>
@@ -970,7 +970,7 @@ body {
         </div>
         <div class="config-group">
           <label>步数</label>
-          <input type="number" id="steps" value="20" min="4" max="100">
+          <input type="number" id="steps" value="5" min="4" max="100">
         </div>
       </div>
 
@@ -983,13 +983,13 @@ body {
         <div class="config-grid">
           <div class="config-group">
             <label>层数</label>
-            <input type="number" id="layers" value="45" min="35" max="50">
+            <input type="number" id="layers" value="50" min="35" max="50">
           </div>
           <div class="config-group">
             <label>复用率</label>
             <select id="reuse">
-              <option value="1">1 (无复用)</option>
-              <option value="2" selected>2 (均衡)</option>
+              <option value="1" selected>1 (无复用)</option>
+              <option value="2">2 (均衡)</option>
               <option value="3">3 (极速)</option>
             </select>
           </div>
@@ -1052,7 +1052,7 @@ body {
         </button>
       </div>
 
-      <div class="command-preview" id="commandPreview">./h3 --profile -d ./MiniMax-H3 -p "your prompt" --width 864 --height 480 --frames 56 --steps 20 --layers 45 --reuse 2 -o outputs/generation.mp4</div>
+      <div class="command-preview" id="commandPreview">./h3 --profile -d ./MiniMax-H3/turbo-v4-step600-ema -p "your prompt" --width 864 --height 480 --frames 56 --steps 5 --layers 50 --reuse 1 -o outputs/generation.mp4</div>
     </div>
 
     <!-- 输出 -->
@@ -1263,6 +1263,9 @@ let outputs = [];
 let isGenerating = false;
 let statusSyncInFlight = false;
 let modelCapabilities = { fl2va: true, ref2va: null };
+let generationProfile = null;
+let generationProfileSignature = '';
+let activeModelArg = './MiniMax-H3/turbo-v4-step600-ema';
 const filePreviewUrls = new WeakMap();
 const knownJobStates = new Map();
 const REF2VA_MODES = new Set(['ref-image', 'ref-video', 'ref-audio', 'multi-ref']);
@@ -1428,6 +1431,7 @@ modeCards.forEach(card => {
     currentMode = card.dataset.mode;
     releaseAllFilePreviews();
     files = {};
+    applyRecommendedDefaults();
     renderFileUploads();
     updateCommand();
   });
@@ -1441,6 +1445,41 @@ function updateModeAvailability(capabilities) {
     card.classList.toggle('unavailable', unavailable);
     card.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
   });
+}
+
+function syncPresetSelection() {
+  presets.forEach(preset => {
+    const selected = Number(preset.dataset.steps) === Number(steps.value)
+      && Number(preset.dataset.layers) === Number(layers.value)
+      && Number(preset.dataset.reuse) === Number(reuse.value);
+    preset.classList.toggle('active', selected);
+  });
+}
+
+function applyRecommendedDefaults() {
+  const referenceMode = REF2VA_MODES.has(currentMode);
+  const defaults = referenceMode
+    ? generationProfile?.reference_defaults
+    : generationProfile?.text_defaults;
+  if (defaults) {
+    steps.value = defaults.steps;
+    layers.value = defaults.layers;
+    reuse.value = defaults.reuse;
+  }
+  const turboPreset = document.querySelector('.preset[data-profile="turbo"]');
+  if (turboPreset) turboPreset.hidden = !generationProfile?.turbo || referenceMode;
+  syncPresetSelection();
+}
+
+function updateGenerationProfile(profile) {
+  if (!profile) return;
+  const signature = JSON.stringify(profile);
+  if (signature === generationProfileSignature) return;
+  generationProfileSignature = signature;
+  generationProfile = profile;
+  activeModelArg = profile.model_arg || './MiniMax-H3';
+  applyRecommendedDefaults();
+  updateCommand();
 }
 
 function renderFileUploads() {
@@ -1605,6 +1644,7 @@ presets.forEach(p => {
     steps.value = p.dataset.steps;
     layers.value = p.dataset.layers;
     reuse.value = p.dataset.reuse;
+    syncPresetSelection();
     updateCommand();
   });
 });
@@ -1647,7 +1687,7 @@ function buildCommand() {
   const r = reuse.value;
   const o = output.value || 'outputs/generation.mp4';
 
-  let cmd = `./h3 --profile -d ./MiniMax-H3 -p "${p.replace(/"/g, '\\"')}" --width ${w} --height ${h} --frames ${f} --steps ${s} --layers ${l} --reuse ${r}`;
+  let cmd = `./h3 --profile -d ${activeModelArg} -p "${p.replace(/"/g, '\\"')}" --width ${w} --height ${h} --frames ${f} --steps ${s} --layers ${l} --reuse ${r}`;
 
   const mode = currentMode;
   if (mode === 'frame-anchor') {
@@ -2241,6 +2281,7 @@ async function syncServerState(initial = false) {
   try {
     const snapshot = await fetchJSON('/api/status');
     updateModeAvailability(snapshot.capabilities);
+    updateGenerationProfile(snapshot.generation_profile);
     syncImageState(snapshot);
     const terminalJobs = (snapshot.outputs || [])
       .filter(job => job.kind !== 'image' && (job.status === 'succeeded' || job.status === 'failed'));

@@ -1,6 +1,6 @@
 # h3.c 运行时 LoRA 设计方案
 
-状态：拟实施
+状态：阶段 A+B 已实现，真实模型验收中
 
 日期：2026-08-23
 
@@ -418,6 +418,16 @@ H3_DISABLE_RUNTIME_LORA=1
 ```
 
 出现异常时忽略所有 runtime LoRA 参数并给出明确错误，不修改已有 checkpoint 或 sidecar。
+
+## 14. 2026-08-23 实施记录
+
+- C API、三类格式解析、F16/BF16/F32、alpha/rank、SHA-256、shape、重复映射和非有限值检查已实现。
+- 加载时按64行分块执行有序 `B @ A`，每个 adapter 后舍入 BF16；小型 fixture 与预期逐字节一致，实测 host scratch 为 6.1–8.8 MiB。
+- CLI、prepared cache signature、scope、SSD/sidecar冲突及回滚开关已接通。
+- worker 协议、SHA-256 catalog、路径隐藏和 Web 排序/scale/scope UI 已实现。
+- `Mini_Dick_Fix_V1` 已完成 256×256、22帧、2步真实生成 smoke。
+- 基础模型加 runtime Turbo 与现有 folded Turbo 都能完成真实生成，但首次 MP4 SHA-256 尚不一致；在宣布逐字节等价前必须继续定位。
+- 三个 Downloads LoRA 已复制到 `MiniMax-H3/loras/runtime/`；原文件保留。Turbo adapter 已移至 `baked/`，旧路径为兼容符号链接。
 
 ## 13. 推荐实施顺序
 

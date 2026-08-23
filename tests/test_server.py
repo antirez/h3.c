@@ -3,6 +3,7 @@ import struct
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import server
@@ -83,6 +84,89 @@ class VideoParameterTests(unittest.TestCase):
         self.assertEqual(bytes.fromhex(run[3]).decode(), request["prompt"])
         anchor = next(line for line in commands if line.startswith("!worker-anchor"))
         self.assertEqual(bytes.fromhex(anchor.split()[2]).decode(), "/tmp/a b.jpg")
+
+    def test_worker_command_preserves_lora_order_and_scope(self):
+        request = {
+            "prompt": "walk",
+            "mode": "text",
+            "params": server.normalize_video_params({}),
+            "files": {},
+            "loras": [
+                {"path": "/models/one.safetensors", "scale": 0.8,
+                 "scope": "fl2va"},
+                {"path": "/models/two.safetensors", "scale": -0.25,
+                 "scope": "both"},
+            ],
+        }
+        commands = server.build_worker_commands(request, "job_1", "/tmp/out.mp4")
+        loras = [line for line in commands if line.startswith("!worker-lora")]
+        self.assertEqual(len(loras), 2)
+        self.assertEqual(loras[0].split()[1:3], ["fl2va", "0.8"])
+        self.assertEqual(bytes.fromhex(loras[0].split()[3]).decode(),
+                         "/models/one.safetensors")
+        self.assertEqual(loras[1].split()[1:3], ["both", "-0.25"])
+
+    def test_lora_selection_uses_hash_ids_without_exposing_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            path = runtime / "style.safetensors"
+            path.write_bytes(b"adapter")
+            identity = path.lstat()
+            catalog = [{
+                "id": "a" * 64,
+                "name": path.name,
+                "size": identity.st_size,
+                "format": "native",
+                "rank": 16,
+                "scopes": ["fl2va", "ref2va", "both"],
+                "supported": True,
+                "_path": str(path.resolve()),
+                "_identity": (identity.st_ino, identity.st_size,
+                              identity.st_mtime_ns),
+            }]
+            with mock.patch.object(server, "LORA_RUNTIME", runtime), \
+                 mock.patch.object(server, "lora_catalog", return_value=catalog):
+                internal, public = server.resolve_lora_selection(
+                    [{"id": "a" * 64, "scale": 0.75, "scope": "fl2va"}],
+                    "/model", "text"
+                )
+            self.assertEqual(internal[0]["path"], str(path.resolve()))
+            self.assertNotIn("path", public[0])
+            self.assertEqual(public[0]["scale"], 0.75)
+
+    def test_process_log_redacts_runtime_lora_path(self):
+        job = {
+            "kind": "video",
+            "status": "running",
+            "started_timestamp": 0.0,
+            "estimated_total_seconds": 10.0,
+            "progress_percent": 0.0,
+            "log": "",
+            "worker_request": {"loras": [{
+                "path": "/private/models/style.safetensors",
+                "name": "style.safetensors",
+            }]},
+        }
+        server.record_process_line(
+            job, "cannot read /private/models/style.safetensors"
+        )
+        self.assertNotIn("/private/models", job["log"])
+        self.assertIn("<LoRA:style.safetensors>", job["log"])
+
+    def test_lora_catalog_ignores_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "runtime"
+            runtime.mkdir()
+            regular = runtime / "regular.safetensors"
+            regular.write_bytes(b"invalid but regular")
+            (runtime / "escape.safetensors").symlink_to(regular)
+            with mock.patch.object(server, "LORA_RUNTIME", runtime):
+                server.lora_catalog_cache.clear()
+                catalog = server.public_lora_catalog(Path(directory) / "model")
+                server.lora_catalog_cache.clear()
+            self.assertEqual([item["name"] for item in catalog],
+                             ["regular.safetensors"])
+            self.assertFalse(catalog[0]["supported"])
 
     def test_turbo_profile_selects_safe_mode_specific_defaults(self):
         with tempfile.TemporaryDirectory() as directory:

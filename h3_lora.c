@@ -48,6 +48,11 @@ typedef struct {
 struct h3_lora_set {
     h3_lora_application entries[8];
     size_t count;
+    size_t total_rows;
+    size_t completed_rows;
+    unsigned reported_percent;
+    h3_lora_progress progress;
+    void *progress_opaque;
     char signature[65];
 };
 
@@ -548,6 +553,14 @@ h3_lora_set *h3_lora_set_open(const h3_lora_spec *specs, size_t count,
         }
         set->entries[set->count++] =
             (h3_lora_application){lora, spec->scale, spec->scope};
+        for (size_t pair = 0; pair < lora->pair_count; pair++) {
+            if (lora->pairs[pair].info.output_dim > SIZE_MAX - set->total_rows) {
+                fail(error, error_size, "runtime LoRA row count overflows");
+                h3_lora_set_free(set);
+                return NULL;
+            }
+            set->total_rows += (size_t)lora->pairs[pair].info.output_dim;
+        }
         uint32_t scope_bits = (uint32_t)spec->scope;
         uint32_t scale_bits;
         memcpy(&scale_bits, &spec->scale, sizeof(scale_bits));
@@ -593,4 +606,43 @@ int h3_lora_set_has_target(const h3_lora_set *set, const char *target) {
     for (size_t index = 0; index < set->count; index++)
         if (h3_lora_find_pair(set->entries[index].lora, target, NULL)) return 1;
     return 0;
+}
+
+void h3_lora_set_progress(const h3_lora_set *opaque,
+                          h3_lora_progress progress, void *progress_opaque) {
+    h3_lora_set *set = (h3_lora_set *)(void *)opaque;
+    if (!set) return;
+    set->progress = progress;
+    set->progress_opaque = progress_opaque;
+    set->completed_rows = 0;
+    set->reported_percent = 0;
+    if (progress) progress(0, set->total_rows, progress_opaque);
+}
+
+void h3_lora_set_advance(const h3_lora_set *opaque, size_t rows) {
+    h3_lora_set *set = (h3_lora_set *)(void *)opaque;
+    if (!set) return;
+    if (rows > set->total_rows - set->completed_rows)
+        set->completed_rows = set->total_rows;
+    else
+        set->completed_rows += rows;
+    unsigned percent = set->total_rows ?
+        (unsigned)((double)set->completed_rows * 100.0 /
+                   (double)set->total_rows) : 100u;
+    if (set->progress && percent > set->reported_percent) {
+        set->reported_percent = percent;
+        set->progress(set->completed_rows, set->total_rows,
+                      set->progress_opaque);
+    }
+}
+
+void h3_lora_set_finish(const h3_lora_set *opaque) {
+    h3_lora_set *set = (h3_lora_set *)(void *)opaque;
+    if (!set) return;
+    set->completed_rows = set->total_rows;
+    if (set->progress && set->reported_percent < 100) {
+        set->reported_percent = 100;
+        set->progress(set->completed_rows, set->total_rows,
+                      set->progress_opaque);
+    }
 }

@@ -27,6 +27,7 @@ typedef struct {
     const char *model_dir;
     h3_params params;
     h3_reference references[12];
+    h3_lora_spec loras[8];
     char *first_frame;
     char *last_frame;
     char output_dir[H3_CLI_PATH];
@@ -288,6 +289,10 @@ static void worker_reset_inputs(h3_cli_state *state) {
     free(state->last_frame);
     state->first_frame = NULL;
     state->last_frame = NULL;
+    for (size_t index = 0; index < state->params.lora_count; index++)
+        free((char *)state->loras[index].path);
+    memset(state->loras, 0, sizeof(state->loras));
+    state->params.lora_count = 0;
     state->worker_config_error = 0;
 }
 
@@ -428,6 +433,40 @@ static void worker_add_reference(h3_cli_state *state, char *argument) {
     }
     reference.path = path;
     state->references[state->params.reference_count++] = reference;
+}
+
+static void worker_add_lora(h3_cli_state *state, char *argument) {
+    char *cursor = argument;
+    char *scope_text = take_word(&cursor);
+    char *scale_text = take_word(&cursor);
+    char *encoded = take_word(&cursor);
+    if (!scope_text || !scale_text || !encoded || take_word(&cursor) ||
+        state->params.lora_count >= 8) {
+        worker_config_fail(state, "invalid runtime LoRA command");
+        return;
+    }
+    h3_lora_scope scope;
+    if (!strcasecmp(scope_text, "fl2va")) scope = H3_LORA_FL2VA;
+    else if (!strcasecmp(scope_text, "ref2va")) scope = H3_LORA_REF2VA;
+    else if (!strcasecmp(scope_text, "both")) scope = H3_LORA_BOTH;
+    else {
+        worker_config_fail(state, "unknown runtime LoRA scope");
+        return;
+    }
+    char *end = NULL;
+    errno = 0;
+    float scale = strtof(scale_text, &end);
+    if (errno || end == scale_text || !end || *end || !isfinite(scale)) {
+        worker_config_fail(state, "invalid runtime LoRA scale");
+        return;
+    }
+    char *path = decode_hex(encoded, H3_CLI_PATH - 1);
+    if (!path) {
+        worker_config_fail(state, "invalid runtime LoRA path encoding");
+        return;
+    }
+    state->loras[state->params.lora_count++] =
+        (h3_lora_spec){path, scale, scope};
 }
 
 static void list_references(const h3_cli_state *state) {
@@ -699,6 +738,8 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
         worker_set_anchor(state, argument);
     else if (!strcasecmp(command, "worker-ref") && state->worker_mode)
         worker_add_reference(state, argument);
+    else if (!strcasecmp(command, "worker-lora") && state->worker_mode)
+        worker_add_lora(state, argument);
     else if (!strcasecmp(command, "worker-run") && state->worker_mode)
         worker_run(state, argument);
     else if (!strcasecmp(command, "help")) print_help();
@@ -912,8 +953,12 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
     state.params = *initial;
     const h3_reference *initial_references = initial->references;
     size_t initial_reference_count = initial->reference_count;
+    const h3_lora_spec *initial_loras = initial->loras;
+    size_t initial_lora_count = initial->lora_count;
     state.params.references = state.references;
     state.params.reference_count = 0;
+    state.params.loras = state.loras;
+    state.params.lora_count = 0;
     state.params.output_path = NULL;
     state.params.first_frame = NULL;
     state.params.last_frame = NULL;
@@ -927,8 +972,9 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
     if (initial->last_frame) state.last_frame = strdup(initial->last_frame);
     if ((initial->first_frame && !state.first_frame) ||
         (initial->last_frame && !state.last_frame) ||
-        initial_reference_count > 12 ||
-        (initial_reference_count && !initial_references)) {
+        initial_reference_count > 12 || initial_lora_count > 8 ||
+        (initial_reference_count && !initial_references) ||
+        (initial_lora_count && !initial_loras)) {
         fprintf(stderr, "h3: cannot copy initial interactive inputs\n");
         free(state.first_frame);
         free(state.last_frame);
@@ -945,6 +991,18 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
             return 1;
         }
         state.params.reference_count++;
+    }
+    for (size_t index = 0; index < initial_lora_count; index++) {
+        state.loras[index] = initial_loras[index];
+        state.loras[index].path = initial_loras[index].path ?
+            strdup(initial_loras[index].path) : NULL;
+        if (!state.loras[index].path) {
+            fprintf(stderr, "h3: cannot copy initial runtime LoRA %zu\n",
+                    index + 1);
+            worker_reset_inputs(&state);
+            return 1;
+        }
+        state.params.lora_count++;
     }
     snprintf(state.output_dir, sizeof(state.output_dir), "/tmp/h3-XXXXXX");
     if (!mkdtemp(state.output_dir)) {
@@ -1008,10 +1066,8 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
         free(line);
     }
     if (*history) linenoiseHistorySave(history);
-    free(state.first_frame);
-    free(state.last_frame);
     free(state.last_prompt);
-    clear_references(&state);
+    worker_reset_inputs(&state);
     if (!worker_mode) puts("Goodbye.");
     return 0;
 }

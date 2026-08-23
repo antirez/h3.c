@@ -9,12 +9,15 @@ Usage:
 
 import argparse
 import cgi
+import hashlib
 import json
 import math
 import os
 import queue
 import re
 import signal
+import stat
+import struct
 import shutil
 import subprocess
 import time
@@ -27,6 +30,9 @@ from pathlib import Path
 HERE = Path(__file__).parent
 BASE_MODEL_DIR = HERE / "MiniMax-H3"
 TURBO_MODEL_DIR = BASE_MODEL_DIR / "turbo-v4-step600-ema"
+LORA_ROOT = Path(os.environ.get("H3_LORA_DIR", BASE_MODEL_DIR / "loras"))
+LORA_BAKED = LORA_ROOT / "baked"
+LORA_RUNTIME = LORA_ROOT / "runtime"
 OUTPUTS = HERE / "outputs"
 OUTPUTS.mkdir(exist_ok=True)
 IMAGE_OUTPUTS = OUTPUTS / "images"
@@ -50,6 +56,7 @@ PROGRESS_LINE = re.compile(
     r"^\s*([A-Za-z][A-Za-z0-9 ]*?)\s+(\d+)\s*/\s*(\d+)\s*$"
 )
 PHASE_PROGRESS = {
+    "LoRA inspect": (1.0, 4.0, "校验 LoRA"),
     "tokenizer": (1.0, 3.0, "解析提示词"),
     "audio VAE encoder": (3.0, 12.0, "编码参考音频"),
     "video VAE encoder": (3.0, 12.0, "编码参考画面"),
@@ -57,6 +64,7 @@ PHASE_PROGRESS = {
     "text encoder": (12.0, 24.0, "编码文本条件"),
     "refine text": (20.0, 26.0, "优化文本条件"),
     "precompute AdaLN": (24.0, 29.0, "准备扩散参数"),
+    "LoRA merge": (26.0, 40.0, "合并 LoRA 权重"),
     "load transformer core": (29.0, 40.0, "加载生成模型"),
     # Metal's default sampler enqueues commands before the GPU finishes them.
     # Keep this range deliberately narrow; refresh_running_progress advances
@@ -74,6 +82,8 @@ PHASE_PROGRESS = {
 job_lock = threading.Lock()
 current_job = None
 job_results = {}
+lora_catalog_lock = threading.Lock()
+lora_catalog_cache = {}
 
 
 def resolve_media_tool(env_name, program):
@@ -275,6 +285,11 @@ def build_worker_commands(request, job_id, output_file):
         commands.append("!ssd-streaming on")
     if params["int8_row_fc2"]:
         commands.append("!int8-row-fc2 on")
+    for lora in request.get("loras", []):
+        commands.append(
+            f"!worker-lora {lora['scope']} {lora['scale']:.9g} "
+            f"{worker_hex(lora['path'])}"
+        )
 
     mode = request["mode"]
     files = request["files"]
@@ -297,6 +312,174 @@ def build_worker_commands(request, job_id, output_file):
         f"{worker_hex(request['prompt'])}"
     )
     return commands
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_lora_header(path):
+    with path.open("rb") as stream:
+        prefix = stream.read(8)
+        if len(prefix) != 8:
+            raise ValueError("truncated safetensors header")
+        header_size = struct.unpack("<Q", prefix)[0]
+        payload_limit = path.stat().st_size - 8
+        if header_size < 2 or header_size > payload_limit or header_size > 64 * 1024 * 1024:
+            raise ValueError("invalid safetensors header size")
+        header = json.loads(stream.read(header_size))
+    header.pop("__metadata__", None)
+    return header_size, header
+
+
+def _checkpoint_tensor_map(transformer):
+    from tools.fold_turbo_lora import checkpoint_tensors, read_header
+    shards = sorted(transformer.glob("model-*.safetensors"))
+    return checkpoint_tensors([(path, read_header(path)[1]) for path in shards])
+
+
+def lora_catalog(model_dir):
+    """Inspect regular runtime LoRA files and cache immutable public metadata."""
+    LORA_RUNTIME.mkdir(parents=True, exist_ok=True)
+    files = []
+    with os.scandir(LORA_RUNTIME) as entries:
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            if not entry.name.lower().endswith(".safetensors"):
+                continue
+            status = entry.stat(follow_symlinks=False)
+            files.append((entry.name, status.st_ino, status.st_size,
+                          status.st_mtime_ns))
+    files.sort()
+    variant_dirs = {
+        "fl2va": Path(model_dir) / "FL2VA/transformer",
+        "ref2va": Path(model_dir) / "Ref2VA/transformer",
+    }
+    variant_key = tuple(
+        (name, directory.is_dir(),
+         tuple((path.name, path.stat().st_size, path.stat().st_mtime_ns)
+               for path in sorted(directory.glob("model-*.safetensors"))))
+        for name, directory in variant_dirs.items()
+    )
+    cache_key = (tuple(files), variant_key)
+    with lora_catalog_lock:
+        if lora_catalog_cache.get("key") == cache_key:
+            return lora_catalog_cache["items"]
+
+    from tools.fold_turbo_lora import resolve_pairs
+    checkpoints = {
+        name: _checkpoint_tensor_map(directory)
+        for name, directory in variant_dirs.items() if directory.is_dir()
+    }
+    catalog = []
+    for name, inode, size, mtime_ns in files:
+        path = LORA_RUNTIME / name
+        item = {
+            "id": _sha256_file(path),
+            "name": name,
+            "size": size,
+            "format": "unknown",
+            "rank": None,
+            "scopes": [],
+            "supported": False,
+            "_path": str(path.resolve()),
+            "_identity": (inode, size, mtime_ns),
+        }
+        try:
+            header_size, header = _read_lora_header(path)
+            base = 8 + header_size
+            formats = set()
+            ranks = set()
+            for scope, checkpoint in checkpoints.items():
+                try:
+                    pairs, detected = resolve_pairs(path, header, base, checkpoint)
+                except SystemExit:
+                    continue
+                item["scopes"].append(scope)
+                formats.update(detected)
+                ranks.update(int(header[a_key]["shape"][0])
+                             for a_key, _, _ in pairs.values())
+            item["format"] = "+".join(sorted(formats)) or "unknown"
+            item["rank"] = min(ranks) if len(ranks) == 1 else (
+                f"{min(ranks)}–{max(ranks)}" if ranks else None
+            )
+            item["supported"] = bool(item["scopes"])
+            if set(item["scopes"]) == {"fl2va", "ref2va"}:
+                item["scopes"].append("both")
+        except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError,
+                json.JSONDecodeError, struct.error) as exc:
+            item["error"] = str(exc)
+        catalog.append(item)
+    with lora_catalog_lock:
+        lora_catalog_cache.clear()
+        lora_catalog_cache.update(key=cache_key, items=catalog)
+    return catalog
+
+
+def public_lora_catalog(model_dir):
+    hidden = {"_path", "_identity"}
+    return [{key: value for key, value in item.items() if key not in hidden}
+            for item in lora_catalog(model_dir)]
+
+
+def resolve_lora_selection(requested, model_dir, mode):
+    if requested in (None, []):
+        return [], []
+    if not isinstance(requested, list) or len(requested) > 8:
+        raise ValueError("loras must contain at most 8 entries")
+    catalog = {item["id"]: item for item in lora_catalog(model_dir)}
+    active_scope = "ref2va" if mode in REF2VA_MODES else "fl2va"
+    internal, public = [], []
+    for index, value in enumerate(requested):
+        if not isinstance(value, dict):
+            raise ValueError(f"LoRA {index + 1} must be an object")
+        identifier = str(value.get("id", "")).lower()
+        item = catalog.get(identifier)
+        if not item or not item.get("supported"):
+            raise ValueError(f"LoRA {index + 1} is not available")
+        try:
+            scale = float(value.get("scale", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"LoRA {index + 1} scale is invalid") from exc
+        if not math.isfinite(scale):
+            raise ValueError(f"LoRA {index + 1} scale must be finite")
+        scope = str(value.get("scope", "fl2va")).lower()
+        if scope not in {"fl2va", "ref2va", "both"} or scope not in item["scopes"]:
+            raise ValueError(f"LoRA {index + 1} does not support scope {scope}")
+        if scope != "both" and scope != active_scope:
+            raise ValueError(f"LoRA {index + 1} scope does not match {active_scope}")
+        path = Path(item["_path"])
+        try:
+            identity = path.lstat()
+            path.relative_to(LORA_RUNTIME.resolve())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"LoRA {index + 1} left the runtime directory") from exc
+        if (not stat.S_ISREG(identity.st_mode) or
+            (identity.st_ino, identity.st_size, identity.st_mtime_ns) !=
+                item["_identity"]):
+            raise ValueError(f"LoRA {index + 1} changed after catalog inspection")
+        internal.append({
+            "id": identifier,
+            "name": item["name"],
+            "path": item["_path"],
+            "scale": scale,
+            "scope": scope,
+        })
+        public.append({
+            "id": identifier,
+            "name": item["name"],
+            "scale": scale,
+            "scope": scope,
+        })
+    return internal, public
 
 
 def image_capabilities():
@@ -364,6 +547,10 @@ def refresh_running_progress(job, now=None):
 def record_process_line(job, line):
     """Append one live CLI record and translate known progress phases."""
     clean = line.strip()
+    for lora in (job.get("worker_request") or {}).get("loras", []):
+        path = lora.get("path")
+        if path:
+            clean = clean.replace(path, f"<LoRA:{lora.get('name', 'adapter')}>")
     if not clean:
         return
     with job_lock:
@@ -846,6 +1033,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                 "outputs": jobs,
                 "capabilities": model_capabilities(self.server.model_dir),
                 "generation_profile": generation_profile(self.server.model_dir),
+                "lora_catalog": public_lora_catalog(self.server.model_dir),
                 "image_capabilities": image_capabilities(),
                 "video_worker": self.server.video_worker.status(),
             })
@@ -996,6 +1184,19 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
+            selected_loras, public_loras = resolve_lora_selection(
+                params.get("loras"), self.server.model_dir, mode
+            )
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return
+        if selected_loras and video_params["ssd_streaming"]:
+            self._json_response({
+                "error": "runtime LoRA cannot be combined with SSD streaming"
+            }, 400)
+            return
+
+        try:
             output_file, output_name = resolve_output_path(params.get("output"))
         except ValueError as exc:
             self._json_response({"error": str(exc)}, 400)
@@ -1050,6 +1251,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                 "success": None,
                 "prompt": prompt,
                 "mode": mode,
+                "loras": public_loras,
                 "params": job_public_params,
                 "output": output_name,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1067,6 +1269,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                     "mode": mode,
                     "params": video_params,
                     "files": user_files,
+                    "loras": selected_loras,
                 },
                 "upload_paths": sorted({
                     path for paths in user_files.values() for path in paths

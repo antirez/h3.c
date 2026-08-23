@@ -1,6 +1,7 @@
 #include "h3_weights.h"
 #include "h3_lora.h"
 
+#define ACCELERATE_NEW_LAPACK
 #include <Accelerate/Accelerate.h>
 
 #include <dirent.h>
@@ -393,6 +394,7 @@ h3_gpu_tensor *h3_weight_load_bf16_with_loras(
                 }
                 tile_bf16[element] = f32_to_bf16(tile_f32[element]);
             }
+            if (ok) h3_lora_set_advance(loras, (size_t)tile_rows);
         }
         if (ok) ok = h3_gpu_tensor_write_bf16_range(
             output, (size_t)first_row * (size_t)columns,

@@ -8,6 +8,8 @@
 
 typedef struct h3_lora h3_lora;
 typedef struct h3_lora_set h3_lora_set;
+typedef void (*h3_lora_progress)(size_t completed_rows, size_t total_rows,
+                                 void *opaque);
 
 typedef struct {
     const char *target;
@@ -47,5 +49,9 @@ int h3_lora_set_entry(const h3_lora_set *set, size_t index,
                       const h3_lora **lora, float *scale,
                       h3_lora_scope *scope);
 int h3_lora_set_has_target(const h3_lora_set *set, const char *target);
+void h3_lora_set_progress(const h3_lora_set *set,
+                          h3_lora_progress progress, void *opaque);
+void h3_lora_set_advance(const h3_lora_set *set, size_t rows);
+void h3_lora_set_finish(const h3_lora_set *set);
 
 #endif

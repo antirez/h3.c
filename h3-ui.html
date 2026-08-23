@@ -439,6 +439,36 @@ video.file-preview { object-fit: contain; }
 .source-aspect-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .source-aspect-copy strong { color: var(--text-secondary); font-size: 11px; }
 .source-aspect-copy span { color: var(--text-muted); font-size: 9px; }
+.lora-panel {
+  margin: 0 0 18px; padding: 12px; border: 1px solid var(--border-subtle);
+  border-radius: 10px; background: var(--bg-secondary);
+}
+.lora-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.lora-add {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-default));
+  border-radius: 7px; padding: 0 13px; background: var(--accent-dim);
+  color: var(--accent); font-weight: 650; cursor: pointer;
+}
+.lora-add:disabled { opacity: 0.38; cursor: not-allowed; }
+.lora-stack { display: grid; gap: 7px; margin-top: 9px; }
+.lora-empty { color: var(--text-muted); font-size: 10px; padding: 5px 1px 1px; }
+.lora-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) 70px 82px auto;
+  gap: 7px; align-items: center; padding: 8px;
+  border: 1px solid var(--border-subtle); border-radius: 8px;
+  background: var(--bg-tertiary);
+}
+.lora-name { min-width: 0; }
+.lora-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.lora-name span { color: var(--text-muted); font: 9px/1.3 var(--font-mono); }
+.lora-item input, .lora-item select { min-width: 0; height: 30px; padding: 0 6px; }
+.lora-actions { display: flex; gap: 3px; }
+.lora-actions button {
+  width: 25px; height: 25px; border: 1px solid var(--border-default);
+  border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.lora-actions button:hover { color: var(--accent); border-color: var(--accent); }
+.lora-note { margin-top: 8px; color: var(--text-muted); font-size: 9px; line-height: 1.45; }
 .resolution-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px; align-items: end; margin-bottom: 12px;
@@ -941,6 +971,16 @@ video.file-preview { object-fit: contain; }
         <div id="fileUploads"></div>
       </div>
 
+      <div class="section-label">运行时 LoRA</div>
+      <div class="lora-panel">
+        <div class="lora-picker">
+          <select id="loraCatalogSelect" aria-label="可用 LoRA"><option value="">正在读取 LoRA 目录…</option></select>
+          <button class="lora-add" id="loraAdd" type="button">添加</button>
+        </div>
+        <div class="lora-stack" id="loraStack"></div>
+        <div class="lora-note">按列表顺序折叠；不增加 denoise GEMM。选择 LoRA 后会关闭 SSD 流式和预量化 sidecar。</div>
+      </div>
+
       <!-- 质量预设 -->
       <div class="section-label">质量预设</div>
       <div class="presets" id="presets">
@@ -1300,6 +1340,9 @@ let statusSyncInFlight = false;
 let modelCapabilities = { fl2va: true, ref2va: null };
 let generationProfile = null;
 let generationProfileSignature = '';
+let loraCatalog = [];
+let loraCatalogSignature = '';
+let selectedLoras = [];
 let activeModelArg = './MiniMax-H3/turbo-v4-step600-ema';
 const filePreviewUrls = new WeakMap();
 const knownJobStates = new Map();
@@ -1316,6 +1359,9 @@ const aspectOptions = document.querySelectorAll('.aspect-option');
 const sourceAspectSync = document.getElementById('sourceAspectSync');
 const matchInputAspect = document.getElementById('matchInputAspect');
 const sourceAspectStatus = document.getElementById('sourceAspectStatus');
+const loraCatalogSelect = document.getElementById('loraCatalogSelect');
+const loraAdd = document.getElementById('loraAdd');
+const loraStack = document.getElementById('loraStack');
 const deviceBadge = document.getElementById('deviceBadge');
 const frames = document.getElementById('frames');
 const steps = document.getElementById('steps');
@@ -1567,6 +1613,111 @@ matchInputAspect.addEventListener('change', () => {
   updateSourceAspectVisibility();
 });
 
+function activeLoraScope() {
+  return REF2VA_MODES.has(currentMode) ? 'ref2va' : 'fl2va';
+}
+
+function defaultLoraScope(item) {
+  const active = activeLoraScope();
+  if ((item.scopes || []).includes(active)) return active;
+  if ((item.scopes || []).includes('both')) return 'both';
+  return item.scopes?.[0] || active;
+}
+
+function renderLoraControls() {
+  const supported = loraCatalog.filter(item => item.supported);
+  loraCatalogSelect.innerHTML = supported.length
+    ? `<option value="">选择本地 LoRA…</option>` + supported.map(item =>
+        `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.format)} · rank ${escapeHtml(item.rank ?? '—')}</option>`
+      ).join('')
+    : '<option value="">runtime 目录暂无可用 LoRA</option>';
+  loraAdd.disabled = !supported.length || selectedLoras.length >= 8;
+  if (!selectedLoras.length) {
+    loraStack.innerHTML = '<div class="lora-empty">未启用 LoRA；继续使用当前基础模型。</div>';
+  } else {
+    loraStack.innerHTML = selectedLoras.map((selected, index) => {
+      const item = loraCatalog.find(candidate => candidate.id === selected.id) || selected;
+      const scopes = (item.scopes || [selected.scope]).filter(scope =>
+        ['fl2va', 'ref2va', 'both'].includes(scope)
+      );
+      return `<div class="lora-item" data-index="${index}">
+        <div class="lora-name"><strong title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</strong><span>${escapeHtml(item.format || '')} · rank ${escapeHtml(item.rank ?? '—')}</span></div>
+        <input class="lora-scale" type="number" min="-2" max="2" step="0.05" value="${escapeAttr(selected.scale)}" aria-label="${escapeAttr(item.name)} 强度">
+        <select class="lora-scope" aria-label="${escapeAttr(item.name)} 作用域">${scopes.map(scope =>
+          `<option value="${scope}"${scope === selected.scope ? ' selected' : ''}>${scope}</option>`
+        ).join('')}</select>
+        <div class="lora-actions"><button type="button" data-action="up" title="上移">↑</button><button type="button" data-action="down" title="下移">↓</button><button type="button" data-action="remove" title="移除">×</button></div>
+      </div>`;
+    }).join('');
+  }
+  loraStack.querySelectorAll('.lora-item').forEach(row => {
+    const index = Number(row.dataset.index);
+    row.querySelector('.lora-scale').addEventListener('change', event => {
+      const value = Number(event.target.value);
+      if (Number.isFinite(value)) selectedLoras[index].scale = value;
+      updateCommand();
+    });
+    row.querySelector('.lora-scope').addEventListener('change', event => {
+      selectedLoras[index].scope = event.target.value;
+      updateCommand();
+    });
+    row.querySelectorAll('.lora-actions button').forEach(button => {
+      button.addEventListener('click', () => {
+        const action = button.dataset.action;
+        if (action === 'remove') selectedLoras.splice(index, 1);
+        else if (action === 'up' && index > 0)
+          [selectedLoras[index - 1], selectedLoras[index]] = [selectedLoras[index], selectedLoras[index - 1]];
+        else if (action === 'down' && index + 1 < selectedLoras.length)
+          [selectedLoras[index], selectedLoras[index + 1]] = [selectedLoras[index + 1], selectedLoras[index]];
+        renderLoraControls();
+        syncAccelerationOptions();
+        updateCommand();
+      });
+    });
+  });
+}
+
+function updateLoraCatalog(catalog) {
+  const next = Array.isArray(catalog) ? catalog : [];
+  const signature = JSON.stringify(next);
+  if (signature === loraCatalogSignature) return;
+  loraCatalogSignature = signature;
+  loraCatalog = next;
+  selectedLoras = selectedLoras.filter(selected =>
+    loraCatalog.some(item => item.id === selected.id && item.supported)
+  );
+  renderLoraControls();
+}
+
+function reconcileLoraScopes() {
+  const active = activeLoraScope();
+  selectedLoras.forEach(selected => {
+    const item = loraCatalog.find(candidate => candidate.id === selected.id);
+    if (!item) return;
+    if ((item.scopes || []).includes(active)) selected.scope = active;
+    else if ((item.scopes || []).includes('both')) selected.scope = 'both';
+  });
+  renderLoraControls();
+}
+
+loraAdd.addEventListener('click', () => {
+  const item = loraCatalog.find(candidate => candidate.id === loraCatalogSelect.value);
+  if (!item || selectedLoras.length >= 8) return;
+  selectedLoras.push({
+    id: item.id,
+    name: item.name,
+    format: item.format,
+    rank: item.rank,
+    scopes: item.scopes,
+    scale: 1,
+    scope: defaultLoraScope(item),
+  });
+  ssdStreaming.value = '0';
+  renderLoraControls();
+  syncAccelerationOptions();
+  updateCommand();
+});
+
 // 模式切换
 modeCards.forEach(card => {
   card.addEventListener('click', () => {
@@ -1587,6 +1738,7 @@ modeCards.forEach(card => {
     renderFileUploads();
     updateSourceAspectVisibility();
     syncOutputAspectFromInput();
+    reconcileLoraScopes();
     updateCommand();
   });
 });
@@ -1821,15 +1973,19 @@ document.querySelectorAll('select, input, #prompt').forEach(el => {
 });
 
 function syncAccelerationOptions(changedOption) {
-  if (changedOption === ssdStreaming && ssdStreaming.value === '1') {
+  if (selectedLoras.length) {
+    ssdStreaming.value = '0';
+  } else if (changedOption === ssdStreaming && ssdStreaming.value === '1') {
     int8Row.value = '0';
   } else if (changedOption === int8Row && int8Row.value === '1') {
     ssdStreaming.value = '0';
   }
   int8Row.disabled = ssdStreaming.value === '1';
-  ssdStreaming.disabled = int8Row.value === '1';
+  ssdStreaming.disabled = int8Row.value === '1' || selectedLoras.length > 0;
   int8Row.title = int8Row.disabled ? 'SSD 流式使用原始 BF16 权重，不能同时开启 Int8 FC2' : '';
-  ssdStreaming.title = ssdStreaming.disabled ? 'Int8 FC2 与 SSD 流式不能同时开启' : '';
+  ssdStreaming.title = selectedLoras.length
+    ? '运行时 LoRA 与 SSD 流式不能同时开启'
+    : ssdStreaming.disabled ? 'Int8 FC2 与 SSD 流式不能同时开启' : '';
   updateCommand();
 }
 
@@ -1872,6 +2028,10 @@ function buildCommand() {
     (files['ref_video'] || []).forEach(f => cmd += ` --ref-video "${f.name}"`);
     (files['ref_audio'] || []).forEach(f => cmd += ` --ref-audio "${f.name}"`);
   }
+
+  selectedLoras.forEach(item => {
+    cmd += ` --lora "${item.name}" --lora-scale ${item.scale} --lora-scope ${item.scope}`;
+  });
 
   if (seed.value) cmd += ` --seed ${seed.value}`;
   if (ssdStreaming.value === '1') cmd += ` --ssd-streaming`;
@@ -2258,6 +2418,11 @@ generateBtn.addEventListener('click', async () => {
       ssd_streaming: ssdStreaming.value === '1',
       int8_row_fc2: int8Row.value === '1',
       match_input_aspect: matchInputAspect.checked,
+      loras: selectedLoras.map(item => ({
+        id: item.id,
+        scale: Number(item.scale),
+        scope: item.scope,
+      })),
       files: {}
     };
     payload.files = await uploadReferenceFiles();
@@ -2290,6 +2455,7 @@ function addOutput(result) {
   if (params.width && params.height) paramParts.push(`${params.width}×${params.height}`);
   if (params.frames) paramParts.push(`${params.frames}帧`);
   if (params.steps) paramParts.push(`${params.steps}步`);
+  if (result.loras?.length) paramParts.push(`${result.loras.length} LoRA`);
   if (!paramParts.length && result.output) paramParts.push(result.output);
   const mode = MODE_CONFIG[result.mode] || MODE_CONFIG.text;
   const ts = result.finished_at || result.created_at || new Date().toLocaleString();
@@ -2465,6 +2631,7 @@ async function syncServerState(initial = false) {
     const snapshot = await fetchJSON('/api/status');
     updateModeAvailability(snapshot.capabilities);
     updateGenerationProfile(snapshot.generation_profile);
+    updateLoraCatalog(snapshot.lora_catalog);
     syncImageState(snapshot);
     const terminalJobs = (snapshot.outputs || [])
       .filter(job => job.kind !== 'image' && (job.status === 'succeeded' || job.status === 'failed'));

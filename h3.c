@@ -14,6 +14,7 @@
 #include "h3_vision_encoder.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -690,6 +691,13 @@ static void h3_progress_emit(h3_generation_progress *state, const char *phase,
     }
 }
 
+static void h3_lora_progress_bridge(size_t completed, size_t total,
+                                    void *opaque) {
+    int safe_completed = completed > INT_MAX ? INT_MAX : (int)completed;
+    int safe_total = total > INT_MAX ? INT_MAX : (int)total;
+    h3_progress_emit(opaque, "LoRA merge", safe_completed, safe_total);
+}
+
 static void h3_text_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "text encoder", completed, total);
 }
@@ -964,6 +972,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     int conditioned = 0;
     int dit_is_cached = 0;
     int decoder_is_cached = 0;
+    int lora_merge_started = 0;
     char detail[512];
     char *tokenizer_path = h3_path(ctx->model_dir, ref2va ?
         "Ref2VA/tokenizer/tokenizer.json" : "FL2VA/tokenizer/tokenizer.json");
@@ -1543,6 +1552,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         fprintf(stderr, "h3: prepared DiT cache hit\n");
     } else if (conditioned) {
+        if (lora_set) {
+            h3_lora_set_progress(
+                lora_set, h3_lora_progress_bridge, &progress);
+            lora_merge_started = 1;
+        }
         dit = h3_dit_load_conditioned(
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
@@ -1565,6 +1579,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             condition_audio_rows, condition_audio_elements,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
     } else {
+        if (lora_set) {
+            h3_lora_set_progress(
+                lora_set, h3_lora_progress_bridge, &progress);
+            lora_merge_started = 1;
+        }
         dit = h3_dit_load_t2va(
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
@@ -1589,6 +1608,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "%s", detail);
         goto cleanup;
     }
+    if (lora_merge_started) h3_lora_set_finish(lora_set);
     if (ctx->cache_enabled && !dit_is_cached) {
         char *key_copy = strdup(prepared_key);
         if (!key_copy) {

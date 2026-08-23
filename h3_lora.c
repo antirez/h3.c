@@ -34,8 +34,21 @@ struct h3_lora {
     size_t pair_count;
     size_t pair_capacity;
     unsigned formats;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     char sha256[65];
     struct stat identity;
+};
+
+typedef struct {
+    h3_lora *lora;
+    float scale;
+    h3_lora_scope scope;
+} h3_lora_application;
+
+struct h3_lora_set {
+    h3_lora_application entries[8];
+    size_t count;
+    char signature[65];
 };
 
 static void fail(char *error, size_t error_size, const char *format, ...) {
@@ -360,7 +373,9 @@ static int inspect_pairs(h3_lora *lora, const h3_weight_store *base,
     return 1;
 }
 
-static int compute_sha256(int descriptor, off_t size, char output[65]) {
+static int compute_sha256(int descriptor, off_t size,
+                          unsigned char digest[CC_SHA256_DIGEST_LENGTH],
+                          char output[65]) {
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
     unsigned char buffer[1024 * 1024];
@@ -372,9 +387,8 @@ static int compute_sha256(int descriptor, off_t size, char output[65]) {
         CC_SHA256_Update(&context, buffer, (CC_LONG)wanted);
         offset += (off_t)wanted;
     }
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256_Final(digest, &context);
-    for (size_t index = 0; index < sizeof(digest); index++)
+    for (size_t index = 0; index < CC_SHA256_DIGEST_LENGTH; index++)
         snprintf(output + index * 2, 3, "%02x", digest[index]);
     output[64] = '\0';
     return 1;
@@ -405,7 +419,7 @@ h3_lora *h3_lora_open(const char *path, const h3_weight_store *base,
     }
     if (!h3_st_read_header(path, &lora->header, error, error_size) ||
         !compute_sha256(lora->descriptor, lora->identity.st_size,
-                        lora->sha256) ||
+                        lora->digest, lora->sha256) ||
         !inspect_pairs(lora, base, error, error_size)) {
         if (error && error_size && !*error)
             fail(error, error_size, "cannot inspect LoRA %s", path);
@@ -487,4 +501,96 @@ int h3_lora_read_b_rows(const h3_lora *lora, size_t pair_index,
         elements != rows * pair->info.rank) return 0;
     return read_values(lora, pair->b, first_row * pair->info.rank,
                        elements, values, error, error_size);
+}
+
+h3_lora_set *h3_lora_set_open(const h3_lora_spec *specs, size_t count,
+                              const h3_weight_store *base,
+                              h3_lora_scope active_scope,
+                              char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!count) return NULL;
+    if (!specs || !base || count > 8 ||
+        (active_scope != H3_LORA_FL2VA && active_scope != H3_LORA_REF2VA)) {
+        fail(error, error_size, "invalid runtime LoRA set");
+        return NULL;
+    }
+    if (getenv("H3_DISABLE_RUNTIME_LORA")) {
+        fail(error, error_size, "runtime LoRA is disabled by H3_DISABLE_RUNTIME_LORA");
+        return NULL;
+    }
+    h3_lora_set *set = calloc(1, sizeof(*set));
+    if (!set) {
+        fail(error, error_size, "out of memory opening runtime LoRAs");
+        return NULL;
+    }
+    CC_SHA256_CTX signature;
+    CC_SHA256_Init(&signature);
+    static const char version[] = "h3-runtime-lora-v1";
+    CC_SHA256_Update(&signature, version, (CC_LONG)sizeof(version));
+    uint64_t encoded_count = count;
+    CC_SHA256_Update(&signature, &encoded_count, sizeof(encoded_count));
+    for (size_t index = 0; index < count; index++) {
+        const h3_lora_spec *spec = &specs[index];
+        if (!spec->path || !*spec->path || !isfinite(spec->scale) ||
+            (spec->scope != H3_LORA_FL2VA &&
+             spec->scope != H3_LORA_REF2VA &&
+             spec->scope != H3_LORA_BOTH) ||
+            !(spec->scope & active_scope)) {
+            fail(error, error_size,
+                 "runtime LoRA %zu has invalid path, scale, or scope", index + 1);
+            h3_lora_set_free(set);
+            return NULL;
+        }
+        h3_lora *lora = h3_lora_open(spec->path, base, error, error_size);
+        if (!lora) {
+            h3_lora_set_free(set);
+            return NULL;
+        }
+        set->entries[set->count++] =
+            (h3_lora_application){lora, spec->scale, spec->scope};
+        uint32_t scope_bits = (uint32_t)spec->scope;
+        uint32_t scale_bits;
+        memcpy(&scale_bits, &spec->scale, sizeof(scale_bits));
+        CC_SHA256_Update(&signature, &scope_bits, sizeof(scope_bits));
+        CC_SHA256_Update(&signature, &scale_bits, sizeof(scale_bits));
+        CC_SHA256_Update(&signature, lora->digest, sizeof(lora->digest));
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &signature);
+    for (size_t index = 0; index < sizeof(digest); index++)
+        snprintf(set->signature + index * 2, 3, "%02x", digest[index]);
+    set->signature[64] = '\0';
+    return set;
+}
+
+void h3_lora_set_free(h3_lora_set *set) {
+    if (!set) return;
+    for (size_t index = 0; index < set->count; index++)
+        h3_lora_free(set->entries[index].lora);
+    free(set);
+}
+
+size_t h3_lora_set_count(const h3_lora_set *set) {
+    return set ? set->count : 0;
+}
+
+const char *h3_lora_set_signature(const h3_lora_set *set) {
+    return set ? set->signature : NULL;
+}
+
+int h3_lora_set_entry(const h3_lora_set *set, size_t index,
+                      const h3_lora **lora, float *scale,
+                      h3_lora_scope *scope) {
+    if (!set || index >= set->count) return 0;
+    if (lora) *lora = set->entries[index].lora;
+    if (scale) *scale = set->entries[index].scale;
+    if (scope) *scope = set->entries[index].scope;
+    return 1;
+}
+
+int h3_lora_set_has_target(const h3_lora_set *set, const char *target) {
+    if (!set || !target) return 0;
+    for (size_t index = 0; index < set->count; index++)
+        if (h3_lora_find_pair(set->entries[index].lora, target, NULL)) return 1;
+    return 0;
 }

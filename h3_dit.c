@@ -72,6 +72,8 @@ struct h3_dit {
     h3_gpu *gpu;
     h3_weight_store *weights;
     h3_weight_store *int8_weights;
+    const h3_lora_set *loras;
+    size_t lora_peak_scratch;
     h3_dit_schedule *schedule;
     int fused_mlp;
     int nax_mlp;
@@ -247,6 +249,10 @@ static h3_gpu_tensor *bf1(h3_dit *dit, const char *name, uint64_t width,
 
 static h3_gpu_tensor *bf2(h3_dit *dit, const char *name, uint64_t rows,
                           uint64_t columns, char *error, size_t error_size) {
+    if (dit->loras)
+        return h3_weight_load_bf16_with_loras(
+            dit->weights, dit->gpu, name, rows, columns, dit->loras,
+            &dit->lora_peak_scratch, error, error_size);
     uint64_t shape[] = {rows, columns};
     return h3_weight_load_bf16(dit->weights, dit->gpu, name, 2, shape,
                                error, error_size);
@@ -1779,6 +1785,7 @@ static h3_dit *load_dit(const char *weight_directory,
                         int use_slower_dynamic_fc1_k,
                         int use_slower_grouped_quantizer,
                         int use_int8_row_fc2,
+                        const h3_lora_set *loras,
                         const float *condition_video_rows,
                         size_t condition_video_elements,
                         const float *condition_audio_rows,
@@ -1808,6 +1815,7 @@ static h3_dit *load_dit(const char *weight_directory,
     dit->bf16_final = getenv("H3_DIT_F32_FINAL") == NULL;
     dit->core_reuse_interval = core_reuse_interval;
     dit->ssd_streaming = ssd_streaming;
+    dit->loras = loras;
     dit->spatial_rope_scale = spatial_rope_scale;
     configure_active_blocks(dit, active_blocks);
     if (!copy_layout(dit, layout, error, error_size) ||
@@ -1867,7 +1875,18 @@ static h3_dit *load_dit(const char *weight_directory,
     char *automatic_sidecar = NULL;
     const char *int8_sidecar = getenv("H3_INT8_SIDECAR");
     int sidecar_is_explicit = int8_sidecar && *int8_sidecar;
-    if (!sidecar_is_explicit && !getenv("H3_DISABLE_INT8_SIDECAR") &&
+    if (loras && dit->ssd_streaming) {
+        fail(error, error_size,
+             "runtime LoRA cannot be combined with SSD streaming");
+        goto failed;
+    }
+    if (loras && sidecar_is_explicit) {
+        fail(error, error_size,
+             "runtime LoRA cannot be combined with H3_INT8_SIDECAR");
+        goto failed;
+    }
+    if (!loras && !sidecar_is_explicit &&
+        !getenv("H3_DISABLE_INT8_SIDECAR") &&
         !dit->ssd_streaming &&
         (dit->int8_mlp || dit->int8_qkv || dit->int8_attention_out)) {
         automatic_sidecar = sidecar_path(weight_directory, ".h3-int8");
@@ -1922,7 +1941,8 @@ static h3_dit *load_dit(const char *weight_directory,
     schedule_progress schedule_state = {progress, progress_opaque};
     dit->schedule = h3_dit_schedule_precompute(
         dit->weights, dit->gpu, sigmas, dit->video_condition_rows != 0,
-        dit->audio_condition_rows != 0, schedule_report, &schedule_state,
+        dit->audio_condition_rows != 0, loras, &dit->lora_peak_scratch,
+        schedule_report, &schedule_state,
         error, error_size);
     if (dit->schedule) {
         configure_gate_ranked_blocks(dit);
@@ -1945,6 +1965,10 @@ static h3_dit *load_dit(const char *weight_directory,
         goto failed;
     }
     h3_gpu_profile_mark(dit->gpu, "load");
+    if (loras && getenv("H3_PROFILE"))
+        fprintf(stderr, "h3: runtime LoRA peak host scratch %.1f MiB\n",
+                (double)dit->lora_peak_scratch / (1024.0 * 1024.0));
+    dit->loras = NULL;
     return dit;
 failed:
     h3_dit_free(dit);
@@ -1972,6 +1996,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size) {
     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
@@ -1987,7 +2012,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                     use_slower_uncached_int8_scales,
                     use_slower_dynamic_fc1_k,
                     use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
+                    use_int8_row_fc2, loras,
                     NULL, 0, NULL, 0, progress, progress_opaque,
                     error, error_size);
 }
@@ -2014,6 +2039,7 @@ h3_dit *h3_dit_load_conditioned(
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          const float *condition_video_rows,
                          size_t condition_video_elements,
                          const float *condition_audio_rows,
@@ -2033,7 +2059,7 @@ h3_dit *h3_dit_load_conditioned(
                     use_slower_uncached_int8_scales,
                     use_slower_dynamic_fc1_k,
                     use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
+                    use_int8_row_fc2, loras,
                     condition_video_rows, condition_video_elements,
                     condition_audio_rows, condition_audio_elements,
                     progress, progress_opaque, error, error_size);

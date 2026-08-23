@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 typedef struct h3_lora h3_lora;
+typedef struct h3_lora_set h3_lora_set;
 
 typedef struct {
     const char *target;
@@ -34,5 +35,17 @@ int h3_lora_read_b_rows(const h3_lora *lora, size_t pair_index,
                         uint64_t first_row, uint64_t rows,
                         float *values, size_t elements,
                         char *error, size_t error_size);
+
+h3_lora_set *h3_lora_set_open(const h3_lora_spec *specs, size_t count,
+                              const h3_weight_store *base,
+                              h3_lora_scope active_scope,
+                              char *error, size_t error_size);
+void h3_lora_set_free(h3_lora_set *set);
+size_t h3_lora_set_count(const h3_lora_set *set);
+const char *h3_lora_set_signature(const h3_lora_set *set);
+int h3_lora_set_entry(const h3_lora_set *set, size_t index,
+                      const h3_lora **lora, float *scale,
+                      h3_lora_scope *scope);
+int h3_lora_set_has_target(const h3_lora_set *set, const char *target);
 
 #endif

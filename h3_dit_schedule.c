@@ -64,8 +64,13 @@ static h3_gpu_tensor *weight_bf16_1d(const h3_weight_store *store, h3_gpu *gpu,
 
 static h3_gpu_tensor *weight_bf16_2d(const h3_weight_store *store, h3_gpu *gpu,
                                      const char *name, uint64_t rows,
-                                     uint64_t columns, char *error,
+                                     uint64_t columns, const h3_lora_set *loras,
+                                     size_t *peak_scratch, char *error,
                                      size_t error_size) {
+    if (loras)
+        return h3_weight_load_bf16_with_loras(
+            store, gpu, name, rows, columns, loras, peak_scratch,
+            error, error_size);
     uint64_t shape[] = {rows, columns};
     return h3_weight_load_bf16(store, gpu, name, 2, shape, error, error_size);
 }
@@ -237,7 +242,7 @@ cleanup:
 h3_dit_schedule *h3_dit_schedule_precompute(
     const h3_weight_store *weights, h3_gpu *gpu,
     const h3_sigma_schedule *sigmas, int visual_condition,
-    int audio_condition,
+    int audio_condition, const h3_lora_set *loras, size_t *peak_scratch,
     h3_dit_schedule_progress progress, void *progress_opaque,
     char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
@@ -269,7 +274,7 @@ h3_dit_schedule *h3_dit_schedule_precompute(
                  "blocks.%u.adaln_proj.linear.bias", block);
         h3_gpu_tensor *weight = weight_bf16_2d(
             weights, gpu, weight_name, BLOCK_OUTPUT, H3_DIT_TIME_DIM,
-            error, error_size);
+            loras, peak_scratch, error, error_size);
         h3_gpu_tensor *bias = weight_bf16_1d(
             weights, gpu, bias_name, BLOCK_OUTPUT, error, error_size);
         schedule->blocks[block] = h3_gpu_tensor_new_bf16(
@@ -302,7 +307,8 @@ h3_dit_schedule *h3_dit_schedule_precompute(
 
     h3_gpu_tensor *final_w = weight_bf16_2d(
         weights, gpu, "final_layer.adaln_proj.linear.weight",
-        FINAL_OUTPUT, H3_DIT_TIME_DIM, error, error_size);
+        FINAL_OUTPUT, H3_DIT_TIME_DIM, loras, peak_scratch,
+        error, error_size);
     h3_gpu_tensor *final_b = weight_bf16_1d(
         weights, gpu, "final_layer.adaln_proj.linear.bias",
         FINAL_OUTPUT, error, error_size);

@@ -156,6 +156,83 @@ static void test_rejections(const char *directory, h3_weight_store *base) {
     CHECK(unlink(path) == 0);
 }
 
+static uint16_t f32_to_bf16(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+    return (uint16_t)(bits >> 16);
+}
+
+static void test_ordered_overlay_and_signature(const char *directory,
+                                               h3_weight_store *base) {
+    char path[1024], error[512];
+    snprintf(path, sizeof(path), "%s/overlay.safetensors", directory);
+    const char header[] =
+        "{\"blocks.0.mlp.fc2.lora_A.weight\":{\"dtype\":\"F32\","
+        "\"shape\":[1,3],\"data_offsets\":[0,12]},"
+        "\"blocks.0.mlp.fc2.lora_B.weight\":{\"dtype\":\"F32\","
+        "\"shape\":[2,1],\"data_offsets\":[12,20]},"
+        "\"blocks.0.mlp.fc2.alpha\":{\"dtype\":\"F32\","
+        "\"shape\":[],\"data_offsets\":[20,24]}}";
+    float payload[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 2.0f};
+    write_fixture(path, header, payload, sizeof(payload));
+    h3_lora_spec specs[] = {
+        {path, 0.5f, H3_LORA_FL2VA},
+        {path, 0.25f, H3_LORA_FL2VA},
+    };
+    h3_lora_set *set = h3_lora_set_open(
+        specs, 2, base, H3_LORA_FL2VA, error, sizeof(error));
+    CHECK(set != NULL);
+    CHECK(h3_lora_set_count(set) == 2);
+    CHECK(strlen(h3_lora_set_signature(set)) == 64);
+    h3_lora_set *different = h3_lora_set_open(
+        specs, 1, base, H3_LORA_FL2VA, error, sizeof(error));
+    CHECK(different != NULL);
+    CHECK(strcmp(h3_lora_set_signature(set),
+                 h3_lora_set_signature(different)) != 0);
+    h3_lora_set_free(different);
+    h3_lora_spec reversed[] = {specs[1], specs[0]};
+    different = h3_lora_set_open(
+        reversed, 2, base, H3_LORA_FL2VA, error, sizeof(error));
+    CHECK(different != NULL);
+    CHECK(strcmp(h3_lora_set_signature(set),
+                 h3_lora_set_signature(different)) != 0);
+    h3_lora_set_free(different);
+    h3_lora_spec both = {path, 0.5f, H3_LORA_BOTH};
+    different = h3_lora_set_open(
+        &both, 1, base, H3_LORA_REF2VA, error, sizeof(error));
+    CHECK(different != NULL);
+    h3_lora_set_free(different);
+    CHECK(h3_lora_set_open(
+        specs, 1, base, H3_LORA_REF2VA, error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "scope") != NULL);
+    CHECK(setenv("H3_DISABLE_RUNTIME_LORA", "1", 1) == 0);
+    CHECK(h3_lora_set_open(
+        specs, 1, base, H3_LORA_FL2VA, error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "disabled") != NULL);
+    CHECK(unsetenv("H3_DISABLE_RUNTIME_LORA") == 0);
+
+    h3_gpu *gpu = h3_gpu_create(NULL, error, sizeof(error));
+    CHECK(gpu != NULL);
+    size_t peak_scratch = 0;
+    h3_gpu_tensor *weight = h3_weight_load_bf16_with_loras(
+        base, gpu, "blocks.0.mlp.fc2.weight", 2, 3, set,
+        &peak_scratch, error, sizeof(error));
+    CHECK(weight != NULL);
+    CHECK(peak_scratch > 0 && peak_scratch < 256u * 1024u * 1024u);
+    uint16_t got[6];
+    CHECK(h3_gpu_tensor_read_bf16(weight, got, 6));
+    /* Base is zero. Each adapter applies alpha/rank=2 with scales 0.5 then
+     * 0.25, rounding to BF16 after each ordered fold. */
+    const float expected[] = {6.0f, 12.0f, 18.0f, 7.5f, 15.0f, 22.5f};
+    for (size_t index = 0; index < 6; index++)
+        CHECK(got[index] == f32_to_bf16(expected[index]));
+    h3_gpu_tensor_free(weight);
+    h3_gpu_free(gpu);
+    h3_lora_set_free(set);
+    CHECK(unlink(path) == 0);
+}
+
 int main(void) {
     char directory[] = "/tmp/h3-lora-tests-XXXXXX";
     CHECK(mkdtemp(directory) != NULL);
@@ -167,6 +244,7 @@ int main(void) {
     test_diffusers_f16(directory, base);
     test_kohya_bf16(directory, base);
     test_rejections(directory, base);
+    test_ordered_overlay_and_signature(directory, base);
     h3_weight_store_free(base);
     char base_path[1024];
     snprintf(base_path, sizeof(base_path), "%s/base.safetensors", directory);

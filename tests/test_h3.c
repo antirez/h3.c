@@ -72,6 +72,7 @@ static void test_schedule(void) {
     h3_params defaults = H3_PARAMS_DEFAULT;
     CHECK(defaults.steps == 20);
     CHECK(defaults.use_reference_rope == 0);
+    CHECK(defaults.loras == NULL && defaults.lora_count == 0);
 
     h3_sigma_schedule schedule;
     CHECK(h3_schedule_build(20, &schedule));

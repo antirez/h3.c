@@ -136,7 +136,25 @@ against a 29-pass reference; an independent surfer test measured 0.547. The
 four-pass denoise took about 3.5 seconds on M5 Max, versus 26.4 seconds for the
 reference.
 
-LoRA adapters can be folded into a BF16 transformer offline. The tool accepts
+Runtime LoRAs use loading-time folding: the base checkpoint stays read-only,
+only matched matrices are copied in bounded row tiles, and the completed BF16
+weights continue through the existing M5 INT8 path. No LoRA GEMM is added to
+denoising:
+
+```sh
+./h3 -d ./MiniMax-H3 \
+  --lora adapter.safetensors --lora-scale 0.8 --lora-scope fl2va \
+  -p "A person walks" --width 512 --height 512 --frames 22 \
+  --steps 20 --layers 45 --reuse 2 -o outputs/walk.mp4
+```
+
+Up to eight adapters may be supplied and are folded in command-line order,
+rounding to BF16 after each adapter. `--lora-scale` and `--lora-scope` modify
+the preceding `--lora`; defaults are `1.0` and `fl2va`. Runtime LoRA is
+incompatible with SSD streaming and prequantized INT8 sidecars. Set
+`H3_DISABLE_RUNTIME_LORA=1` to reject runtime LoRA requests globally.
+
+LoRA adapters can alternatively be folded into a BF16 transformer offline. The tool accepts
 native `lora_A/B`, AI Toolkit / Diffusers `diffusion_model.*.lora_A/B`, and
 Kohya / ComfyUI `lora_unet_*` down/up keys. F16, BF16, and F32 adapters are
 supported; Kohya alpha values are applied as `alpha / rank`.

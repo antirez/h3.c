@@ -1,10 +1,16 @@
 #include "h3_weights.h"
+#include "h3_lora.h"
+
+#include <Accelerate/Accelerate.h>
 
 #include <dirent.h>
+#include <fcntl.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 struct h3_weight_store {
     h3_st_header *headers;
@@ -232,4 +238,182 @@ h3_gpu_tensor *h3_weight_load_f32(const h3_weight_store *store, h3_gpu *gpu,
                                   char *error, size_t error_size) {
     return load_tensor(store, gpu, name, ndim, shape, H3_DTYPE_F32,
                        error, error_size);
+}
+
+static int pread_all(int descriptor, void *buffer, size_t bytes,
+                     uint64_t offset) {
+    unsigned char *destination = buffer;
+    size_t completed = 0;
+    while (completed < bytes) {
+        ssize_t count = pread(descriptor, destination + completed,
+                              bytes - completed, (off_t)(offset + completed));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return 0;
+        completed += (size_t)count;
+    }
+    return 1;
+}
+
+static float bf16_to_f32(uint16_t value) {
+    uint32_t bits = (uint32_t)value << 16;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static uint16_t f32_to_bf16(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+    return (uint16_t)(bits >> 16);
+}
+
+h3_gpu_tensor *h3_weight_load_bf16_with_loras(
+        const h3_weight_store *store, h3_gpu *gpu, const char *name,
+        uint64_t rows, uint64_t columns, const h3_lora_set *loras,
+        size_t *peak_scratch, char *error, size_t error_size) {
+    uint64_t shape[] = {rows, columns};
+    if (!loras || !h3_lora_set_has_target(loras, name))
+        return h3_weight_load_bf16(store, gpu, name, 2, shape,
+                                   error, error_size);
+    if (!store || !gpu || !name || !rows || !columns || rows > INT_MAX ||
+        columns > INT_MAX || rows > SIZE_MAX / columns) {
+        fail(error, error_size, "invalid LoRA weight overlay request");
+        return NULL;
+    }
+    const h3_st_header *header = NULL;
+    const h3_st_tensor *base = h3_weight_find(store, name, &header);
+    if (!base || !header || base->dtype != H3_DTYPE_BF16 || base->ndim != 2 ||
+        base->shape[0] != rows || base->shape[1] != columns) {
+        fail(error, error_size, "LoRA base weight has the wrong schema: %s", name);
+        return NULL;
+    }
+    typedef struct {
+        const h3_lora *lora;
+        size_t pair;
+        uint64_t rank;
+        float effective_scale;
+        float *a;
+    } application;
+    application applications[8];
+    size_t application_count = 0;
+    size_t a_elements = 0;
+    uint64_t maximum_rank = 0;
+    for (size_t index = 0; index < h3_lora_set_count(loras); index++) {
+        const h3_lora *lora = NULL;
+        float scale = 0.0f;
+        size_t pair_index;
+        if (!h3_lora_set_entry(loras, index, &lora, &scale, NULL) ||
+            !h3_lora_find_pair(lora, name, &pair_index)) continue;
+        const h3_lora_pair_info *info = h3_lora_pair_at(lora, pair_index);
+        float effective = scale * info->alpha_over_rank;
+        if (!info || info->output_dim != rows || info->input_dim != columns ||
+            !info->rank || !isfinite(effective) ||
+            info->rank > SIZE_MAX / columns ||
+            a_elements > SIZE_MAX - (size_t)info->rank * (size_t)columns) {
+            fail(error, error_size, "invalid LoRA overlay for %s", name);
+            goto failed;
+        }
+        applications[application_count++] =
+            (application){lora, pair_index, info->rank, effective, NULL};
+        a_elements += (size_t)info->rank * (size_t)columns;
+        if (info->rank > maximum_rank) maximum_rank = info->rank;
+    }
+    enum { TILE_ROWS = 64 };
+    size_t tile_elements = (size_t)TILE_ROWS * (size_t)columns;
+    size_t b_elements = (size_t)TILE_ROWS * (size_t)maximum_rank;
+    if (!application_count || tile_elements > SIZE_MAX / sizeof(float) ||
+        a_elements > SIZE_MAX / sizeof(float) ||
+        b_elements > SIZE_MAX / sizeof(float)) {
+        fail(error, error_size, "LoRA overlay scratch size overflows for %s", name);
+        goto failed;
+    }
+    size_t scratch = tile_elements * (sizeof(float) + sizeof(uint16_t)) +
+                     a_elements * sizeof(float) + b_elements * sizeof(float);
+    if (scratch > 256u * 1024u * 1024u) {
+        fail(error, error_size, "LoRA overlay exceeds 256 MiB scratch for %s", name);
+        goto failed;
+    }
+    if (peak_scratch && scratch > *peak_scratch) *peak_scratch = scratch;
+    uint16_t *tile_bf16 = malloc(tile_elements * sizeof(*tile_bf16));
+    float *tile_f32 = malloc(tile_elements * sizeof(*tile_f32));
+    float *b = malloc((b_elements ? b_elements : 1) * sizeof(*b));
+    if (!tile_bf16 || !tile_f32 || !b) {
+        free(tile_bf16); free(tile_f32); free(b);
+        fail(error, error_size, "out of memory allocating LoRA overlay scratch");
+        goto failed;
+    }
+    for (size_t index = 0; index < application_count; index++) {
+        size_t elements = (size_t)applications[index].rank * (size_t)columns;
+        applications[index].a = malloc(elements * sizeof(float));
+        if (!applications[index].a || !h3_lora_read_a(
+                applications[index].lora, applications[index].pair,
+                applications[index].a, elements, error, error_size)) {
+            free(tile_bf16); free(tile_f32); free(b);
+            goto failed;
+        }
+    }
+    h3_gpu_tensor *output = h3_gpu_tensor_new_bf16(
+        gpu, (size_t)rows * (size_t)columns);
+    int descriptor = open(header->path, O_RDONLY | O_CLOEXEC);
+    if (!output || descriptor < 0) {
+        if (descriptor >= 0) close(descriptor);
+        h3_gpu_tensor_free(output);
+        free(tile_bf16); free(tile_f32); free(b);
+        fail(error, error_size, "cannot open LoRA base weight %s", name);
+        goto failed;
+    }
+    int ok = 1;
+    for (uint64_t first_row = 0; first_row < rows && ok;
+         first_row += TILE_ROWS) {
+        uint64_t tile_rows = rows - first_row;
+        if (tile_rows > TILE_ROWS) tile_rows = TILE_ROWS;
+        size_t elements = (size_t)tile_rows * (size_t)columns;
+        ok = pread_all(descriptor, tile_bf16, elements * sizeof(*tile_bf16),
+                       base->file_offset + first_row * columns * sizeof(uint16_t));
+        for (size_t adapter = 0; adapter < application_count && ok; adapter++) {
+            for (size_t element = 0; element < elements; element++)
+                tile_f32[element] = bf16_to_f32(tile_bf16[element]);
+            application *item = &applications[adapter];
+            size_t b_count = (size_t)tile_rows * (size_t)item->rank;
+            ok = h3_lora_read_b_rows(
+                item->lora, item->pair, first_row, tile_rows, b, b_count,
+                error, error_size);
+            if (!ok) break;
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        (int)tile_rows, (int)columns, (int)item->rank,
+                        item->effective_scale, b, (int)item->rank,
+                        item->a, (int)columns, 1.0f, tile_f32, (int)columns);
+            for (size_t element = 0; element < elements; element++) {
+                if (!isfinite(tile_f32[element])) {
+                    fail(error, error_size,
+                         "LoRA overlay produced NaN or Inf for %s", name);
+                    ok = 0;
+                    break;
+                }
+                tile_bf16[element] = f32_to_bf16(tile_f32[element]);
+            }
+        }
+        if (ok) ok = h3_gpu_tensor_write_bf16_range(
+            output, (size_t)first_row * (size_t)columns,
+            tile_bf16, elements);
+    }
+    close(descriptor);
+    free(tile_bf16); free(tile_f32); free(b);
+    for (size_t index = 0; index < application_count; index++) {
+        free(applications[index].a);
+        applications[index].a = NULL;
+    }
+    if (!ok) {
+        h3_gpu_tensor_free(output);
+        if (!error || !*error)
+            fail(error, error_size, "cannot apply LoRA overlay to %s", name);
+        return NULL;
+    }
+    return output;
+
+failed:
+    for (size_t index = 0; index < application_count; index++)
+        free(applications[index].a);
+    return NULL;
 }

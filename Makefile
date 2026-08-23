@@ -82,6 +82,9 @@ h3_real_dit_block_test: tests/test_real_dit_block.o $(LIB_OBJ)
 h3_real_dit_schedule_test: tests/test_real_dit_schedule.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_real_lora_test: tests/test_real_lora.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_dit_test: tests/test_real_dit.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -233,7 +236,7 @@ clean:
 		h3_av_mux_test \
 		h3_real_video_encoder_test h3_real_qwen_vision_test \
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
-		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
-		h3_real_video_vae_test h3_semantic_vae_test \
+	h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
+	h3_real_video_vae_test h3_semantic_vae_test h3_real_lora_test \
 	h3_dit_bench h3_dit_bench_864 h3_sdpa_bench \
 	libh3.a *.o *.d tests/*.o tests/*.d

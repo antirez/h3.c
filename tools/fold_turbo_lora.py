@@ -63,6 +63,12 @@ def f32_to_bf16_bytes(x):
     return rounded.astype("<u2").tobytes()
 
 
+def require_finite(label, values):
+    """Reject real NaN/Inf while tolerating spurious Accelerate FP flags."""
+    if not np.isfinite(values).all():
+        raise SystemExit(f"{label}: non-finite values produced during folding")
+
+
 def clone(src, dst):
     if subprocess.run(["cp", "-c", str(src), str(dst)],
                       capture_output=True).returncode != 0:
@@ -118,13 +124,25 @@ def main():
                 A = load_tensor(args.lora, lora_hdr[a_key], lora_base)
                 B = load_tensor(args.lora, lora_hdr[b_key], lora_base)
                 W = load_tensor(dst, info, base)
-                folded = W + args.scale * (B.astype(np.float32) @ A.astype(np.float32))
+                # NumPy 2.0 on Apple Accelerate can emit overflow/invalid
+                # RuntimeWarnings for these large, finite GEMMs even when the
+                # resulting array contains no NaN/Inf. Suppress the stale FP
+                # status flags, then validate every result explicitly.
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    update = B.astype(np.float32) @ A.astype(np.float32)
+                    folded = W + args.scale * update
+                require_finite(f"{key} update", update)
+                require_finite(f"{key} folded weight", folded)
                 # parity check on a random probe before committing bytes
                 x = np.random.default_rng(0).standard_normal(W.shape[1]).astype(np.float32)
-                direct = folded @ x
-                composed = W @ x + args.scale * (B @ (A @ x))
-                rel = np.max(np.abs(direct - composed)) / (np.max(np.abs(composed)) + 1e-9)
-                if rel > 1e-4:
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    direct = folded @ x
+                    composed = W @ x + args.scale * (B @ (A @ x))
+                    rel = (np.max(np.abs(direct - composed)) /
+                           (np.max(np.abs(composed)) + 1e-9))
+                require_finite(f"{key} direct parity probe", direct)
+                require_finite(f"{key} composed parity probe", composed)
+                if not np.isfinite(rel) or rel > 1e-4:
                     raise SystemExit(f"{key}: parity check failed (rel={rel:.2e})")
                 buf = f32_to_bf16_bytes(folded)
                 start, end = info["data_offsets"]

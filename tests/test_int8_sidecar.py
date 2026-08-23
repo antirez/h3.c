@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 
 from tools.build_int8_sidecar import (
+    FORMAT,
     bf16_to_f32,
     quantize_bf16_rows,
     quantize_shard,
+    write_manifests,
 )
 
 
@@ -45,6 +47,29 @@ def read_tensor(path, name):
 
 
 class Int8SidecarTests(unittest.TestCase):
+    def test_writes_machine_readable_source_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            manifest = {
+                "format": FORMAT,
+                "source": "/model/transformer",
+                "sources": [{
+                    "name": "model-00001.safetensors",
+                    "size": 123,
+                    "mtime_ns": 456,
+                    "header_sha256": "abc",
+                }],
+                "tensors": ["blocks.0.mlp.fc2.weight"],
+            }
+            write_manifests(output, manifest)
+            self.assertEqual(
+                (output / "source.tsv").read_text().splitlines(),
+                [FORMAT, "model-00001.safetensors\t123\t456\tabc"],
+            )
+            self.assertEqual(
+                json.loads((output / "manifest.json").read_text()), manifest
+            )
+
     def test_row_quantization_matches_expected_scales(self):
         values = np.array([
             [-1.0, -0.5, 0.0, 1.0],

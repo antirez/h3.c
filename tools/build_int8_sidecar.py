@@ -143,6 +143,25 @@ def source_fingerprint(path):
     }
 
 
+def write_manifests(output_directory, manifest):
+    temporary = output_directory / "manifest.json.tmp"
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, output_directory / "manifest.json")
+    source_manifest = output_directory / "source.tsv.tmp"
+    source_manifest.write_text(
+        FORMAT + "\n" + "".join(
+            f"{item['name']}\t{item['size']}\t{item['mtime_ns']}\t"
+            f"{item['header_sha256']}\n"
+            for item in manifest["sources"]
+        ),
+        encoding="utf-8",
+    )
+    os.replace(source_manifest, output_directory / "source.tsv")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -193,12 +212,7 @@ def main():
         manifest["sources"].append(source_fingerprint(shard))
         manifest["tensors"].extend(names)
         print(f"{shard.name}: {len(names)} tensors -> {destination.name}", flush=True)
-    temporary = args.out / "manifest.json.tmp"
-    temporary.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, args.out / "manifest.json")
+    write_manifests(args.out, manifest)
     print("done")
     return 0
 

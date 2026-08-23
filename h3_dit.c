@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 enum {
@@ -285,6 +286,76 @@ static h3_gpu_tensor *sidecar_scale(h3_dit *dit, const char *name,
     uint64_t shape[] = {rows};
     return h3_weight_load_f32(dit->int8_weights, dit->gpu, scale_name, 1,
                               shape, error, error_size);
+}
+
+static char *sidecar_path(const char *directory, const char *name) {
+    size_t length = strlen(directory) + strlen(name) + 2;
+    char *path = malloc(length);
+    if (path) snprintf(path, length, "%s/%s", directory, name);
+    return path;
+}
+
+static int sidecar_matches_source(const char *sidecar,
+                                  const char *weight_directory,
+                                  size_t expected_shards,
+                                  char *error, size_t error_size) {
+    char *manifest_path = sidecar_path(sidecar, "source.tsv");
+    if (!manifest_path) {
+        fail(error, error_size, "out of memory resolving sidecar manifest");
+        return 0;
+    }
+    FILE *manifest = fopen(manifest_path, "r");
+    free(manifest_path);
+    if (!manifest) {
+        fail(error, error_size, "INT8 sidecar source.tsv is missing");
+        return 0;
+    }
+    char line[1024];
+    if (!fgets(line, sizeof(line), manifest)) {
+        fail(error, error_size, "INT8 sidecar source.tsv is empty");
+        fclose(manifest);
+        return 0;
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strcmp(line, "h3-int8-sidecar-v1")) {
+        fail(error, error_size, "unsupported INT8 sidecar manifest format");
+        fclose(manifest);
+        return 0;
+    }
+    size_t count = 0;
+    while (fgets(line, sizeof(line), manifest)) {
+        char name[256], hash[65], trailing;
+        unsigned long long size;
+        long long mtime_ns;
+        line[strcspn(line, "\r\n")] = '\0';
+        if (sscanf(line, "%255[^\t]\t%llu\t%lld\t%64s%c",
+                   name, &size, &mtime_ns, hash, &trailing) != 4) {
+            fail(error, error_size, "invalid INT8 sidecar source entry");
+            fclose(manifest);
+            return 0;
+        }
+        char *source_path = sidecar_path(weight_directory, name);
+        struct stat status;
+        int valid = source_path && stat(source_path, &status) == 0 &&
+            S_ISREG(status.st_mode) &&
+            (unsigned long long)status.st_size == size &&
+            (long long)status.st_mtimespec.tv_sec * 1000000000LL +
+                status.st_mtimespec.tv_nsec == mtime_ns;
+        free(source_path);
+        if (!valid) {
+            fail(error, error_size,
+                 "INT8 sidecar does not match source shard %s", name);
+            fclose(manifest);
+            return 0;
+        }
+        count++;
+    }
+    int ok = !ferror(manifest) && count == expected_shards;
+    fclose(manifest);
+    if (!ok)
+        fail(error, error_size,
+             "INT8 sidecar source shard count does not match checkpoint");
+    return ok;
 }
 
 static int copy_layout(h3_dit *dit, const h3_layout *layout,
@@ -613,7 +684,7 @@ static uint32_t token_reduced_parent(const h3_dit *dit, uint32_t full_row) {
 }
 
 static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,
-                      char *error, size_t error_size) {
+                      int allow_sidecar, char *error, size_t error_size) {
     char name[160];
 #define LOAD1(field, suffix, width) do {                                       \
     snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
@@ -623,7 +694,7 @@ static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,
 #define LOAD_MATRIX(field, int8_field, scales_field, suffix, rows, columns,    \
                     enabled, keep_bf16) do {                                   \
     snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
-    if ((enabled) && dit->int8_weights) {                                      \
+    if ((enabled) && dit->int8_weights && allow_sidecar) {                     \
         block->int8_field = sidecar_i8_2(                                      \
             dit, name, rows, columns, error, error_size);                      \
         block->scales_field = sidecar_scale(                                   \
@@ -947,9 +1018,9 @@ static int refine_text(h3_dit *dit, const h3_text_embedding *text,
     h3_gpu_tensor *value = NULL, *heads = NULL, *branch = NULL, *fc1 = NULL;
     h3_gpu_tensor *activated = NULL;
     int ok = source && condition_w && condition_b &&
-        load_block(dit, &refiner[0], "token_refiner.blocks.0.",
+        load_block(dit, &refiner[0], "token_refiner.blocks.0.", 0,
                    error, error_size) &&
-        load_block(dit, &refiner[1], "token_refiner.blocks.1.",
+        load_block(dit, &refiner[1], "token_refiner.blocks.1.", 0,
                    error, error_size);
     if (ok) final_norm = bf1(dit, "token_refiner.final_norm.weight", HIDDEN,
                              error, error_size);
@@ -1385,7 +1456,7 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                 !prepare_stream_layer(dit, index, error, error_size))
                 return 0;
         } else {
-            if (!load_block(dit, &dit->blocks[index], prefix,
+            if (!load_block(dit, &dit->blocks[index], prefix, 1,
                             error, error_size)) return 0;
             if (dit->int8_mlp && !dit->blocks[index].fc1_int8 &&
                 !quantize_block_mlp(dit, &dit->blocks[index],
@@ -1793,21 +1864,57 @@ static h3_dit *load_dit(const char *weight_directory,
         (getenv("H3_INT8_KEEP_BF16_MLP") ||
          getenv("H3_BENCH_INT8_MLP_AB") ||
          getenv("H3_INT8_MLP_STAGE"));
+    char *automatic_sidecar = NULL;
     const char *int8_sidecar = getenv("H3_INT8_SIDECAR");
+    int sidecar_is_explicit = int8_sidecar && *int8_sidecar;
+    if (!sidecar_is_explicit && !getenv("H3_DISABLE_INT8_SIDECAR") &&
+        !dit->ssd_streaming &&
+        (dit->int8_mlp || dit->int8_qkv || dit->int8_attention_out)) {
+        automatic_sidecar = sidecar_path(weight_directory, ".h3-int8");
+        if (automatic_sidecar) {
+            struct stat status;
+            char detail[256];
+            if (stat(automatic_sidecar, &status) == 0 &&
+                S_ISDIR(status.st_mode)) {
+                if (sidecar_matches_source(
+                        automatic_sidecar, weight_directory,
+                        h3_weight_store_shards(dit->weights),
+                        detail, sizeof(detail))) {
+                    int8_sidecar = automatic_sidecar;
+                } else if (getenv("H3_PROFILE")) {
+                    fprintf(stderr,
+                            "h3: ignoring incompatible automatic INT8 "
+                            "sidecar: %s\n", detail);
+                }
+            }
+        }
+    }
     if (int8_sidecar && *int8_sidecar) {
         if (dit->ssd_streaming ||
             (!dit->int8_mlp && !dit->int8_qkv && !dit->int8_attention_out)) {
             fail(error, error_size,
                  "H3_INT8_SIDECAR requires the resident M5 INT8 path");
+            free(automatic_sidecar);
+            goto failed;
+        }
+        if (sidecar_is_explicit && !sidecar_matches_source(
+                int8_sidecar, weight_directory,
+                h3_weight_store_shards(dit->weights),
+                error, error_size)) {
+            free(automatic_sidecar);
             goto failed;
         }
         dit->int8_weights = h3_weight_store_open(
             int8_sidecar, error, error_size);
-        if (!dit->int8_weights) goto failed;
+        if (!dit->int8_weights) {
+            free(automatic_sidecar);
+            goto failed;
+        }
         if (getenv("H3_PROFILE"))
             fprintf(stderr, "h3: loading prequantized INT8 weights from %s\n",
                     int8_sidecar);
     }
+    free(automatic_sidecar);
     h3_gpu_profile_set_label(dit->gpu, "H3 DiT");
     report(progress, progress_opaque, "refine text", 0, 1);
     if (!refine_text(dit, text, error, error_size)) goto failed;

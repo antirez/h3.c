@@ -1729,6 +1729,11 @@ def main():
     print(f"  Timeout:   {args.job_timeout}s per task")
     print(f"  Press Ctrl+C to stop\n")
 
+    def stop_on_signal(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_signal)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

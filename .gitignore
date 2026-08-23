@@ -2,6 +2,7 @@
 misc/
 MiniMax-H3/
 outputs/
+uploads/
 .ruff_cache/
 
 # Compiler and test outputs.

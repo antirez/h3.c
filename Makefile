@@ -8,7 +8,7 @@ FRAMEWORKS := -framework Foundation -framework Metal \
 	-framework Accelerate
 LDLIBS := $(FRAMEWORKS) -licucore -lm
 
-LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
+LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_lora.c h3_text_encoder.c \
 	h3_dit_schedule.c h3_dit.c
 
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
@@ -47,6 +47,9 @@ h3_audio_gpu_tests: tests/test_audio_gpu.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_gqa_tests: tests/test_gqa.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_lora_tests: tests/test_lora.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_real_audio_vae_test: tests/test_real_audio_vae.o $(LIB_OBJ)
@@ -105,7 +108,7 @@ h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
-	h3_audio_gpu_tests h3_gqa_tests h3_real_audio_vae_test \
+	h3_audio_gpu_tests h3_gqa_tests h3_lora_tests h3_real_audio_vae_test \
 	h3_real_audio_encoder_test \
 	h3_av_mux_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
@@ -131,6 +134,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	fi
 	./h3_audio_gpu_tests
 	./h3_gqa_tests
+	./h3_lora_tests
 	@if test -f MiniMax-H3/FL2VA/audio_vae/model.safetensors && \
 	         test -f misc/fixtures/h3_real_audio_vae_37.safetensors; then \
 		./h3_real_audio_vae_test; \
@@ -224,7 +228,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
-		h3_audio_gpu_tests h3_gqa_tests h3_real_audio_vae_test \
+	h3_audio_gpu_tests h3_gqa_tests h3_lora_tests h3_real_audio_vae_test \
 		h3_real_audio_encoder_test \
 		h3_av_mux_test \
 		h3_real_video_encoder_test h3_real_qwen_vision_test \

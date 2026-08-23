@@ -126,6 +126,28 @@ size_t h3_weight_store_shards(const h3_weight_store *store) {
     return store ? store->count : 0;
 }
 
+size_t h3_weight_store_tensor_count(const h3_weight_store *store) {
+    if (!store) return 0;
+    size_t total = 0;
+    for (size_t shard = 0; shard < store->count; shard++) {
+        if (store->headers[shard].tensor_count > SIZE_MAX - total)
+            return 0;
+        total += store->headers[shard].tensor_count;
+    }
+    return total;
+}
+
+const h3_st_tensor *h3_weight_store_tensor_at(
+        const h3_weight_store *store, size_t index) {
+    if (!store) return NULL;
+    for (size_t shard = 0; shard < store->count; shard++) {
+        size_t count = store->headers[shard].tensor_count;
+        if (index < count) return &store->headers[shard].tensors[index];
+        index -= count;
+    }
+    return NULL;
+}
+
 const h3_st_tensor *h3_weight_find(const h3_weight_store *store,
                                    const char *name,
                                    const h3_st_header **header) {

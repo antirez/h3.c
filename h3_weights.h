@@ -15,6 +15,9 @@ h3_weight_store *h3_weight_store_open(const char *directory,
                                       char *error, size_t error_size);
 void h3_weight_store_free(h3_weight_store *store);
 size_t h3_weight_store_shards(const h3_weight_store *store);
+size_t h3_weight_store_tensor_count(const h3_weight_store *store);
+const h3_st_tensor *h3_weight_store_tensor_at(
+    const h3_weight_store *store, size_t index);
 
 const h3_st_tensor *h3_weight_find(const h3_weight_store *store,
                                    const char *name,

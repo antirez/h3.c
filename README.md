@@ -136,6 +136,31 @@ against a 29-pass reference; an independent surfer test measured 0.547. The
 four-pass denoise took about 3.5 seconds on M5 Max, versus 26.4 seconds for the
 reference.
 
+LoRA adapters can be folded into a BF16 transformer offline. The tool accepts
+native `lora_A/B`, AI Toolkit / Diffusers `diffusion_model.*.lora_A/B`, and
+Kohya / ComfyUI `lora_unet_*` down/up keys. F16, BF16, and F32 adapters are
+supported; Kohya alpha values are applied as `alpha / rank`.
+
+```sh
+# Validate names, shapes, dtypes, and pair coverage without writing a model.
+python3 tools/fold_turbo_lora.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --lora adapter.safetensors --dry-run
+
+# Produce a folded transformer tree.
+python3 tools/fold_turbo_lora.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --lora adapter.safetensors \
+  --out MiniMax-H3-custom/FL2VA/transformer \
+  --scale 1.0
+```
+
+The output retains the checkpoint's tensor names and alignment. Each update
+and folded weight is checked for finite values, followed by a per-tensor parity
+probe before bytes are written. Validate an unfamiliar adapter with
+`--dry-run` first. Folding changes most transformer payload pages, so budget
+close to one additional transformer copy even when APFS cloning is available.
+
 For a low-memory run, add `--ssd-streaming`:
 
 ```sh

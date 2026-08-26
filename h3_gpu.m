@@ -1837,6 +1837,7 @@ int h3_gpu_sdpa_windowed_bf16_head_major(
         !h3_gpu_require_bf16(gpu, output, count, @"windowed SDPA output"))
         return 0;
     uint32_t video_rows = (uint32_t)video_rows64;
+    gpu.headMajorSDPAInputs = NO;
     uint32_t video_end = video_start + video_rows;
     uint32_t global_head = video_start;
     uint32_t global_tail = rows - video_end;

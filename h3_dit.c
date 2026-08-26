@@ -97,6 +97,11 @@ struct h3_dit {
     int fused_patch_pack;
     int token_reduction;
     h3_token_reduction_axis token_reduction_axis;
+    uint32_t attn_window_frames;
+    h3_gpu_tensor *attn_pack_q;
+    h3_gpu_tensor *attn_pack_k;
+    h3_gpu_tensor *attn_pack_v;
+    h3_gpu_tensor *attn_pack_o;
     int token_reduction_active;
     unsigned token_reduction_begin;
     unsigned token_reduction_end;
@@ -1641,6 +1646,49 @@ static int allocate_activations(h3_dit *dit, char *error, size_t error_size) {
              h3_gpu_error(dit->gpu));
         return 0;
     }
+    /* Windowed video attention (experimental): H3_ATTN_WINDOW=W restricts
+     * target-video tokens to +/- W temporal latent frames plus all global
+     * (non-video) tokens, composed from MPSGraph SDPA slabs. Requires the
+     * head-major attention path and a video segment that ends the layout. */
+    const char *window_text = getenv("H3_ATTN_WINDOW");
+    if (window_text && *window_text) {
+        char *end = NULL;
+        long window = strtol(window_text, &end, 10);
+        uint32_t frame_rows = dit->latent_t > 0 &&
+            dit->video_rows % (uint32_t)dit->latent_t == 0 ?
+            dit->video_rows / (uint32_t)dit->latent_t : 0;
+        if (!end || *end || window < 1 || window > dit->latent_t ||
+            !frame_rows ||
+            dit->video_target_start + dit->video_rows != dit->sequence) {
+            fail(error, error_size,
+                 "H3_ATTN_WINDOW requires 1..latent_t frames and a "
+                 "trailing video segment");
+            return 0;
+        }
+        dit->attn_window_frames = (uint32_t)window;
+        uint32_t global_rows = dit->video_target_start;
+        uint32_t q_pack = (uint32_t)window * frame_rows;
+        if (global_rows > q_pack) q_pack = global_rows;
+        uint32_t kv_frames = (uint32_t)dit->latent_t <
+            3u * (uint32_t)window ? (uint32_t)dit->latent_t :
+            3u * (uint32_t)window;
+        uint32_t kv_pack = kv_frames * frame_rows + global_rows;
+        dit->attn_pack_q = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)q_pack * INNER);
+        dit->attn_pack_k = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)kv_pack * INNER);
+        dit->attn_pack_v = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)kv_pack * INNER);
+        dit->attn_pack_o = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)q_pack * INNER);
+        if (!dit->attn_pack_q || !dit->attn_pack_k || !dit->attn_pack_v ||
+            !dit->attn_pack_o) {
+            fail(error, error_size,
+                 "cannot allocate windowed attention scratch: %s",
+                 h3_gpu_error(dit->gpu));
+            return 0;
+        }
+    }
     if (getenv("H3_DISABLE_FUSED_FINAL_SLICE")) {
         dit->final_audio_input = h3_gpu_tensor_new_bf16(
             dit->gpu, audio * HIDDEN);
@@ -2202,12 +2250,46 @@ static int run_block(h3_dit *dit, unsigned index, int step,
         !dit->use_slower_row_major_attention_output &&
         !dit->use_slower_uncached_int8_scales &&
         !getenv("H3_DISABLE_HEAD_MAJOR_ATTENTION_OUTPUT");
-    if (head_major_attention_output)
-        OP(h3_gpu_sdpa_bf16_head_major_output(
-            dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
-            rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),
-           "DiT head-major full attention");
-    else
+    if (head_major_attention_output) {
+        /* Resolve the current video slab geometry: reduction repacks video
+         * rows in place at the end of the sequence, halving either the
+         * per-frame rows (horizontal) or the frame count (time). */
+        uint32_t window = dit->attn_window_frames;
+        uint32_t frames = 0, frame_rows = 0;
+        if (window && rows > dit->video_target_start) {
+            uint32_t video_now = rows - dit->video_target_start;
+            uint32_t full_frame_rows = dit->latent_t > 0 ?
+                dit->video_rows / (uint32_t)dit->latent_t : 0;
+            if (video_now == dit->video_rows) {
+                frames = (uint32_t)dit->latent_t;
+                frame_rows = full_frame_rows;
+            } else if (dit->token_reduction_axis ==
+                           H3_TOKEN_REDUCTION_TIME &&
+                       full_frame_rows &&
+                       video_now % full_frame_rows == 0) {
+                frames = video_now / full_frame_rows;
+                frame_rows = full_frame_rows;
+            } else if (dit->latent_t > 0 &&
+                       video_now % (uint32_t)dit->latent_t == 0) {
+                frames = (uint32_t)dit->latent_t;
+                frame_rows = video_now / (uint32_t)dit->latent_t;
+            }
+        }
+        if (window && frames > 3 * window && frame_rows)
+            OP(h3_gpu_sdpa_windowed_bf16_head_major(
+                dit->gpu, dit->attention_heads, dit->query, dit->key,
+                dit->value, dit->attn_pack_q, dit->attn_pack_k,
+                dit->attn_pack_v, dit->attn_pack_o, rows, HEADS, HEAD_DIM,
+                1.0f / sqrtf((float)HEAD_DIM), dit->video_target_start,
+                frames, frame_rows, window),
+               "DiT windowed head-major attention");
+        else
+            OP(h3_gpu_sdpa_bf16_head_major_output(
+                dit->gpu, dit->attention_heads, dit->query, dit->key,
+                dit->value, rows, HEADS, HEAD_DIM,
+                1.0f / sqrtf((float)HEAD_DIM)),
+               "DiT head-major full attention");
+    } else
         OP(h3_gpu_sdpa_bf16(
             dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
             rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),
@@ -3312,6 +3394,8 @@ void h3_dit_free(h3_dit *dit) {
     FREE(core_input); FREE(core_residual);
     FREE(mod_attention); FREE(qkv); FREE(query); FREE(key); FREE(value);
     FREE(attention_heads); FREE(attention_output);
+    FREE(attn_pack_q); FREE(attn_pack_k); FREE(attn_pack_v);
+    FREE(attn_pack_o);
     FREE(token_pool_pairs); FREE(token_baseline_indices);
     FREE(token_expand_parents); FREE(token_original); FREE(mod_mlp); FREE(fc1);
     FREE(activated); FREE(mlp_output); FREE(int8_activation);

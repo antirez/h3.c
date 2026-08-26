@@ -117,6 +117,7 @@
 @property(nonatomic) BOOL tensorOpsEnabled;
 @property(nonatomic) NSUInteger tensorOpsMode;
 @property(nonatomic) BOOL headMajorSDPAInputs;
+@property(nonatomic) int graphSalt;
 @property(nonatomic) h3_gpu_stats profileStartStats;
 @property(nonatomic) h3_gpu_stats profileMarkStats;
 @property(nonatomic) double profileStartWall;
@@ -907,6 +908,14 @@ int h3_gpu_tensor_write_bf16_range(h3_gpu_tensor *tensor,
     return 1;
 }
 
+/* Selects an integer salt mixed into MPSGraph cache keys. Two pipeline slots
+ * with different salts get independent graph objects, so encoding one slot
+ * does not serialize against the other slot's in-flight execution. */
+void h3_gpu_set_graph_salt(h3_gpu *opaque, int salt) {
+    H3GPU *gpu = GPU(opaque);
+    if (gpu) gpu.graphSalt = salt;
+}
+
 int h3_gpu_begin(h3_gpu *opaque) {
     H3GPU *gpu = GPU(opaque);
     if (!gpu || gpu.command || gpu.inflightCommands.count) return 0;
@@ -943,6 +952,34 @@ int h3_gpu_continue(h3_gpu *opaque) {
         return 0;
     }
     gpu.commandStartWall = h3_gpu_now();
+    return 1;
+}
+
+int h3_gpu_flight_limit(h3_gpu *opaque, int keep) {
+    H3GPU *gpu = GPU(opaque);
+    if (!gpu || keep < 0) return 0;
+    @autoreleasepool {
+        double wait_start = h3_gpu_now();
+        h3_gpu_stats stats = gpu.stats;
+        int waited = 0;
+        while ((int)gpu.inflightCommands.count > keep) {
+            id<MTLCommandBuffer> pending = gpu.inflightCommands[0];
+            [pending waitUntilCompleted];
+            if (pending.status == MTLCommandBufferStatusError) {
+                h3_gpu_set_error(gpu, @"Metal command failed: %@",
+                                 pending.error.localizedDescription);
+                [gpu.inflightCommands removeAllObjects];
+                return 0;
+            }
+            if (pending.GPUEndTime >= pending.GPUStartTime)
+                stats.gpu_seconds += pending.GPUEndTime - pending.GPUStartTime;
+            [gpu.inflightCommands removeObjectAtIndex:0];
+            waited = 1;
+        }
+        if (waited)
+            stats.command_wait_seconds += h3_gpu_now() - wait_start;
+        gpu.stats = stats;
+    }
     return 1;
 }
 
@@ -1488,7 +1525,8 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
                                  int headMajor, int outputHeadMajor) {
     @autoreleasepool {
         NSString *cacheKey = [NSString stringWithFormat:
-                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d",
+                              @"%d|%u:%u:%u:%u:%u:%.9g:%d:%d:%d",
+                              gpu.graphSalt,
                               (unsigned)dataType, batch, sequence, heads,
                               head_dim, scale, causal, headMajor,
                               outputHeadMajor];
@@ -2400,7 +2438,8 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
                                      uint32_t input_dim, uint32_t output_dim,
                                      int has_bias, MPSDataType dataType) {
     @autoreleasepool {
-        NSString *key = [NSString stringWithFormat:@"%u:%u:%u:%d:%u", rows,
+        NSString *key = [NSString stringWithFormat:@"%d|%u:%u:%u:%d:%u",
+                         gpu.graphSalt, rows,
                          input_dim, output_dim, has_bias, (unsigned)dataType];
         H3Linear *cached = gpu.linearCache[key];
         if (cached) return cached;

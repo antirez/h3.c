@@ -97,7 +97,16 @@ int h3_gpu_begin(h3_gpu *gpu);
 /* Commit the current command buffer without waiting, then continue encoding on
  * the same ordered queue. h3_gpu_submit() waits and validates the whole chain. */
 int h3_gpu_continue(h3_gpu *gpu);
+/* Wait for and validate the oldest in-flight command buffers until at most
+ * `keep` remain, without touching the buffer currently being encoded. Lets a
+ * caller overlap CPU work with the newest committed buffers while safely
+ * reading results produced by older ones. */
+int h3_gpu_flight_limit(h3_gpu *gpu, int keep);
 int h3_gpu_submit(h3_gpu *gpu);
+/* Mixes a salt into MPSGraph cache keys so pipelined callers can give each
+ * activation slot independent graph objects; encoding with one salt then
+ * never blocks on the other salt's in-flight execution. Default 0. */
+void h3_gpu_set_graph_salt(h3_gpu *gpu, int salt);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown

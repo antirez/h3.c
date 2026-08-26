@@ -489,6 +489,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             [names addObject:@"h3_fc1_swiglu_int8_nax_r128_full_k5376"];
             [names addObject:@"h3_fc1_swiglu_int8_local_nax_r128"];
             [names addObject:@"h3_linear_int8_nax_r128"];
+            [names addObject:@"h3_sdpa_flash_bf16_hm"];
             [names addObject:
                 @"h3_linear_int8_nax_r128_full_k14336"];
             [names addObject:
@@ -914,6 +915,55 @@ int h3_gpu_tensor_write_bf16_range(h3_gpu_tensor *tensor,
 void h3_gpu_set_graph_salt(h3_gpu *opaque, int salt) {
     H3GPU *gpu = GPU(opaque);
     if (gpu) gpu.graphSalt = salt;
+}
+
+typedef struct {
+    uint32_t sequence, heads;
+    float scale;
+} h3_sdpa_flash_args;
+
+static int h3_gpu_require_bf16(H3GPU *gpu, const h3_gpu_tensor *tensor,
+                               size_t elements, NSString *label);
+
+int h3_gpu_sdpa_flash_bf16_head_major(h3_gpu *opaque, h3_gpu_tensor *output,
+                                      const h3_gpu_tensor *query,
+                                      const h3_gpu_tensor *key,
+                                      const h3_gpu_tensor *value,
+                                      uint32_t sequence, uint32_t heads,
+                                      uint32_t head_dim, float scale) {
+    H3GPU *gpu = GPU(opaque);
+    size_t elements = (size_t)sequence * heads * head_dim;
+    if (!gpu || head_dim != 128 || !gpu.tensorOpsEnabled ||
+        !h3_gpu_require_bf16(gpu, query, elements, @"flash SDPA query") ||
+        !h3_gpu_require_bf16(gpu, key, elements, @"flash SDPA key") ||
+        !h3_gpu_require_bf16(gpu, value, elements, @"flash SDPA value") ||
+        !h3_gpu_require_bf16(gpu, output, elements, @"flash SDPA output") ||
+        !h3_gpu_require_command(gpu)) return 0;
+    id<MTLComputePipelineState> pipeline = h3_gpu_pipeline(
+        gpu, @"h3_sdpa_flash_bf16_hm");
+    if (!pipeline || pipeline.maxTotalThreadsPerThreadgroup < 256) {
+        h3_gpu_set_error(gpu, @"flash SDPA kernel is unavailable");
+        return 0;
+    }
+    h3_sdpa_flash_args args = {sequence, heads, scale};
+    @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder =
+            [gpu.command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:TENSOR(query).buffer offset:0 atIndex:0];
+        [encoder setBuffer:TENSOR(key).buffer offset:0 atIndex:1];
+        [encoder setBuffer:TENSOR(value).buffer offset:0 atIndex:2];
+        [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:3];
+        [encoder setBytes:&args length:sizeof(args) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(
+            (sequence + 63u) / 64u, heads, 1)
+                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+    }
+    h3_gpu_stats stats = gpu.stats;
+    stats.direct_dispatches++;
+    gpu.stats = stats;
+    return 1;
 }
 
 int h3_gpu_begin(h3_gpu *opaque) {

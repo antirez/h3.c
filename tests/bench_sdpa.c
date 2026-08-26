@@ -65,7 +65,7 @@ static int parse_positive(const char *text, int *value) {
 }
 
 static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
-                     int head_major) {
+                     int head_major, int flash) {
     size_t width = (size_t)H3_BENCH_HEADS * H3_BENCH_HEAD_DIM;
     if (sequence > SIZE_MAX / width) return 0;
     size_t elements = (size_t)sequence * width;
@@ -86,7 +86,10 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     float scale = 1.0f / sqrtf((float)H3_BENCH_HEAD_DIM);
     for (int run = 0; run < warmup; run++) {
         int ok = h3_gpu_begin(gpu) &&
-            (head_major ? h3_gpu_sdpa_bf16_head_major_io(
+            (flash ? h3_gpu_sdpa_flash_bf16_head_major(
+                 gpu, output, query, key, value, sequence,
+                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
+             head_major ? h3_gpu_sdpa_bf16_head_major_io(
                  gpu, output, query, key, value, sequence,
                  H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
              h3_gpu_sdpa_bf16(
@@ -106,7 +109,10 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     double started = now_seconds();
     for (int run = 0; run < repeats; run++) {
         int ok = h3_gpu_begin(gpu) &&
-            (head_major ? h3_gpu_sdpa_bf16_head_major_io(
+            (flash ? h3_gpu_sdpa_flash_bf16_head_major(
+                 gpu, output, query, key, value, sequence,
+                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
+             head_major ? h3_gpu_sdpa_bf16_head_major_io(
                  gpu, output, query, key, value, sequence,
                  H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
              h3_gpu_sdpa_bf16(
@@ -127,15 +133,52 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     int finite = h3_gpu_tensor_read_bf16(output, sample, 16);
     for (size_t index = 0; finite && index < 16; index++)
         finite = isfinite(bf16_to_f32(sample[index]));
+    double l2 = -1.0;
+    if (finite && flash && sequence <= 8000) {
+        h3_gpu_tensor *reference = h3_gpu_tensor_new_bf16(gpu, elements);
+        int ok = reference && h3_gpu_begin(gpu) &&
+            h3_gpu_sdpa_bf16_head_major_io(
+                gpu, reference, query, key, value, sequence,
+                H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) &&
+            h3_gpu_submit(gpu);
+        if (ok) {
+            enum { CHUNK = 1 << 20 };
+            uint16_t *a = malloc(CHUNK * sizeof(*a));
+            uint16_t *b = malloc(CHUNK * sizeof(*b));
+            double difference = 0.0, magnitude = 0.0;
+            size_t offset = 0;
+            while (ok && a && b && offset < elements) {
+                size_t count = elements - offset;
+                if (count > CHUNK) count = CHUNK;
+                ok = h3_gpu_tensor_read_bf16_range(output, offset, a, count) &&
+                     h3_gpu_tensor_read_bf16_range(reference, offset, b,
+                                                   count);
+                for (size_t index = 0; ok && index < count; index++) {
+                    double flash_value = bf16_to_f32(a[index]);
+                    double mps_value = bf16_to_f32(b[index]);
+                    difference += (flash_value - mps_value) *
+                                  (flash_value - mps_value);
+                    magnitude += mps_value * mps_value;
+                }
+                offset += count;
+            }
+            if (ok && magnitude > 0.0) l2 = sqrt(difference / magnitude);
+            free(a); free(b);
+        }
+        h3_gpu_tensor_free(reference);
+    }
     double buffer_gib = (double)elements * sizeof(uint16_t) * 4.0 /
         (1024.0 * 1024.0 * 1024.0);
-    printf("%u\t%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%s\n",
-           sequence, head_major ? "head" : "row", repeats, buffer_gib,
+    printf("%u\t%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%s", 
+           sequence, flash ? "flash" : head_major ? "head" : "row", repeats,
+           buffer_gib,
            wall * 1000.0 / repeats,
            (after.command_wait_seconds - before.command_wait_seconds) *
                1000.0 / repeats,
            (after.gpu_seconds - before.gpu_seconds) * 1000.0 / repeats,
            finite ? "finite" : "nonfinite");
+    if (l2 >= 0.0) printf("\tL2_vs_mps=%.3e", l2);
+    putchar('\n');
     fflush(stdout);
     h3_gpu_tensor_free(query); h3_gpu_tensor_free(key);
     h3_gpu_tensor_free(value); h3_gpu_tensor_free(output);
@@ -146,6 +189,7 @@ int main(int argc, char **argv) {
     int warmup = 1;
     int repeats = 3;
     int head_major = 1;
+    int flash = 0;
     uint32_t sequences[32] = {2000, 8000, 20000, 38000};
     size_t sequence_count = 4;
     size_t explicit_count = 0;
@@ -156,6 +200,8 @@ int main(int argc, char **argv) {
             if (!parse_positive(argv[++index], &repeats)) return 2;
         } else if (!strcmp(argv[index], "--row-major")) {
             head_major = 0;
+        } else if (!strcmp(argv[index], "--flash")) {
+            flash = 1;
         } else {
             int parsed;
             if (!parse_positive(argv[index], &parsed) || explicit_count == 32)
@@ -173,7 +219,8 @@ int main(int argc, char **argv) {
     puts("sequence\tlayout\trepeats\tbuffers_GiB\twall_ms\twait_ms\troot_gpu_ms\toutput");
     int ok = 1;
     for (size_t index = 0; index < sequence_count; index++)
-        if (!benchmark(gpu, sequences[index], warmup, repeats, head_major)) {
+        if (!benchmark(gpu, sequences[index], warmup, repeats, head_major,
+                       flash)) {
             ok = 0;
             break;
         }

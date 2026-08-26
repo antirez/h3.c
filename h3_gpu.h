@@ -107,6 +107,15 @@ int h3_gpu_submit(h3_gpu *gpu);
  * activation slot independent graph objects; encoding with one salt then
  * never blocks on the other salt's in-flight execution. Default 0. */
 void h3_gpu_set_graph_salt(h3_gpu *gpu, int salt);
+/* Experimental M5 TensorOps flash SDPA over head-major BF16 Q/K/V with
+ * head_dim 128: streaming K/V tiles with an online softmax, no attention
+ * matrix materialization. Benchmark path; requires the Metal 4 int8 tier. */
+int h3_gpu_sdpa_flash_bf16_head_major(h3_gpu *gpu, h3_gpu_tensor *output,
+                                      const h3_gpu_tensor *query,
+                                      const h3_gpu_tensor *key,
+                                      const h3_gpu_tensor *value,
+                                      uint32_t sequence, uint32_t heads,
+                                      uint32_t head_dim, float scale);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown

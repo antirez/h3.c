@@ -933,6 +933,11 @@ video.file-preview { object-fit: contain; }
           <div class="mode-desc">仅凭文字描述生成视频+音频</div>
           <div class="mode-check"></div>
         </div>
+        <div class="mode-card" data-mode="chain">
+          <div class="mode-name">长视频·镜头链</div>
+          <div class="mode-desc">每行一镜，末帧串联成 15 秒以上长片</div>
+          <div class="mode-check"></div>
+        </div>
         <div class="mode-card" data-mode="frame-anchor">
           <div class="mode-name">首尾帧控制</div>
           <div class="mode-desc">指定首帧/末帧，补全中间运动</div>
@@ -984,9 +989,9 @@ video.file-preview { object-fit: contain; }
       <!-- 质量预设 -->
       <div class="section-label">质量预设</div>
       <div class="presets" id="presets">
-        <button class="preset active" data-profile="turbo" data-steps="5" data-layers="50" data-reuse="1">Turbo 默认<span class="preset-speed">5步/50层</span></button>
+        <button class="preset active" data-profile="turbo" data-steps="8" data-layers="45" data-reuse="1">质量优先<span class="preset-speed">8步/45层+窗口</span></button>
+        <button class="preset" data-steps="6" data-layers="45" data-reuse="1">速度优先<span class="preset-speed">6步/45层+窗口</span></button>
         <button class="preset" data-steps="20" data-layers="45" data-reuse="2">均衡<span class="preset-speed">20步/45层</span></button>
-        <button class="preset" data-steps="20" data-layers="50" data-reuse="1">高质量<span class="preset-speed">~20步/50层</span></button>
         <button class="preset" data-steps="50" data-layers="50" data-reuse="1">参考级<span class="preset-speed">~50步/50层</span></button>
       </div>
 
@@ -1259,6 +1264,13 @@ const MODE_CONFIG = {
     cliLabel: '文生视频',
     files: [],
     hint: '仅凭文字描述生成视频+音频。',
+  },
+  'chain': {
+    label: '长视频·镜头链',
+    cliLabel: '镜头链长视频',
+    files: [],
+    hint: '每行一个镜头描述（可用 [5s] 前缀指定单镜时长，默认取右侧时长），' +
+      '每个镜头以上一镜末帧为首帧锚点串联，可生成 15 秒以上的连续长视频。',
   },
   'frame-anchor': {
     label: '首尾帧控制',
@@ -1732,6 +1744,9 @@ modeCards.forEach(card => {
     modeCards.forEach(c => c.classList.remove('active'));
     card.classList.add('active');
     currentMode = card.dataset.mode;
+    prompt.placeholder = currentMode === 'chain'
+      ? '每行一个镜头描述，按顺序自动串联，例如：\n[4s] 一只红狐狸在雪地里向右小跑，宽景跟拍\n[5s] 狐狸在木栅栏前停下，回头看向镜头\n狐狸转身走向远处树林，晨光柔和'
+      : '描述你想要生成的场景\n例如：一只红狐狸在松林的雪地里行走，中景跟拍，冬日自然光线，皮毛细节清晰';
     releaseAllFilePreviews();
     files = {};
     applyRecommendedDefaults();
@@ -2007,6 +2022,13 @@ function buildCommand() {
   const l = layers.value;
   const r = reuse.value;
   const o = output.value || 'outputs/generation.mp4';
+  if (currentMode === 'chain') {
+    const shotSeconds = Math.max(1, Math.round((Number(f) / 24) * 10) / 10);
+    return `H3_ATTN_WINDOW=2 python3 tools/shot_chain.py -d ${activeModelArg} \\\n`
+      + `  --shots-file scene.txt --width ${w} --height ${h} \\\n`
+      + `  --seconds-per-shot ${shotSeconds} --steps ${s} --layers ${l} \\\n`
+      + `  --out ${o}`;
+  }
 
   let cmd = `./h3 --profile -d ${activeModelArg} -p "${p.replace(/"/g, '\\"')}" --width ${w} --height ${h} --frames ${f} --steps ${s} --layers ${l} --reuse ${r}`;
 

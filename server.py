@@ -20,6 +20,7 @@ import stat
 import struct
 import shutil
 import subprocess
+import sys
 import time
 import http.server
 import urllib.parse
@@ -556,6 +557,28 @@ def record_process_line(job, line):
     with job_lock:
         log = (job.get("log", "") + clean + "\n")[-20000:]
         job["log"] = log
+        if job.get("kind") == "chain":
+            match = re.match(r"^SHOT (\d+)/(\d+) (rendering|done)", clean)
+            if match:
+                shot, total, state = (int(match.group(1)),
+                                      max(1, int(match.group(2))),
+                                      match.group(3))
+                completed = shot if state == "done" else shot - 1
+                job.update(
+                    phase="chain",
+                    phase_label=f"镜头 {shot}/{total}" + (
+                        " 完成" if state == "done" else " 渲染中"),
+                    phase_completed=completed,
+                    phase_total=total,
+                    progress_percent=round(
+                        min(97.0, 2.0 + completed / total * 93.0), 1),
+                    progress_is_estimate=True,
+                )
+            elif clean.startswith("CHAIN done"):
+                job.update(phase="saving", phase_label="拼接完成",
+                           progress_percent=99.0)
+            refresh_running_progress(job)
+            return
         if job.get("kind") == "image":
             if clean.startswith("[gguf] loading"):
                 job.update(phase="loading", phase_label="加载 SenseNova", progress_percent=5.0)
@@ -844,11 +867,13 @@ def generation_profile(model_dir):
             resolved / "FL2VA/transformer/.h3-int8/source.tsv"
         ).is_file(),
         "text_defaults": {
-            "steps": 5 if turbo else 20,
-            "layers": 50 if turbo else 45,
+            "steps": 8 if turbo else 20,
+            "layers": 45,
             "reuse": 1 if turbo else 2,
         },
-        "reference_defaults": {"steps": 20, "layers": 45, "reuse": 2},
+        "reference_defaults": ({"steps": 8, "layers": 45, "reuse": 1}
+                               if turbo else
+                               {"steps": 20, "layers": 45, "reuse": 2}),
     }
 
 
@@ -1165,6 +1190,9 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             return
 
         mode = params.get("mode", "text")
+        if mode == "chain":
+            self._handle_chain_generate(params, prompt)
+            return
         if mode in REF2VA_MODES and not model_capabilities(
                 self.server.model_dir)["ref2va"]:
             self._json_response({
@@ -1278,6 +1306,87 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             job_results[job_id] = job
         self.server.enqueue(job_id)
 
+        self._json_response(public_job(job), 202)
+
+    def _handle_chain_generate(self, params, prompt):
+        """Enqueue a multi-shot chained long video via tools/shot_chain.py."""
+        shots = [line.strip() for line in prompt.splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        if not shots:
+            self._json_response({"error": "镜头链模式需要每行一个镜头描述"}, 400)
+            return
+        try:
+            profile = generation_profile(self.server.model_dir)
+            video_params = normalize_video_params(
+                params, profile["text_defaults"])
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return
+        try:
+            output_file, output_name = resolve_output_path(
+                params.get("output") or "chain.mp4")
+        except ValueError as exc:
+            self._json_response({"error": str(exc)}, 400)
+            return
+        shot_seconds = max(1.0, round(video_params["frames"] / 24.0, 2))
+        job_id = uuid.uuid4().hex
+        shots_dir = OUTPUTS / ".chains"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        shots_file = shots_dir / f"{job_id}.txt"
+        shots_file.write_text(prompt, encoding="utf-8")
+        with job_lock:
+            requested = output_file
+            suffix = requested.suffix or ".mp4"
+            stem = requested.stem
+            attempt = 1
+            reserved = {job.get("output") for job in job_results.values()}
+            while output_file.exists() or output_name in reserved:
+                attempt += 1
+                output_file = requested.with_name(f"{stem}-{attempt}{suffix}")
+                output_name = output_file.relative_to(
+                    OUTPUTS.resolve()).as_posix()
+            cmd = [
+                sys.executable, "-u", str(HERE / "tools" / "shot_chain.py"),
+                "-d", str(self.server.model_dir),
+                "--shots-file", str(shots_file),
+                "--h3", str(HERE / "h3"),
+                "--width", str(video_params["width"]),
+                "--height", str(video_params["height"]),
+                "--seconds-per-shot", str(shot_seconds),
+                "--steps", str(video_params["steps"]),
+                "--layers", str(video_params["layers"]),
+                "--seed", str(video_params["seed"]),
+                "--out", str(output_file),
+            ]
+            per_shot = estimate_job_seconds(video_params, "text")
+            job = {
+                "job_id": job_id,
+                "kind": "chain",
+                "status": "queued",
+                "success": None,
+                "prompt": prompt,
+                "mode": "chain",
+                "loras": [],
+                "params": {key: video_params[key] for key in
+                           ["width", "height", "frames", "steps", "layers",
+                            "reuse"]},
+                "shots": len(shots),
+                "output": output_name,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "estimated_total_seconds": per_shot * len(shots),
+                "progress_percent": 0.0,
+                "progress_is_estimate": True,
+                "phase": "queued",
+                "phase_label": "等待执行",
+                "phase_completed": 0,
+                "phase_total": len(shots),
+                "elapsed_seconds": 0.0,
+                "eta_seconds": None,
+                "cmd": cmd,
+                "upload_paths": [],
+            }
+            job_results[job_id] = job
+        self.server.enqueue(job_id)
         self._json_response(public_job(job), 202)
 
     def _handle_image_generate(self):
@@ -1559,6 +1668,13 @@ class H3Server(http.server.ThreadingHTTPServer):
         self.model_dir = Path(model_dir).resolve()
         self.job_timeout = job_timeout
         self.process_env = os.environ.copy()
+        # Windowed video attention is the validated quality/speed default:
+        # +/-2 temporal latent frames plus global tokens (3.6x denoise on the
+        # 10s 768-class benchmark, artifact-free in probes). Set it to 0 in
+        # the shell environment to restore dense attention.
+        self.process_env.setdefault("H3_ATTN_WINDOW", "2")
+        if self.process_env.get("H3_ATTN_WINDOW") in {"0", ""}:
+            self.process_env.pop("H3_ATTN_WINDOW", None)
         self.process_env["H3_FFMPEG"] = resolve_media_tool(
             "H3_FFMPEG", "ffmpeg"
         )

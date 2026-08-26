@@ -4456,3 +4456,48 @@ kernel void h3_sdpa_flash_bf16_hm(
                 (bfloat)(o_accum[element] / row_sum[(uint)index[1]]);
     }
 }
+
+struct h3_rows_pack_args {
+    uint full_rows;
+    uint packed_rows;
+    uint head_dim;
+    uint heads;
+    uint range_count;
+    uint range_start[3];
+    uint range_length[3];
+    uint scatter;
+};
+
+/* Packs up to three strided row ranges of a head-major [heads][full_rows][D]
+ * tensor into a dense [heads][packed_rows][D] scratch (scatter=0), or writes
+ * the dense scratch back into those ranges (scatter=1). Pure row movement for
+ * the windowed-attention composition; no arithmetic. */
+kernel void h3_rows_pack_bf16_hm(
+        device bfloat *full [[buffer(0)]],
+        device bfloat *packed [[buffer(1)]],
+        constant h3_rows_pack_args &args [[buffer(2)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    uint element = gid.x;
+    uint head = gid.y;
+    uint packed_row = element / args.head_dim;
+    uint column = element % args.head_dim;
+    if (packed_row >= args.packed_rows || head >= args.heads) return;
+    uint remaining = packed_row;
+    uint full_row = 0;
+    bool found = false;
+    for (uint range = 0; range < args.range_count && !found; range++) {
+        if (remaining < args.range_length[range]) {
+            full_row = args.range_start[range] + remaining;
+            found = true;
+        } else {
+            remaining -= args.range_length[range];
+        }
+    }
+    if (!found) return;
+    size_t full_index = ((size_t)head * args.full_rows + full_row) *
+        args.head_dim + column;
+    size_t packed_index = ((size_t)head * args.packed_rows + packed_row) *
+        args.head_dim + column;
+    if (args.scatter) full[full_index] = packed[packed_index];
+    else packed[packed_index] = full[full_index];
+}

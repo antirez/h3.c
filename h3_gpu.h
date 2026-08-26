@@ -116,6 +116,18 @@ int h3_gpu_sdpa_flash_bf16_head_major(h3_gpu *gpu, h3_gpu_tensor *output,
                                       const h3_gpu_tensor *value,
                                       uint32_t sequence, uint32_t heads,
                                       uint32_t head_dim, float scale);
+/* Windowed attention composed from MPSGraph SDPA calls over a head-major
+ * BF16 sequence: contiguous video tokens attend within +/- window_frames
+ * temporal frames plus all non-video (global) tokens; global tokens attend
+ * to everything. pack_* are caller-sized scratch tensors (see the .m). */
+int h3_gpu_sdpa_windowed_bf16_head_major(
+        h3_gpu *gpu, h3_gpu_tensor *output,
+        const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+        const h3_gpu_tensor *value, h3_gpu_tensor *pack_q,
+        h3_gpu_tensor *pack_k, h3_gpu_tensor *pack_v, h3_gpu_tensor *pack_o,
+        uint32_t rows, uint32_t heads, uint32_t head_dim, float scale,
+        uint32_t video_start, uint32_t video_frames, uint32_t frame_rows,
+        uint32_t window_frames);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown

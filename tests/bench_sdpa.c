@@ -65,7 +65,8 @@ static int parse_positive(const char *text, int *value) {
 }
 
 static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
-                     int head_major, int flash) {
+                     int head_major, int flash, uint32_t window_frames,
+                     uint32_t frame_rows, uint32_t global_rows) {
     size_t width = (size_t)H3_BENCH_HEADS * H3_BENCH_HEAD_DIM;
     if (sequence > SIZE_MAX / width) return 0;
     size_t elements = (size_t)sequence * width;
@@ -84,18 +85,50 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
         return 0;
     }
     float scale = 1.0f / sqrtf((float)H3_BENCH_HEAD_DIM);
+    uint32_t frames = 0;
+    h3_gpu_tensor *pack_q = NULL, *pack_k = NULL, *pack_v = NULL,
+                  *pack_o = NULL;
+    if (window_frames) {
+        if (global_rows >= sequence ||
+            (sequence - global_rows) % frame_rows) {
+            fprintf(stderr, "N=%u incompatible with --frame-rows/--globals\n",
+                    sequence);
+            return 0;
+        }
+        frames = (sequence - global_rows) / frame_rows;
+        uint32_t kv_frames = frames < 3 * window_frames ? frames :
+            3 * window_frames;
+        uint32_t q_pack = window_frames * frame_rows;
+        if (global_rows > q_pack) q_pack = global_rows;
+        size_t q_elements = (size_t)q_pack * H3_BENCH_HEADS *
+            H3_BENCH_HEAD_DIM;
+        size_t kv_elements = ((size_t)kv_frames * frame_rows + global_rows) *
+            H3_BENCH_HEADS * H3_BENCH_HEAD_DIM;
+        pack_q = h3_gpu_tensor_new_bf16(gpu, q_elements);
+        pack_k = h3_gpu_tensor_new_bf16(gpu, kv_elements);
+        pack_v = h3_gpu_tensor_new_bf16(gpu, kv_elements);
+        pack_o = h3_gpu_tensor_new_bf16(gpu, q_elements);
+        if (!pack_q || !pack_k || !pack_v || !pack_o) {
+            fprintf(stderr, "windowed scratch allocation failed\n");
+            return 0;
+        }
+    }
+#define H3_BENCH_RUN() \
+    (window_frames ? h3_gpu_sdpa_windowed_bf16_head_major( \
+         gpu, output, query, key, value, pack_q, pack_k, pack_v, pack_o, \
+         sequence, H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale, \
+         global_rows, frames, frame_rows, window_frames) : \
+     flash ? h3_gpu_sdpa_flash_bf16_head_major( \
+         gpu, output, query, key, value, sequence, \
+         H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) : \
+     head_major ? h3_gpu_sdpa_bf16_head_major_io( \
+         gpu, output, query, key, value, sequence, \
+         H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) : \
+     h3_gpu_sdpa_bf16( \
+         gpu, output, query, key, value, sequence, \
+         H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale))
     for (int run = 0; run < warmup; run++) {
-        int ok = h3_gpu_begin(gpu) &&
-            (flash ? h3_gpu_sdpa_flash_bf16_head_major(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
-             head_major ? h3_gpu_sdpa_bf16_head_major_io(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
-             h3_gpu_sdpa_bf16(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale)) &&
-            h3_gpu_submit(gpu);
+        int ok = h3_gpu_begin(gpu) && H3_BENCH_RUN() && h3_gpu_submit(gpu);
         if (!ok) {
             fprintf(stderr, "SDPA warmup failed at N=%u: %s\n",
                     sequence, h3_gpu_error(gpu));
@@ -108,17 +141,7 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     if (!h3_gpu_get_stats(gpu, &before)) return 0;
     double started = now_seconds();
     for (int run = 0; run < repeats; run++) {
-        int ok = h3_gpu_begin(gpu) &&
-            (flash ? h3_gpu_sdpa_flash_bf16_head_major(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
-             head_major ? h3_gpu_sdpa_bf16_head_major_io(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) :
-             h3_gpu_sdpa_bf16(
-                 gpu, output, query, key, value, sequence,
-                 H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale)) &&
-            h3_gpu_submit(gpu);
+        int ok = h3_gpu_begin(gpu) && H3_BENCH_RUN() && h3_gpu_submit(gpu);
         if (!ok) {
             fprintf(stderr, "SDPA run failed at N=%u: %s\n",
                     sequence, h3_gpu_error(gpu));
@@ -134,7 +157,7 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     for (size_t index = 0; finite && index < 16; index++)
         finite = isfinite(bf16_to_f32(sample[index]));
     double l2 = -1.0;
-    if (finite && flash && sequence <= 8000) {
+    if (finite && (flash || window_frames) && sequence <= 8000) {
         h3_gpu_tensor *reference = h3_gpu_tensor_new_bf16(gpu, elements);
         int ok = reference && h3_gpu_begin(gpu) &&
             h3_gpu_sdpa_bf16_head_major_io(
@@ -170,7 +193,9 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     double buffer_gib = (double)elements * sizeof(uint16_t) * 4.0 /
         (1024.0 * 1024.0 * 1024.0);
     printf("%u\t%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%s", 
-           sequence, flash ? "flash" : head_major ? "head" : "row", repeats,
+           sequence,
+           window_frames ? "window" : flash ? "flash" :
+               head_major ? "head" : "row", repeats,
            buffer_gib,
            wall * 1000.0 / repeats,
            (after.command_wait_seconds - before.command_wait_seconds) *
@@ -179,6 +204,10 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
            finite ? "finite" : "nonfinite");
     if (l2 >= 0.0) printf("\tL2_vs_mps=%.3e", l2);
     putchar('\n');
+    fflush(stdout);
+    h3_gpu_tensor_free(pack_q); h3_gpu_tensor_free(pack_k);
+    h3_gpu_tensor_free(pack_v); h3_gpu_tensor_free(pack_o);
+#undef H3_BENCH_RUN
     fflush(stdout);
     h3_gpu_tensor_free(query); h3_gpu_tensor_free(key);
     h3_gpu_tensor_free(value); h3_gpu_tensor_free(output);
@@ -190,6 +219,9 @@ int main(int argc, char **argv) {
     int repeats = 3;
     int head_major = 1;
     int flash = 0;
+    int window = 0;
+    int frame_rows = 1000;
+    int global_rows = 2000;
     uint32_t sequences[32] = {2000, 8000, 20000, 38000};
     size_t sequence_count = 4;
     size_t explicit_count = 0;
@@ -202,6 +234,12 @@ int main(int argc, char **argv) {
             head_major = 0;
         } else if (!strcmp(argv[index], "--flash")) {
             flash = 1;
+        } else if (!strcmp(argv[index], "--window") && index + 1 < argc) {
+            if (!parse_positive(argv[++index], &window)) return 2;
+        } else if (!strcmp(argv[index], "--frame-rows") && index + 1 < argc) {
+            if (!parse_positive(argv[++index], &frame_rows)) return 2;
+        } else if (!strcmp(argv[index], "--globals") && index + 1 < argc) {
+            if (!parse_positive(argv[++index], &global_rows)) return 2;
         } else {
             int parsed;
             if (!parse_positive(argv[index], &parsed) || explicit_count == 32)
@@ -220,7 +258,8 @@ int main(int argc, char **argv) {
     int ok = 1;
     for (size_t index = 0; index < sequence_count; index++)
         if (!benchmark(gpu, sequences[index], warmup, repeats, head_major,
-                       flash)) {
+                       flash, (uint32_t)window, (uint32_t)frame_rows,
+                       (uint32_t)global_rows)) {
             ok = 0;
             break;
         }

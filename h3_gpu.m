@@ -433,6 +433,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             @"h3_video_qkv_rope_f32",
             @"h3_adaln_f32", @"h3_gate_f32", @"h3_qkv_rope_f32",
             @"h3_swiglu_f32", @"h3_linear_bf16", @"h3_silu_bf16",
+            @"h3_rows_pack_bf16_hm",
             @"h3_rms_norm_bf16", @"h3_adaln_bf16", @"h3_gate_bf16",
             @"h3_rms_inverse_bf16", @"h3_adaln_linear_bf16",
             @"h3_gate_adaln_bf16", @"h3_gate_adaln_bf16_exact_simd",
@@ -1695,6 +1696,210 @@ static int h3_gpu_sdpa(h3_gpu *opaque, h3_gpu_tensor *output,
     h3_gpu_stats stats = gpu.stats;
     stats.mps_sdpa_dispatches++;
     gpu.stats = stats;
+    return 1;
+}
+
+typedef struct {
+    uint32_t full_rows, packed_rows, head_dim, heads;
+    uint32_t range_count;
+    uint32_t range_start[3], range_length[3];
+    uint32_t scatter;
+} h3_rows_pack_args;
+
+static int h3_gpu_rows_pack(H3GPU *gpu, const h3_gpu_tensor *full,
+                            const h3_gpu_tensor *packed, uint32_t full_rows,
+                            uint32_t packed_rows, uint32_t head_dim,
+                            uint32_t heads, uint32_t range_count,
+                            const uint32_t *starts, const uint32_t *lengths,
+                            int scatter) {
+    h3_rows_pack_args args;
+    memset(&args, 0, sizeof(args));
+    args.full_rows = full_rows;
+    args.packed_rows = packed_rows;
+    args.head_dim = head_dim;
+    args.heads = heads;
+    args.range_count = range_count;
+    for (uint32_t range = 0; range < range_count && range < 3; range++) {
+        args.range_start[range] = starts[range];
+        args.range_length[range] = lengths[range];
+    }
+    args.scatter = scatter ? 1 : 0;
+    return h3_gpu_dispatch_2d(gpu, @"h3_rows_pack_bf16_hm",
+        packed_rows * head_dim, heads,
+        ^(id<MTLComputeCommandEncoder> encoder) {
+            [encoder setBuffer:TENSOR(full).buffer offset:0 atIndex:0];
+            [encoder setBuffer:TENSOR(packed).buffer offset:0 atIndex:1];
+            [encoder setBytes:&args length:sizeof(args) atIndex:2];
+        });
+}
+
+static H3SDPA *h3_gpu_sdpa_rect_graph(H3GPU *gpu, uint32_t q_rows,
+                                      uint32_t kv_rows, uint32_t heads,
+                                      uint32_t head_dim, float scale) {
+    @autoreleasepool {
+        NSString *cacheKey = [NSString stringWithFormat:
+            @"rect%d|%u:%u:%u:%u:%.9g", gpu.graphSalt, q_rows, kv_rows,
+            heads, head_dim, scale];
+        H3SDPA *cached = gpu.sdpaCache[cacheKey];
+        if (cached) return cached;
+        MPSGraph *graph = [[MPSGraph alloc] init];
+        NSArray<NSNumber *> *queryShape =
+            @[@1, @(heads), @(q_rows), @(head_dim)];
+        NSArray<NSNumber *> *keyShape =
+            @[@1, @(heads), @(kv_rows), @(head_dim)];
+        MPSGraphTensor *q = [graph placeholderWithShape:queryShape
+            dataType:MPSDataTypeBFloat16 name:nil];
+        MPSGraphTensor *k = [graph placeholderWithShape:keyShape
+            dataType:MPSDataTypeBFloat16 name:nil];
+        MPSGraphTensor *v = [graph placeholderWithShape:keyShape
+            dataType:MPSDataTypeBFloat16 name:nil];
+        if (![graph respondsToSelector:@selector(scaledDotProductAttentionWithQueryTensor:keyTensor:valueTensor:scale:name:)]) {
+            h3_gpu_set_error(gpu, @"native MPSGraph SDPA is unavailable");
+            return nil;
+        }
+        MPSGraphTensor *attention = [graph
+            scaledDotProductAttentionWithQueryTensor:q keyTensor:k
+            valueTensor:v scale:scale name:nil];
+        H3SDPA *result = [[H3SDPA alloc] init];
+        result.graph = graph;
+        result.query = q;
+        result.key = k;
+        result.value = v;
+        result.output = attention;
+        result.inputShape = queryShape;
+        result.outputShape = queryShape;
+        gpu.sdpaCache[cacheKey] = result;
+        return result;
+    }
+}
+
+static int h3_gpu_sdpa_rect_encode(H3GPU *gpu, H3SDPA *cache,
+                                   const h3_gpu_tensor *query,
+                                   const h3_gpu_tensor *key,
+                                   const h3_gpu_tensor *value,
+                                   const h3_gpu_tensor *output,
+                                   uint32_t kv_rows, uint32_t heads,
+                                   uint32_t head_dim) {
+    @autoreleasepool {
+        MPSCommandBuffer *command = h3_gpu_mps_command(gpu);
+        NSArray<NSNumber *> *keyShape =
+            @[@1, @(heads), @(kv_rows), @(head_dim)];
+        NSDictionary *feeds = @{
+            cache.query: h3_gpu_graph_data(query, cache.inputShape,
+                                           MPSDataTypeBFloat16, 0),
+            cache.key: h3_gpu_graph_data(key, keyShape,
+                                         MPSDataTypeBFloat16, 0),
+            cache.value: h3_gpu_graph_data(value, keyShape,
+                                           MPSDataTypeBFloat16, 0)
+        };
+        NSDictionary *results = @{cache.output: h3_gpu_graph_data(
+            output, cache.outputShape, MPSDataTypeBFloat16, 0)};
+        @try {
+            [cache.graph encodeToCommandBuffer:command feeds:feeds
+                targetOperations:nil resultsDictionary:results
+                executionDescriptor:nil];
+        } @catch (NSException *exception) {
+            h3_gpu_set_error(gpu, @"windowed SDPA failed: %@",
+                             exception.reason);
+            return 0;
+        }
+        gpu.command = command.rootCommandBuffer;
+    }
+    h3_gpu_stats stats = gpu.stats;
+    stats.mps_sdpa_dispatches++;
+    gpu.stats = stats;
+    return 1;
+}
+
+/* Windowed attention composed from MPSGraph SDPA calls. Video tokens are one
+ * contiguous [video_frames x frame_rows] block; each query slab of
+ * window_frames frames attends to its +/- window_frames frame neighborhood
+ * plus every non-video (global) token, and global tokens attend to the full
+ * sequence. Q/K/V slabs are packed into caller-provided scratch tensors, so
+ * the only new GPU code is a row copy; all attention math stays on MPSGraph. */
+int h3_gpu_sdpa_windowed_bf16_head_major(
+        h3_gpu *opaque, h3_gpu_tensor *output,
+        const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+        const h3_gpu_tensor *value, h3_gpu_tensor *pack_q,
+        h3_gpu_tensor *pack_k, h3_gpu_tensor *pack_v, h3_gpu_tensor *pack_o,
+        uint32_t rows, uint32_t heads, uint32_t head_dim, float scale,
+        uint32_t video_start, uint32_t video_frames, uint32_t frame_rows,
+        uint32_t window_frames) {
+    H3GPU *gpu = GPU(opaque);
+    size_t count = (size_t)rows * heads * head_dim;
+    uint64_t video_rows64 = (uint64_t)video_frames * frame_rows;
+    if (!gpu || !window_frames || !video_frames || !frame_rows ||
+        video_rows64 > rows || video_start > rows - (uint32_t)video_rows64 ||
+        !h3_gpu_require_command(gpu) ||
+        !h3_gpu_require_bf16(gpu, query, count, @"windowed SDPA query") ||
+        !h3_gpu_require_bf16(gpu, key, count, @"windowed SDPA key") ||
+        !h3_gpu_require_bf16(gpu, value, count, @"windowed SDPA value") ||
+        !h3_gpu_require_bf16(gpu, output, count, @"windowed SDPA output"))
+        return 0;
+    uint32_t video_rows = (uint32_t)video_rows64;
+    uint32_t video_end = video_start + video_rows;
+    uint32_t global_head = video_start;
+    uint32_t global_tail = rows - video_end;
+    uint32_t global_rows = global_head + global_tail;
+    uint32_t slab_frames = window_frames;
+    uint32_t kv_frames_max = video_frames < 3 * window_frames ?
+        video_frames : 3 * window_frames;
+    uint32_t q_pack_max = slab_frames * frame_rows;
+    if (global_rows > q_pack_max) q_pack_max = global_rows;
+    uint32_t kv_pack_max = kv_frames_max * frame_rows + global_rows;
+    size_t q_pack_elements = (size_t)q_pack_max * heads * head_dim;
+    size_t kv_pack_elements = (size_t)kv_pack_max * heads * head_dim;
+    if (!h3_gpu_require_bf16(gpu, pack_q, q_pack_elements,
+                             @"windowed SDPA query scratch") ||
+        !h3_gpu_require_bf16(gpu, pack_k, kv_pack_elements,
+                             @"windowed SDPA key scratch") ||
+        !h3_gpu_require_bf16(gpu, pack_v, kv_pack_elements,
+                             @"windowed SDPA value scratch") ||
+        !h3_gpu_require_bf16(gpu, pack_o, q_pack_elements,
+                             @"windowed SDPA output scratch")) return 0;
+    for (uint32_t frame = 0; frame < video_frames; frame += slab_frames) {
+        uint32_t q_frames = video_frames - frame < slab_frames ?
+            video_frames - frame : slab_frames;
+        uint32_t q_row0 = video_start + frame * frame_rows;
+        uint32_t q_count = q_frames * frame_rows;
+        uint32_t kv_f0 = frame > window_frames ? frame - window_frames : 0;
+        uint32_t kv_f1 = frame + q_frames + window_frames;
+        if (kv_f1 > video_frames) kv_f1 = video_frames;
+        uint32_t kv_video = (kv_f1 - kv_f0) * frame_rows;
+        uint32_t kv_count = kv_video + global_rows;
+        uint32_t q_start_range = q_row0;
+        uint32_t starts[3] = {video_start + kv_f0 * frame_rows, 0, video_end};
+        uint32_t lengths[3] = {kv_video, global_head, global_tail};
+        if (!h3_gpu_rows_pack(gpu, query, pack_q, rows, q_count, head_dim,
+                              heads, 1, &q_start_range, &q_count, 0) ||
+            !h3_gpu_rows_pack(gpu, key, pack_k, rows, kv_count, head_dim,
+                              heads, 3, starts, lengths, 0) ||
+            !h3_gpu_rows_pack(gpu, value, pack_v, rows, kv_count, head_dim,
+                              heads, 3, starts, lengths, 0)) return 0;
+        H3SDPA *cache = h3_gpu_sdpa_rect_graph(gpu, q_count, kv_count,
+                                               heads, head_dim, scale);
+        if (!cache ||
+            !h3_gpu_sdpa_rect_encode(gpu, cache, pack_q, pack_k, pack_v,
+                                     pack_o, kv_count, heads, head_dim) ||
+            !h3_gpu_rows_pack(gpu, output, pack_o, rows, q_count, head_dim,
+                              heads, 1, &q_start_range, &q_count, 1))
+            return 0;
+    }
+    if (global_rows) {
+        uint32_t starts[2] = {0, video_end};
+        uint32_t lengths[2] = {global_head, global_tail};
+        if (!h3_gpu_rows_pack(gpu, query, pack_q, rows, global_rows,
+                              head_dim, heads, 2, starts, lengths, 0))
+            return 0;
+        H3SDPA *cache = h3_gpu_sdpa_rect_graph(gpu, global_rows, rows,
+                                               heads, head_dim, scale);
+        if (!cache ||
+            !h3_gpu_sdpa_rect_encode(gpu, cache, pack_q, key, value,
+                                     pack_o, rows, heads, head_dim) ||
+            !h3_gpu_rows_pack(gpu, output, pack_o, rows, global_rows,
+                              head_dim, heads, 2, starts, lengths, 1))
+            return 0;
+    }
     return 1;
 }
 

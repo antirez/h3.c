@@ -39,7 +39,69 @@
 @property(nonatomic, strong) MPSGraphTensor *output;
 @property(nonatomic, strong) NSArray<NSNumber *> *inputShape;
 @property(nonatomic, strong) NSArray<NSNumber *> *outputShape;
+@property(nonatomic, strong) NSArray<NSNumber *> *keyShape;
+@property(nonatomic, strong) MPSGraphExecutable *executable;
 @end
+
+/* Compiles a fixed-shape graph into an MPSGraphExecutable so later encodes
+ * skip MPSGraph's per-encode planning pass, which measurably re-runs for
+ * large shapes. Returns nil (caller keeps the graph encode path) when
+ * compilation is unavailable or H3_DISABLE_MPS_EXECUTABLE is set. */
+static MPSGraphExecutable *h3_gpu_compile_executable(
+        id<MTLDevice> device, MPSGraph *graph,
+        NSArray<MPSGraphTensor *> *feeds,
+        NSArray<NSArray<NSNumber *> *> *shapes,
+        MPSDataType dataType, MPSGraphTensor *target) {
+    if (getenv("H3_DISABLE_MPS_EXECUTABLE")) return nil;
+    if (![graph respondsToSelector:@selector(compileWithDevice:feeds:targetTensors:targetOperations:compilationDescriptor:)])
+        return nil;
+    NSMutableDictionary<MPSGraphTensor *, MPSGraphShapedType *> *typed =
+        [NSMutableDictionary dictionary];
+    for (NSUInteger index = 0; index < feeds.count; index++)
+        typed[feeds[index]] = [[MPSGraphShapedType alloc]
+            initWithShape:shapes[index] dataType:dataType];
+    @try {
+        MPSGraphExecutable *compiled = [graph compileWithDevice:
+                    [MPSGraphDevice deviceWithMTLDevice:device]
+                                  feeds:typed
+                          targetTensors:@[target]
+                       targetOperations:nil
+                  compilationDescriptor:nil];
+        if (getenv("H3_MPS_DEBUG"))
+            fprintf(stderr, "h3-mps: compiled executable %d (feeds %lu)\n",
+                    compiled != nil, (unsigned long)feeds.count);
+        return compiled;
+    } @catch (NSException *exception) {
+        if (getenv("H3_MPS_DEBUG"))
+            fprintf(stderr, "h3-mps: executable compile failed: %s\n",
+                    exception.reason.UTF8String);
+        return nil;
+    }
+}
+
+/* Encodes a compiled executable with inputs matched to its feed order. */
+static int h3_gpu_encode_executable(
+        MPSGraphExecutable *executable, MPSCommandBuffer *command,
+        NSArray<MPSGraphTensor *> *feeds,
+        NSArray<MPSGraphTensorData *> *data, MPSGraphTensorData *result) {
+    NSMutableArray<MPSGraphTensorData *> *inputs = [NSMutableArray array];
+    NSArray<MPSGraphTensor *> *order = executable.feedTensors;
+    if (order.count != feeds.count) return 0;
+    for (MPSGraphTensor *tensor in order) {
+        NSUInteger match = [feeds indexOfObjectIdenticalTo:tensor];
+        if (match == NSNotFound) return 0;
+        [inputs addObject:data[match]];
+    }
+    @try {
+        [executable encodeToCommandBuffer:command
+                              inputsArray:inputs
+                             resultsArray:@[result]
+                      executionDescriptor:nil];
+    } @catch (NSException *exception) {
+        return 0;
+    }
+    return 1;
+}
 @implementation H3SDPA
 @end
 
@@ -65,6 +127,7 @@
 @property(nonatomic, strong) NSArray<NSNumber *> *weightShape;
 @property(nonatomic, strong) NSArray<NSNumber *> *biasShape;
 @property(nonatomic, strong) NSArray<NSNumber *> *outputShape;
+@property(nonatomic, strong) MPSGraphExecutable *executable;
 @end
 @implementation H3Linear
 @end
@@ -1639,6 +1702,10 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
              name:nil];
         result.inputShape = inputShape;
         result.outputShape = outputShape;
+        result.keyShape = inputShape;
+        result.executable = h3_gpu_compile_executable(
+            gpu.device, graph, @[q, k, v],
+            @[inputShape, inputShape, inputShape], dataType, result.output);
         gpu.sdpaCache[cacheKey] = result;
         return result;
     }
@@ -1684,7 +1751,14 @@ static int h3_gpu_sdpa(h3_gpu *opaque, h3_gpu_tensor *output,
         MPSGraphTensorData *outputData = h3_gpu_graph_data(
             output, cache.outputShape, mps_dtype, 0);
         NSDictionary *results = @{cache.output: outputData};
-        @try {
+        int encoded = 0;
+        if (cache.executable)
+            encoded = h3_gpu_encode_executable(
+                cache.executable, command,
+                @[cache.query, cache.key, cache.value],
+                @[feeds[cache.query], feeds[cache.key], feeds[cache.value]],
+                outputData);
+        if (!encoded) @try {
             [cache.graph encodeToCommandBuffer:command feeds:feeds targetOperations:nil
                              resultsDictionary:results executionDescriptor:nil];
         } @catch (NSException *exception) {
@@ -1768,6 +1842,11 @@ static H3SDPA *h3_gpu_sdpa_rect_graph(H3GPU *gpu, uint32_t q_rows,
         result.output = attention;
         result.inputShape = queryShape;
         result.outputShape = queryShape;
+        result.keyShape = keyShape;
+        result.executable = h3_gpu_compile_executable(
+            gpu.device, graph, @[q, k, v],
+            @[queryShape, keyShape, keyShape], MPSDataTypeBFloat16,
+            attention);
         gpu.sdpaCache[cacheKey] = result;
         return result;
     }
@@ -1784,24 +1863,36 @@ static int h3_gpu_sdpa_rect_encode(H3GPU *gpu, H3SDPA *cache,
         MPSCommandBuffer *command = h3_gpu_mps_command(gpu);
         NSArray<NSNumber *> *keyShape =
             @[@1, @(heads), @(kv_rows), @(head_dim)];
-        NSDictionary *feeds = @{
-            cache.query: h3_gpu_graph_data(query, cache.inputShape,
-                                           MPSDataTypeBFloat16, 0),
-            cache.key: h3_gpu_graph_data(key, keyShape,
-                                         MPSDataTypeBFloat16, 0),
-            cache.value: h3_gpu_graph_data(value, keyShape,
-                                           MPSDataTypeBFloat16, 0)
-        };
-        NSDictionary *results = @{cache.output: h3_gpu_graph_data(
-            output, cache.outputShape, MPSDataTypeBFloat16, 0)};
-        @try {
-            [cache.graph encodeToCommandBuffer:command feeds:feeds
-                targetOperations:nil resultsDictionary:results
-                executionDescriptor:nil];
-        } @catch (NSException *exception) {
-            h3_gpu_set_error(gpu, @"windowed SDPA failed: %@",
-                             exception.reason);
-            return 0;
+        MPSGraphTensorData *query_data = h3_gpu_graph_data(
+            query, cache.inputShape, MPSDataTypeBFloat16, 0);
+        MPSGraphTensorData *key_data = h3_gpu_graph_data(
+            key, keyShape, MPSDataTypeBFloat16, 0);
+        MPSGraphTensorData *value_data = h3_gpu_graph_data(
+            value, keyShape, MPSDataTypeBFloat16, 0);
+        MPSGraphTensorData *output_data = h3_gpu_graph_data(
+            output, cache.outputShape, MPSDataTypeBFloat16, 0);
+        int encoded = 0;
+        if (cache.executable)
+            encoded = h3_gpu_encode_executable(
+                cache.executable, command,
+                @[cache.query, cache.key, cache.value],
+                @[query_data, key_data, value_data], output_data);
+        if (!encoded) {
+            NSDictionary *feeds = @{
+                cache.query: query_data,
+                cache.key: key_data,
+                cache.value: value_data
+            };
+            NSDictionary *results = @{cache.output: output_data};
+            @try {
+                [cache.graph encodeToCommandBuffer:command feeds:feeds
+                    targetOperations:nil resultsDictionary:results
+                    executionDescriptor:nil];
+            } @catch (NSException *exception) {
+                h3_gpu_set_error(gpu, @"windowed SDPA failed: %@",
+                                 exception.reason);
+                return 0;
+            }
         }
         gpu.command = command.rootCommandBuffer;
     }
@@ -1910,6 +2001,17 @@ int h3_gpu_sdpa_f32(h3_gpu *opaque, h3_gpu_tensor *output,
                     uint32_t heads, uint32_t head_dim, float scale) {
     return h3_gpu_sdpa(opaque, output, query, key, value, 1, sequence, heads,
                        head_dim, scale, H3_GPU_F32, MPSDataTypeFloat32, 0, 0);
+}
+
+int h3_gpu_sdpa_batch_f32(h3_gpu *opaque, h3_gpu_tensor *output,
+                          const h3_gpu_tensor *query,
+                          const h3_gpu_tensor *key,
+                          const h3_gpu_tensor *value, uint32_t batch,
+                          uint32_t sequence, uint32_t heads,
+                          uint32_t head_dim, float scale) {
+    return h3_gpu_sdpa(opaque, output, query, key, value, batch, sequence,
+                       heads, head_dim, scale, H3_GPU_F32,
+                       MPSDataTypeFloat32, 0, 0);
 }
 
 int h3_gpu_sdpa_causal_f32(h3_gpu *opaque, h3_gpu_tensor *output,
@@ -2723,6 +2825,14 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
                                              secondaryTensor:linear.bias name:nil];
         }
         linear.output = [linear.graph castTensor:output toType:dataType name:nil];
+        NSArray<MPSGraphTensor *> *feeds = has_bias ?
+            @[linear.input, linear.weight, linear.bias] :
+            @[linear.input, linear.weight];
+        NSArray<NSArray<NSNumber *> *> *shapes = has_bias ?
+            @[linear.inputShape, linear.weightShape, linear.biasShape] :
+            @[linear.inputShape, linear.weightShape];
+        linear.executable = h3_gpu_compile_executable(
+            gpu.device, linear.graph, feeds, shapes, dataType, linear.output);
         gpu.linearCache[key] = linear;
         return linear;
     }
@@ -2754,7 +2864,18 @@ static int h3_gpu_linear_mps(H3GPU *gpu, h3_gpu_tensor *output,
             feeds[linear.bias] = bias_data;
         }
         NSDictionary *results = @{linear.output: output_data};
-        @try {
+        int encoded = 0;
+        if (linear.executable) {
+            NSArray<MPSGraphTensor *> *feed_order = bias ?
+                @[linear.input, linear.weight, linear.bias] :
+                @[linear.input, linear.weight];
+            NSArray<MPSGraphTensorData *> *data = bias ?
+                @[input_data, weight_data, feeds[linear.bias]] :
+                @[input_data, weight_data];
+            encoded = h3_gpu_encode_executable(
+                linear.executable, command, feed_order, data, output_data);
+        }
+        if (!encoded) @try {
             [linear.graph encodeToCommandBuffer:command feeds:feeds
                 targetOperations:nil resultsDictionary:results
                 executionDescriptor:nil];

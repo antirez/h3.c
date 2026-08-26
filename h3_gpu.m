@@ -1215,7 +1215,7 @@ static int h3_gpu_linear_mps(H3GPU *gpu, h3_gpu_tensor *output,
                              const h3_gpu_tensor *weight,
                              const h3_gpu_tensor *bias, uint32_t rows,
                              uint32_t input_dim, uint32_t output_dim,
-                             MPSDataType dataType);
+                             MPSDataType dataType, int bf16_weights);
 
 int h3_gpu_linear_f32(h3_gpu *opaque, h3_gpu_tensor *output,
                       const h3_gpu_tensor *input, const h3_gpu_tensor *weight,
@@ -1228,11 +1228,18 @@ int h3_gpu_linear_f32(h3_gpu *opaque, h3_gpu_tensor *output,
     if (!h3_gpu_require_elements(gpu, input, input_count, @"linear input") ||
         TENSOR(input).dtype != H3_GPU_F32 ||
         !h3_gpu_require_elements(gpu, weight, weight_count, @"linear weight") ||
-        TENSOR(weight).dtype != H3_GPU_F32 ||
+        (TENSOR(weight).dtype != H3_GPU_F32 &&
+         TENSOR(weight).dtype != H3_GPU_BF16) ||
         !h3_gpu_require_elements(gpu, output, output_count, @"linear output") ||
         TENSOR(output).dtype != H3_GPU_F32 ||
         (bias && (!h3_gpu_require_elements(gpu, bias, output_dim, @"linear bias") ||
                   TENSOR(bias).dtype != H3_GPU_F32))) return 0;
+    if (TENSOR(weight).dtype == H3_GPU_BF16)
+        /* Mixed F32-activation x BF16-weight product; MPSGraph only, the
+         * direct kernels below expect F32 weights. */
+        return h3_gpu_linear_mps(gpu, output, input, weight, bias, rows,
+                                 input_dim, output_dim, MPSDataTypeFloat32,
+                                 1);
     if (!getenv("H3_SCALAR_PATCH") && rows >= 16 && output_dim == 5376 &&
         (input_dim == 32 || input_dim == 96)) {
         linear_args args = {rows, input_dim, output_dim, bias ? 1u : 0u};
@@ -1266,7 +1273,8 @@ int h3_gpu_linear_f32(h3_gpu *opaque, h3_gpu_tensor *output,
     }
     if (rows >= 32 && input_dim >= 256 && output_dim >= 256 &&
         h3_gpu_linear_mps(gpu, output, input, weight, bias, rows,
-                          input_dim, output_dim, MPSDataTypeFloat32)) return 1;
+                          input_dim, output_dim, MPSDataTypeFloat32,
+                          0)) return 1;
     linear_args args = {rows, input_dim, output_dim, bias ? 1u : 0u};
     const h3_gpu_tensor *bias_buffer = bias ? bias : input;
     return h3_gpu_dispatch_2d(gpu, @"h3_linear_f32", output_dim, rows,
@@ -2794,11 +2802,13 @@ static int h3_gpu_require_f32(H3GPU *gpu, const h3_gpu_tensor *tensor,
 
 static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
                                      uint32_t input_dim, uint32_t output_dim,
-                                     int has_bias, MPSDataType dataType) {
+                                     int has_bias, MPSDataType dataType,
+                                     int bf16_weights) {
     @autoreleasepool {
-        NSString *key = [NSString stringWithFormat:@"%d|%u:%u:%u:%d:%u",
+        NSString *key = [NSString stringWithFormat:@"%d|%u:%u:%u:%d:%u:%d",
                          gpu.graphSalt, rows,
-                         input_dim, output_dim, has_bias, (unsigned)dataType];
+                         input_dim, output_dim, has_bias, (unsigned)dataType,
+                         bf16_weights];
         H3Linear *cached = gpu.linearCache[key];
         if (cached) return cached;
 
@@ -2811,13 +2821,22 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
         linear.input = [linear.graph placeholderWithShape:linear.inputShape
                                                  dataType:dataType name:nil];
         linear.weight = [linear.graph placeholderWithShape:linear.weightShape
-                                                  dataType:dataType name:nil];
+                                                  dataType:bf16_weights ?
+                                                      MPSDataTypeBFloat16 :
+                                                      dataType name:nil];
+        MPSGraphTensor *operand = bf16_weights ?
+            [linear.graph castTensor:linear.input
+                              toType:MPSDataTypeBFloat16 name:nil] :
+            linear.input;
         MPSGraphTensor *transposed =
             [linear.graph transposeTensor:linear.weight dimension:1
                             withDimension:2 name:nil];
         MPSGraphTensor *output =
-            [linear.graph matrixMultiplicationWithPrimaryTensor:linear.input
+            [linear.graph matrixMultiplicationWithPrimaryTensor:operand
                                                 secondaryTensor:transposed name:nil];
+        if (bf16_weights)
+            output = [linear.graph castTensor:output toType:dataType
+                                         name:nil];
         if (has_bias) {
             linear.bias = [linear.graph placeholderWithShape:linear.biasShape
                                                     dataType:dataType name:nil];
@@ -2831,8 +2850,10 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
         NSArray<NSArray<NSNumber *> *> *shapes = has_bias ?
             @[linear.inputShape, linear.weightShape, linear.biasShape] :
             @[linear.inputShape, linear.weightShape];
-        linear.executable = h3_gpu_compile_executable(
-            gpu.device, linear.graph, feeds, shapes, dataType, linear.output);
+        if (!bf16_weights)
+            linear.executable = h3_gpu_compile_executable(
+                gpu.device, linear.graph, feeds, shapes, dataType,
+                linear.output);
         gpu.linearCache[key] = linear;
         return linear;
     }
@@ -2843,17 +2864,19 @@ static int h3_gpu_linear_mps(H3GPU *gpu, h3_gpu_tensor *output,
                              const h3_gpu_tensor *weight,
                              const h3_gpu_tensor *bias, uint32_t rows,
                              uint32_t input_dim, uint32_t output_dim,
-                             MPSDataType dataType) {
+                             MPSDataType dataType, int bf16_weights) {
     if (!h3_gpu_require_command(gpu)) return 0;
     H3Linear *linear = h3_gpu_linear_graph(gpu, rows, input_dim, output_dim,
-                                           bias != NULL, dataType);
+                                           bias != NULL, dataType,
+                                           bf16_weights);
     if (!linear) return 0;
     @autoreleasepool {
         MPSCommandBuffer *command = h3_gpu_mps_command(gpu);
         MPSGraphTensorData *input_data = h3_gpu_graph_data(
             input, linear.inputShape, dataType, 0);
         MPSGraphTensorData *weight_data = h3_gpu_graph_data(
-            weight, linear.weightShape, dataType, 1);
+            weight, linear.weightShape,
+            bf16_weights ? MPSDataTypeBFloat16 : dataType, 1);
         MPSGraphTensorData *output_data = h3_gpu_graph_data(
             output, linear.outputShape, dataType, 0);
         NSMutableDictionary *feeds = [@{linear.input: input_data,
@@ -2978,7 +3001,7 @@ int h3_gpu_linear_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     if (rows >= 32 && input_dim >= 256 && output_dim >= 256 &&
         h3_gpu_linear_mps(gpu, output, input, weight, bias, rows,
                           input_dim, output_dim,
-                          MPSDataTypeBFloat16)) return 1;
+                          MPSDataTypeBFloat16, 0)) return 1;
     linear_args args = {rows, input_dim, output_dim, bias ? 1u : 0u};
     const h3_gpu_tensor *bias_buffer = bias ? bias : input;
     if (!h3_gpu_require_command(gpu)) return 0;

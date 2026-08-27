@@ -49,10 +49,13 @@ def fail(message):
     sys.exit(1)
 
 
-def run_logged(command, log_path, env=None):
-    merged = dict(os.environ)
-    if env:
-        merged.update(env)
+def run_logged(command, log_path, env=None, replace=False):
+    if replace:
+        merged = dict(env or {})
+    else:
+        merged = dict(os.environ)
+        if env:
+            merged.update(env)
     started = time.monotonic()
     with open(log_path, "w") as log:
         result = subprocess.run(command, env=merged, stdout=log,
@@ -185,7 +188,15 @@ def main():
         command += args.extra
         print(f"SHOT {index + 1}/{len(shots)} rendering "
               f"({shot['seconds']:g}s): {shot['prompt'][:70]}", flush=True)
-        elapsed = run_logged(command, log)
+        # An unanchored first shot is plain text-to-video: windowed
+        # attention breaks object permanence there (background drift), so
+        # drop it; every anchored shot keeps the inherited environment.
+        if index == 0 and not args.ref_image and "H3_ATTN_WINDOW" in os.environ:
+            shot_env = dict(os.environ)
+            shot_env.pop("H3_ATTN_WINDOW")
+            elapsed = run_logged(command, log, env=shot_env, replace=True)
+        else:
+            elapsed = run_logged(command, log)
         frames = int(probe(clip, "stream=nb_read_frames"))
         print(f"SHOT {index + 1}/{len(shots)} done in {elapsed:.0f}s "
               f"({frames} frames)", flush=True)

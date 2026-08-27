@@ -42,6 +42,22 @@ UPLOADS = HERE / "uploads"
 UPLOADS.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 REF2VA_MODES = {"ref-image", "ref-video", "ref-audio", "multi-ref"}
+# Files that visually anchor a generation. Anchored jobs keep windowed
+# attention (2.2x faster on long clips, and the anchor pins appearance);
+# unanchored text-to-video needs dense attention or object permanence
+# collapses (A/B verdict: background "dream scroll" with +/-2 windows).
+ATTN_ANCHOR_FILE_KEYS = (
+    "ref_image", "ref_image_audio", "ref_video", "first_frame", "last_frame"
+)
+
+
+def attention_window_for_request(request, override=None):
+    """Pick the H3_ATTN_WINDOW value for one video job (None = dense)."""
+    if override is not None:
+        return override or None
+    files = request.get("files") or {}
+    anchored = any(files.get(key) for key in ATTN_ANCHOR_FILE_KEYS)
+    return "2" if anchored else None
 SENSENOVA_DIR = Path(os.environ.get(
     "SENSENOVA_DIR", "/Users/lrb/models/SenseNova-U1.5-8B-MoT"
 )).resolve()
@@ -102,7 +118,7 @@ def resolve_media_tool(env_name, program):
     return program
 
 
-def estimate_job_seconds(params, mode="text"):
+def estimate_job_seconds(params, mode="text", dense_attention=False):
     """Runtime estimate calibrated on the tuned M5 Pro stack (windowed
     attention, INT8 sidecar, BF16 VAE). Measured anchors: 768x768x73f
     ~12s/eval, 1344x768x56f ~20s/eval, 768x1344x243f ~95s/eval; VAE decode
@@ -125,6 +141,11 @@ def estimate_job_seconds(params, mode="text"):
     # sequence, with a mild superlinear term for the global rows.
     kilotokens = tokens / 1000.0
     step_seconds = kilotokens * (0.75 + 0.55 * min(tokens, 80000) / 80000.0)
+    if dense_attention:
+        # Dense SDPA grows quadratically; calibrated against the 73k-token
+        # 10s benchmark (~1.9-2.2x over windowed) and the 10k-token probe
+        # (parity within noise).
+        step_seconds *= 1.0 + min(tokens, 130000) / 55000.0
     step_seconds *= layers / 45.0
     denoise = step_seconds * evaluations
 
@@ -668,6 +689,7 @@ class H3PersistentWorker:
         self.result = None
         self.startup_log = ""
         self.starts = 0
+        self.active_window = None
 
     @staticmethod
     def _close_streams(process):
@@ -723,7 +745,15 @@ class H3PersistentWorker:
         if same_process:
             self.ready.set()
 
-    def _start(self):
+    def _start(self, window=None):
+        with self.lock:
+            alive = self.process is not None and self.process.poll() is None
+            window_matches = self.active_window == window
+        if alive and not window_matches:
+            # The attention window is a process-level environment setting:
+            # respawn (~10s sidecar reload) to switch between dense and
+            # windowed attention.
+            self.stop()
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 return
@@ -736,6 +766,10 @@ class H3PersistentWorker:
                 str(self.executable), "--profile", "--worker",
                 "-d", str(self.model_dir), "--seed", "42",
             ]
+            env = dict(self.process_env)
+            env.pop("H3_ATTN_WINDOW", None)
+            if window:
+                env["H3_ATTN_WINDOW"] = window
             process = subprocess.Popen(
                 command,
                 cwd=str(HERE),
@@ -744,10 +778,11 @@ class H3PersistentWorker:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env=self.process_env,
+                env=env,
                 start_new_session=True,
             )
             self.process = process
+            self.active_window = window
             self.starts += 1
             self.reader = threading.Thread(
                 target=self._read_output, args=(process,), daemon=True
@@ -764,7 +799,7 @@ class H3PersistentWorker:
             raise RuntimeError(f"h3 worker failed to start: {detail}")
 
     def run(self, job, request, output_file, timeout):
-        self._start()
+        self._start(request.get("attn_window"))
         with self.lock:
             if self.active_job is not None:
                 raise RuntimeError("h3 worker is already running a job")
@@ -839,6 +874,7 @@ class H3PersistentWorker:
                          "ready" if alive else "stopped",
                 "pid": process.pid if alive else None,
                 "starts": self.starts,
+                "attn_window": (self.active_window or "dense") if alive else None,
             }
 
 
@@ -1274,6 +1310,9 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
             job_public_params["match_input_aspect"] = True
 
         job_id = uuid.uuid4().hex
+        attn_window = attention_window_for_request(
+            {"files": user_files}, self.server.attn_window_override
+        )
         with job_lock:
             # Never let queued jobs or existing files overwrite one another.
             requested = output_file
@@ -1296,7 +1335,10 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                 "params": job_public_params,
                 "output": output_name,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "estimated_total_seconds": estimate_job_seconds(video_params, mode),
+                "attn_window": attn_window or "dense",
+                "estimated_total_seconds": estimate_job_seconds(
+                    video_params, mode, dense_attention=attn_window is None
+                ),
                 "progress_percent": 0.0,
                 "progress_is_estimate": True,
                 "phase": "queued",
@@ -1311,6 +1353,7 @@ class H3APIHandler(http.server.BaseHTTPRequestHandler):
                     "params": video_params,
                     "files": user_files,
                     "loras": selected_loras,
+                    "attn_window": attn_window,
                 },
                 "upload_paths": sorted({
                     path for paths in user_files.values() for path in paths
@@ -1681,10 +1724,18 @@ class H3Server(http.server.ThreadingHTTPServer):
         self.model_dir = Path(model_dir).resolve()
         self.job_timeout = job_timeout
         self.process_env = os.environ.copy()
-        # Windowed video attention is the validated quality/speed default:
-        # +/-2 temporal latent frames plus global tokens (3.6x denoise on the
-        # 10s 768-class benchmark, artifact-free in probes). Set it to 0 in
-        # the shell environment to restore dense attention.
+        # Attention window policy: the persistent video worker picks dense
+        # vs windowed per job (attention_window_for_request) and respawns
+        # when it changes. Shell H3_ATTN_WINDOW forces one value for every
+        # job: N = always windowed at N, 0/empty = always dense.
+        raw_window = os.environ.get("H3_ATTN_WINDOW")
+        self.attn_window_override = None
+        if raw_window is not None:
+            self.attn_window_override = (
+                "" if raw_window in {"0", ""} else raw_window
+            )
+        # Subprocess jobs (shot chains) keep the windowed default: chained
+        # shots are frame-anchored, where windows are validated safe.
         self.process_env.setdefault("H3_ATTN_WINDOW", "2")
         if self.process_env.get("H3_ATTN_WINDOW") in {"0", ""}:
             self.process_env.pop("H3_ATTN_WINDOW", None)

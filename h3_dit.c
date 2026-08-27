@@ -160,6 +160,19 @@ struct h3_dit {
     h3_gpu_tensor *final_video_b;
     h3_gpu_tensor *final_audio_w;
     h3_gpu_tensor *final_audio_b;
+    /* PDD (Parallel Decoding Distillation) per-evaluation output heads.
+     * When pdd_evaluations is nonzero, encode_forward binds the step's
+     * premixed head before encoding; the checkpoint heads are preserved in
+     * pdd_saved_* so teardown frees each tensor exactly once. */
+    unsigned pdd_evaluations;
+    h3_gpu_tensor *pdd_video_w[16];
+    h3_gpu_tensor *pdd_video_b[16];
+    h3_gpu_tensor *pdd_audio_w[16];
+    h3_gpu_tensor *pdd_audio_b[16];
+    h3_gpu_tensor *pdd_saved_video_w;
+    h3_gpu_tensor *pdd_saved_video_b;
+    h3_gpu_tensor *pdd_saved_audio_w;
+    h3_gpu_tensor *pdd_saved_audio_b;
     h3_gpu_tensor *video_input;
     h3_gpu_tensor *audio_input;
     h3_gpu_tensor *video_projected_f32;
@@ -1561,6 +1574,81 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
             return 0;
         }
     }
+    const char *pdd_heads = getenv("H3_PDD_HEADS");
+    if (pdd_heads && *pdd_heads && strcmp(pdd_heads, "0") != 0) {
+        char name[96];
+        char probe_error[128];
+        unsigned count = 0;
+        while (count < 16) {
+            snprintf(name, sizeof(name),
+                     "final_layer.video_out.weight.step%u", count);
+            h3_gpu_tensor *weight = f2(dit, name, VIDEO_PATCH, HIDDEN,
+                                       probe_error, sizeof(probe_error));
+            if (!weight) break;
+            dit->pdd_video_w[count] = weight;
+            snprintf(name, sizeof(name),
+                     "final_layer.video_out.bias.step%u", count);
+            dit->pdd_video_b[count] = f1(dit, name, VIDEO_PATCH,
+                                         error, error_size);
+            snprintf(name, sizeof(name),
+                     "final_layer.audio_out.weight.step%u", count);
+            dit->pdd_audio_w[count] = f2(dit, name, AUDIO_CHANNELS, HIDDEN,
+                                         error, error_size);
+            snprintf(name, sizeof(name),
+                     "final_layer.audio_out.bias.step%u", count);
+            dit->pdd_audio_b[count] = f1(dit, name, AUDIO_CHANNELS,
+                                         error, error_size);
+            if (!dit->pdd_video_b[count] || !dit->pdd_audio_w[count] ||
+                !dit->pdd_audio_b[count]) return 0;
+            count++;
+        }
+        if (count < 2) {
+            fail(error, error_size,
+                 "H3_PDD_HEADS is set but the checkpoint has no "
+                 "final_layer.*.step* head tensors");
+            return 0;
+        }
+        if (dit->bf16_final) {
+            int ok = h3_gpu_begin(dit->gpu);
+            for (unsigned step = 0; ok && step < count; step++) {
+                h3_gpu_tensor **slots[4] = {
+                    &dit->pdd_video_w[step], &dit->pdd_video_b[step],
+                    &dit->pdd_audio_w[step], &dit->pdd_audio_b[step]
+                };
+                size_t elements[4] = {
+                    (size_t)VIDEO_PATCH * HIDDEN, VIDEO_PATCH,
+                    (size_t)AUDIO_CHANNELS * HIDDEN, AUDIO_CHANNELS
+                };
+                for (unsigned index = 0; ok && index < 4; index++) {
+                    h3_gpu_tensor *target = h3_gpu_tensor_new_bf16(
+                        dit->gpu, elements[index]);
+                    ok = target && h3_gpu_cast_f32_to_bf16(
+                        dit->gpu, target, *slots[index],
+                        (uint32_t)elements[index]);
+                    if (ok) {
+                        h3_gpu_tensor_free(*slots[index]);
+                        *slots[index] = target;
+                    } else {
+                        h3_gpu_tensor_free(target);
+                    }
+                }
+            }
+            if (ok) ok = h3_gpu_submit(dit->gpu);
+            if (!ok) {
+                fail(error, error_size,
+                     "cannot convert PDD heads: %s", h3_gpu_error(dit->gpu));
+                return 0;
+            }
+        }
+        dit->pdd_saved_video_w = dit->final_video_w;
+        dit->pdd_saved_video_b = dit->final_video_b;
+        dit->pdd_saved_audio_w = dit->final_audio_w;
+        dit->pdd_saved_audio_b = dit->final_audio_b;
+        dit->pdd_evaluations = count;
+        if (getenv("H3_PROFILE"))
+            fprintf(stderr, "h3: PDD per-step heads active "
+                    "(%u evaluations)\n", count);
+    }
     return dit->video_patch_w && dit->video_patch_b && dit->audio_patch_w &&
            dit->audio_patch_b && dit->final_norm && dit->final_video_w &&
            dit->final_video_b && dit->final_audio_w && dit->final_audio_b;
@@ -2411,6 +2499,15 @@ static int run_block(h3_dit *dit, unsigned index, int step,
 static int encode_forward(h3_dit *dit, int step, int begin, int submit,
                           int disable_command_split, char *error,
                           size_t error_size) {
+    if (dit->pdd_evaluations) {
+        unsigned index = step < 0 ? 0u : (unsigned)step;
+        if (index >= dit->pdd_evaluations)
+            index = dit->pdd_evaluations - 1;
+        dit->final_video_w = dit->pdd_video_w[index];
+        dit->final_video_b = dit->pdd_video_b[index];
+        dit->final_audio_w = dit->pdd_audio_w[index];
+        dit->final_audio_b = dit->pdd_audio_b[index];
+    }
 #define OP(call, label) do {                                                    \
     if (!gpu_op(dit, (call), error, error_size, label)) return 0;               \
 } while (0)
@@ -3232,6 +3329,14 @@ int h3_dit_denoise_euler_preview(
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
+    if (dit->pdd_evaluations &&
+        ((unsigned)dit->sigmas.steps != dit->pdd_evaluations ||
+         reuse_interval != 1)) {
+        fail(error, error_size,
+             "H3_PDD_HEADS requires --steps %u --reuse 1 to match the "
+             "distilled evaluation grid", dit->pdd_evaluations);
+        return 0;
+    }
     if (gpu_sampler_requested(dit))
         return denoise_euler_gpu(dit, video_latent, audio_latent,
                                  reuse_interval, progress, progress_opaque,
@@ -3380,6 +3485,18 @@ void h3_dit_free(h3_dit *dit) {
     free_block(&dit->stream_slots[0]);
     free_block(&dit->stream_slots[1]);
     free_tensor(&dit->final_norm);
+    if (dit->pdd_evaluations) {
+        dit->final_video_w = dit->pdd_saved_video_w;
+        dit->final_video_b = dit->pdd_saved_video_b;
+        dit->final_audio_w = dit->pdd_saved_audio_w;
+        dit->final_audio_b = dit->pdd_saved_audio_b;
+        for (unsigned step = 0; step < dit->pdd_evaluations; step++) {
+            free_tensor(&dit->pdd_video_w[step]);
+            free_tensor(&dit->pdd_video_b[step]);
+            free_tensor(&dit->pdd_audio_w[step]);
+            free_tensor(&dit->pdd_audio_b[step]);
+        }
+    }
     free_tensor(&dit->final_video_w); free_tensor(&dit->final_video_b);
     free_tensor(&dit->final_audio_w); free_tensor(&dit->final_audio_b);
 #define FREE(field) free_tensor(&dit->field)

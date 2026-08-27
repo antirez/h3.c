@@ -103,27 +103,40 @@ def resolve_media_tool(env_name, program):
 
 
 def estimate_job_seconds(params, mode="text"):
-    """Return a conservative M5-oriented runtime estimate for UI feedback."""
+    """Runtime estimate calibrated on the tuned M5 Pro stack (windowed
+    attention, INT8 sidecar, BF16 VAE). Measured anchors: 768x768x73f
+    ~12s/eval, 1344x768x56f ~20s/eval, 768x1344x243f ~95s/eval; VAE decode
+    ~0.85s per megapixel-frame; sidecar load ~10s, conditioning ~6-14s."""
     width = max(1, int(params.get("width") or 864))
     height = max(1, int(params.get("height") or 480))
     frames = max(1, int(params.get("frames") or 56))
-    steps = max(1, int(params.get("steps") or 20))
+    steps = max(1, int(params.get("steps") or 8))
     layers = max(1, int(params.get("layers") or 45))
-    reuse = max(1, int(params.get("reuse") or 2))
-    evaluations = max(1, math.ceil(steps / reuse))
+    reuse = max(1, int(params.get("reuse") or 1))
+    evaluations = max(2, math.ceil(steps / reuse) + (1 if reuse > 1 else 0))
 
-    pixels_frames = width * height * frames
-    denoise_work = pixels_frames * evaluations * (layers / 45.0)
-    # A persistent worker reuses the VideoVAE and exact-request DiT state, but
-    # a different prompt can still invalidate the prepared DiT. Keep the
-    # conservative cold/different-request allowance until runtime history is
-    # available for a matching request.
-    seconds = 78.0 + denoise_work / 1_800_000.0 + pixels_frames / 2_000_000.0
+    latent_t = max(1, (frames - 5) // 17 * 5 + 2)
+    video_tokens = latent_t * (width // 32) * (height // 32)
+    audio_tokens = frames * 40 // 24 * 2
+    tokens = video_tokens + audio_tokens + 150
+    if mode in REF2VA_MODES:
+        tokens += 1100
+    # Windowed attention keeps the per-evaluation cost quasi-linear in the
+    # sequence, with a mild superlinear term for the global rows.
+    kilotokens = tokens / 1000.0
+    step_seconds = kilotokens * (0.75 + 0.55 * min(tokens, 80000) / 80000.0)
+    step_seconds *= layers / 45.0
+    denoise = step_seconds * evaluations
+
+    vae = frames * (width * height) / 1_000_000.0 * 0.85
+    fixed = 12.0 + 4.0  # DiT sidecar load + text encode/mux
+    if params.get("loras"):
+        fixed += 25.0  # runtime LoRA merge disables the sidecar
     if mode == "frame-anchor":
-        seconds += 8.0
+        fixed += 8.0
     elif mode in REF2VA_MODES:
-        seconds += 18.0
-    return round(max(20.0, seconds), 1)
+        fixed += 14.0
+    return round(max(20.0, fixed + denoise + vae), 1)
 
 
 def normalize_video_params(params, defaults=None):

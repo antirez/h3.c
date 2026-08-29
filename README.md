@@ -809,3 +809,7 @@ at every size for A/B comparison.
 The native baseline targets the original `FL2VA/` and `Ref2VA/` checkpoint
 trees. Model phases are loaded and released separately so the 33B transformer,
 Qwen encoder, and decoders never have to coexist in unified memory.
+
+## Community integrations
+
+- [**h3-metal-server**](https://github.com/jszfly1989/h3-metal-server) — HTTP launcher for h3.c on Apple Silicon: keeps a persistent interactive session, exposes an async task queue (`POST /generate` → poll `/task/{id}` → download `/video/{id}.mp4`), reports progress, and ships a small CLI (`h3metal start / stop / status / doctor`). It lets GUI/desktop apps drive h3.c locally — e.g. the Nineshot macOS app uses it as a local engine channel (director board: storyboard canvas, parameters, asset management, fully offline).

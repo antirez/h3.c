@@ -1,0 +1,73 @@
+# CI without a GPU: everything that does not need CUDA or the 465 GB
+# checkpoint. The end-to-end render stays a local gate: no runner has the
+# hardware or the model.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (lint + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install dependencies
+        run: |
+          python -m venv webui/backend/.venv
+          webui/backend/.venv/bin/pip install --upgrade pip
+          webui/backend/.venv/bin/pip install \
+            "fastapi>=0.115" "uvicorn[standard]>=0.34" "pydantic-settings>=2.6" \
+            "argon2-cffi>=23.1" python-multipart pytest httpx ruff
+      - name: Lint
+        run: webui/backend/.venv/bin/ruff check webui
+      - name: Tests
+        run: webui/backend/.venv/bin/pytest webui/backend/tests -q
+
+  frontend:
+    name: Frontend (build + lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install repo tooling
+        run: npm install --no-audit --no-fund
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: webui/frontend
+      - name: Regenerate the options module and check it is committed
+        run: |
+          node scripts/generate-options.mjs
+          git diff --exit-code src/generated/options.ts
+        working-directory: webui/frontend
+      - name: Build
+        run: npm run build
+        working-directory: webui/frontend
+      - name: Lint
+        run: npx eslint .
+
+  compose:
+    name: Docker compose files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose configuration
+        env:
+          H3_MODEL_DIR: ./MiniMax-H3
+          # Compose requires it (`:?`); config validation only needs it to
+          # exist, so this placeholder never reaches a running container.
+          H3_ADMIN_PASSWORD: ci-placeholder-not-a-secret
+        run: |
+          docker compose config >/dev/null
+          H3_FACESWAP_CMD=/opt/faceswap/run H3_FACESWAP_DIR=/opt/faceswap \
+            docker compose -f docker-compose.yml -f docker-compose.faceswap.yml \
+            config >/dev/null

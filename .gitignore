@@ -2,6 +2,7 @@
 misc/
 MiniMax-H3/
 outputs/
+logs/
 .ruff_cache/
 
 # Compiler and test outputs.
@@ -12,7 +13,7 @@ outputs/
 h3
 h3_*test
 h3_*tests
-h3_*bench
+h3_*bench*
 h3_dit_bench_864
 h3_tests
 h3_metal_tests
@@ -28,3 +29,32 @@ h3_real_video_vae_test
 h3_semantic_vae_test
 libh3.a
 .DS_Store
+._*
+
+# Node dev tooling and web UI build output.
+node_modules/
+webui/frontend/dist/
+webui/backend/.venv/
+webui/backend/data/
+data/
+__pycache__/
+.pytest_cache/
+
+# Local docker env
+.env
+
+# Agent method files: they guide work on this machine (R35, 2026-08-30) but
+# are not part of the public repository.
+PLAN.md
+PLAN.template.md
+PLAN_ARCHIVE.md
+AGENTS.md
+CLAUDE.md
+docs/AGENT_SOP.md
+scripts/agent_logging.py
+scripts/health_report.sh
+scripts/install_git_hook.sh
+
+# Python packaging artefacts from a local `pip install` of the backend.
+webui/backend/build/
+*.egg-info/

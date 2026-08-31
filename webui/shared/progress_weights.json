@@ -1,0 +1,88 @@
+{
+  "reference": {
+    "width": 256,
+    "height": 256,
+    "frames": 22,
+    "steps": 8,
+    "layers": 50
+  },
+  "phase_seconds": {
+    "tokenizer": 2.785,
+    "text encoder": 16.801,
+    "refine text": 1.548,
+    "precompute AdaLN": 29.027,
+    "load transformer core": 40.874,
+    "denoise": 5.118,
+    "audio VAE": 1.154,
+    "video VAE load": 14.288
+  },
+  "total_seconds": 111.829,
+  "factors": {
+    "_source": "README.md speed/quality table and docs/GB10_PROFILE.md, both measured.",
+    "denoise_reuse": {
+      "_note": "At 20 steps h3 performs 20, 11 or 8 fresh DiT evaluations.",
+      "1": 1.0,
+      "2": 0.55,
+      "3": 0.4
+    },
+    "core_reuse": {
+      "_note": "The patch and output heads stay fresh every step; the core runs every Nth. About 30 % of the pass is the heads.",
+      "head_share": 0.3
+    },
+    "token_reduction": {
+      "_note": "512 square, 45 layers, reuse 2: denoise 16.69 s -> 12.60 s.",
+      "factor": 0.755
+    },
+    "dit_layers": {
+      "_note": "Cost is proportional to the residual blocks that run.",
+      "reference": 50
+    },
+    "ssd_streaming": {
+      "_note": "GB10 profile: DiT load 96.563 s -> 51.829 s, denoise 2.715 s -> 84.798 s over two steps.",
+      "load_factor": 0.537,
+      "added_seconds_per_step": 41.0
+    }
+  },
+  "samples": [
+    {
+      "reference": {
+        "width": 256,
+        "height": 256,
+        "frames": 22,
+        "steps": 8,
+        "layers": 50
+      },
+      "phase_seconds": {
+        "tokenizer": 2.785,
+        "text encoder": 16.801,
+        "refine text": 1.548,
+        "precompute AdaLN": 29.027,
+        "load transformer core": 40.874,
+        "denoise": 5.118,
+        "audio VAE": 1.154,
+        "video VAE load": 14.288
+      },
+      "total_seconds": 111.829
+    },
+    {
+      "reference": {
+        "width": 512,
+        "height": 512,
+        "frames": 56,
+        "steps": 20,
+        "layers": 50
+      },
+      "phase_seconds": {
+        "tokenizer": 3.977,
+        "text encoder": 17.396,
+        "refine text": 1.566,
+        "precompute AdaLN": 27.488,
+        "load transformer core": 62.433,
+        "denoise": 538.808,
+        "audio VAE": 1.471,
+        "video VAE load": 53.19
+      },
+      "total_seconds": 706.558
+    }
+  ]
+}

@@ -102,9 +102,14 @@ static int set_directory(char destination[H3_CLI_PATH], const char *path) {
 }
 
 static uint64_t random_seed(void) {
-    uint64_t value;
-    arc4random_buf(&value, sizeof(value));
-    return value;
+    uint64_t value = 0;
+    FILE *random = fopen("/dev/urandom", "rb");
+    if (random) {
+        size_t count = fread(&value, 1, sizeof(value), random);
+        fclose(random);
+        if (count == sizeof(value)) return value;
+    }
+    return (uint64_t)time(NULL) ^ ((uint64_t)(unsigned)getpid() << 32);
 }
 
 static int cli_progress(const char *phase, int completed, int total,

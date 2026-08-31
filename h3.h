@@ -169,7 +169,7 @@ struct h3_result {
     uint64_t seed;
 };
 
-/* Load model metadata and initialize the Metal device. Weights remain unmapped. */
+/* Load model metadata and initialize the selected GPU. Weights remain unmapped. */
 h3_ctx *h3_load_dir(const char *model_dir);
 void h3_free(h3_ctx *ctx);
 

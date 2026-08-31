@@ -1,0 +1,62 @@
+# Builds h3 for CUDA, then ships only the binary and the Python service.
+# The 465 GB checkpoint is never copied in: it is bind-mounted at runtime.
+ARG CUDA_VERSION=13.0.0
+ARG UBUNTU_VERSION=24.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
+# nvcc is already in the image: this stage only needs Ubuntu packages. NVIDIA's
+# apt repository is dropped because it is a frequent source of hash-sum
+# mismatches behind caching proxies, and apt is told to retry without
+# pipelining, which is what makes those mismatches transient.
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/cuda*.list \
+          /etc/apt/sources.list.d/nvidia*.list \
+          /etc/apt/sources.list.d/*cuda*.sources; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' \
+        > /etc/apt/apt.conf.d/99-h3-resilient; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends build-essential libicu-dev pkg-config; \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+# Only what the C build needs, so editing the web UI does not rebuild h3.
+COPY Makefile *.c *.h *.cu *.metal ./
+COPY tests ./tests
+# A concrete architecture, because `native` needs a visible GPU and the build
+# stage has none. sm_121 is the GB10; override with --build-arg NVCC_ARCH=...
+ARG NVCC_ARCH=sm_121
+RUN make -j"$(nproc)" NVCC_ARCH=${NVCC_ARCH} h3
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+# Same treatment: only Ubuntu packages are needed here.
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/cuda*.list \
+          /etc/apt/sources.list.d/nvidia*.list \
+          /etc/apt/sources.list.d/*cuda*.sources; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' \
+        > /etc/apt/apt.conf.d/99-h3-resilient; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ffmpeg libicu74 python3 python3-venv; \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /src/h3 /app/h3
+COPY webui/backend/pyproject.toml /app/webui/backend/pyproject.toml
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -q --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -q \
+        "fastapi>=0.115" "uvicorn[standard]>=0.34" "pydantic-settings>=2.6" \
+        "argon2-cffi>=23.1" \
+        python-multipart
+COPY webui/backend/app /app/webui/backend/app
+COPY webui/shared /app/webui/shared
+
+ENV PYTHONUNBUFFERED=1 \
+    H3_BINARY=/app/h3 \
+    H3_MODEL_DIR=/models \
+    H3_DATA_DIR=/data \
+    H3_SCHEMA_PATH=/app/webui/shared/options.schema.json \
+    H3_PROGRESS_WEIGHTS_PATH=/app/webui/shared/progress_weights.json
+EXPOSE 8000
+WORKDIR /app/webui/backend
+CMD ["/opt/venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

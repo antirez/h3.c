@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="h3c studio mark">
+  <!-- The frame (concept A, R31 — the same markup the app header uses).
+       Self-contained colours with the app's theme tokens: standalone means
+       no page CSS to read, and the media query keeps it readable on both
+       GitHub themes. -->
+  <style>
+    .frame { stroke: #101317 }
+    .perf  { fill: #101317 }
+    .develop { stroke: #B5157C }
+    @media (prefers-color-scheme: dark) {
+      .frame { stroke: #E9EBEE }
+      .perf  { fill: #E9EBEE }
+      .develop { stroke: #F062AF }
+    }
+  </style>
+  <rect class="frame" x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke-width="2.6"/>
+  <rect class="perf" x="2.5" y="9" width="3.5" height="4.5" rx="1.4"/>
+  <rect class="perf" x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4"/>
+  <path class="develop" d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke-width="2.6" stroke-linecap="round"/>
+</svg>

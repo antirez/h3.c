@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en" data-state="composing">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h3.c studio — v4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..600&family=Instrument+Serif:ital@0;1&family=Martian+Mono:wght@300..600&display=swap" rel="stylesheet">
+<style>
+/* ── tokens — same as v3 (R28): neutrals and one magenta ──────────────────
+   v4 (R29) changes what the page holds, not its voice: attachments hang off
+   the prompt (P1), the gallery plays on hover (P3), the preview dominates
+   the render (P4), the cost sits on the button (P9), and files can be
+   dropped anywhere (P10). See docs/mockup/UX_RESEARCH.md for the mapping. */
+:root{
+  --ground:#F1F2F3; --surface:#FFFFFF; --sunken:#E5E7E9;
+  --line:#DCDEE1; --line-strong:#9AA0A7;
+  --ink:#101317; --muted:#5A626B;
+  --accent:#B5157C; --accent-ink:#FFFFFF;
+  --ready:#0C737D; --fail:#B93129;
+  --serif:"Instrument Serif",ui-serif,Georgia,serif;
+  --sans:"Instrument Sans",ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+  --mono:"Martian Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --column:660px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1114; --surface:#171A1E; --sunken:#101317;
+    --line:#272B31; --line-strong:#767D85;
+    --ink:#E9EBEE; --muted:#98A0A9;
+    --accent:#F062AF; --accent-ink:#16040E;
+    --ready:#43C2CA; --fail:#EE7078;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1114; --surface:#171A1E; --sunken:#101317;
+  --line:#272B31; --line-strong:#767D85;
+  --ink:#E9EBEE; --muted:#98A0A9;
+  --accent:#F062AF; --accent-ink:#16040E;
+  --ready:#43C2CA; --fail:#EE7078;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font-family:var(--sans);font-size:15px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+
+.top{
+  display:flex;align-items:baseline;gap:14px;
+  max-width:var(--column);margin:0 auto;padding:26px 22px 0;
+}
+.mark{font-family:var(--serif);font-size:19px;letter-spacing:-.01em}
+.mark i{font-style:italic;color:var(--muted)}
+.machine{
+  margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:300;
+  letter-spacing:.04em;color:var(--muted);
+}
+.machine b{font-weight:500;color:var(--ink)}
+main{max-width:var(--column);margin:0 auto;padding:0 22px 64px}
+
+[data-state="composing"] .rendering{display:none}
+[data-state="rendering"] .composing{display:none}
+
+/* ── the prompt is the page ─────────────────────────────────────────────── */
+.write{margin-top:44px}
+.write textarea{
+  display:block;width:100%;border:0;padding:0;resize:none;background:none;
+  font-family:var(--serif);font-size:40px;line-height:1.14;letter-spacing:-.015em;
+  color:var(--ink);caret-color:var(--accent);
+}
+.write textarea::placeholder{color:var(--line-strong)}
+.write textarea:focus{outline:none}
+.write .under{
+  height:1px;background:var(--line);margin-top:22px;
+  transition:background .18s ease;
+}
+.write:focus-within .under{background:var(--accent)}
+
+/* P1 — attachments hang off the prompt, not in a room of their own.
+   Each chip opens the library picker where it stands. */
+.attach{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chip{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:4px 12px 4px 4px;border:1px solid var(--line);
+  border-radius:999px;background:var(--surface);font-size:12.5px;
+}
+.chip img{
+  width:28px;height:28px;border-radius:999px;object-fit:cover;display:block;
+  background:var(--sunken);
+}
+.chip:hover{border-color:var(--line-strong)}
+.chip.add{padding-left:12px;color:var(--muted)}
+.chip.add:hover{color:var(--ink);border-color:var(--line-strong)}
+.chip .x{color:var(--line-strong);font-size:11px;margin-left:2px}
+.chip .x:hover{color:var(--fail)}
+
+.shot{
+  margin-top:16px;display:flex;flex-wrap:wrap;align-items:baseline;
+  gap:0 9px;font-size:14.5px;color:var(--muted);
+}
+.shot .val{
+  color:var(--ink);border-bottom:1px dotted var(--line-strong);
+  padding-bottom:1px;
+}
+.shot .val:hover,.shot .val[aria-expanded="true"]{
+  color:var(--accent);border-bottom-color:var(--accent);
+}
+.shot .sep{color:var(--line-strong)}
+.shot .cost{margin-left:auto;font-variant-numeric:tabular-nums}
+.shot .cost b{color:var(--ink);font-weight:600}
+
+.pick{
+  margin-top:14px;display:inline-flex;gap:6px;padding:5px;
+  background:var(--surface);border:1px solid var(--line);border-radius:12px;
+}
+.pick button{
+  padding:7px 13px;border-radius:8px;font-size:13.5px;text-align:left;
+}
+.pick button:hover{background:var(--sunken)}
+.pick button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.pick .t{display:block;font-weight:500}
+.pick .c{
+  display:block;font-size:11px;color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+.pick button[aria-pressed="true"] .c{color:var(--accent-ink);opacity:.8}
+
+.wrong{margin-top:16px;font-size:14px;color:var(--fail);max-width:52ch}
+.wrong b{font-weight:600}
+.wrong button{
+  margin-left:8px;white-space:nowrap;color:var(--muted);font-size:12.5px;
+  border-bottom:1px dotted var(--line-strong);
+}
+.wrong button:hover{color:var(--ink)}
+
+/* P9 — the cost sits on the button itself, where the competitors put
+   credits; ours is honest minutes instead. */
+.go{display:flex;align-items:center;gap:20px;margin-top:34px}
+.make{
+  display:inline-flex;align-items:baseline;gap:10px;
+  background:var(--accent);color:var(--accent-ink);border-radius:999px;
+  padding:13px 30px;font-size:15px;font-weight:600;letter-spacing:-.005em;
+}
+.make .wait{
+  font-family:var(--mono);font-size:10.5px;font-weight:300;letter-spacing:.03em;
+  opacity:.85;font-variant-numeric:tabular-nums;
+}
+.make:hover{filter:brightness(1.08)}
+.more{color:var(--muted);font-size:14px}
+.more:hover{color:var(--ink)}
+.more::after{content:" ↓";font-size:11px}
+
+.starts{margin-top:26px;display:flex;gap:9px;align-items:baseline;font-size:13.5px}
+.starts em{font-style:normal;color:var(--muted)}
+.starts button{color:var(--ink);border-bottom:1px dotted var(--line-strong)}
+.starts button:hover{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* P10 — one line says the whole page accepts files. */
+.drop{margin-top:10px;font-size:12.5px;color:var(--muted)}
+
+/* ── one panel, not three ───────────────────────────────────────────────── */
+.everything{margin-top:40px;padding-top:18px;border-top:1px solid var(--line)}
+.everything h2{
+  margin:0 0 14px;font-size:12px;font-weight:600;letter-spacing:.02em;
+  color:var(--muted);
+}
+.tabs{display:flex;gap:18px;border-bottom:1px solid var(--line)}
+.tabs button{
+  padding:0 0 10px;font-size:13.5px;color:var(--muted);
+  border-bottom:2px solid transparent;margin-bottom:-1px;
+}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:18px 26px;padding-top:18px}
+.field span{display:block;font-size:13.5px;margin-bottom:5px}
+.field .flag{
+  font-family:var(--mono);font-size:10px;font-weight:300;color:var(--muted);
+  margin-left:7px;
+}
+.field input{
+  width:100%;padding:8px 10px;font:inherit;font-size:13.5px;color:var(--ink);
+  background:var(--ground);border:1px solid var(--line);border-radius:8px;
+}
+.note{margin-top:20px;font-size:13.5px;color:var(--muted)}
+
+/* ── the developing frame: the one loud thing, and bigger in v4 (P4) ────── */
+.slate{display:flex;align-items:baseline;gap:14px;margin-top:44px}
+.slate .quote{font-family:var(--serif);font-size:24px;line-height:1.2}
+.slate .acts{margin-left:auto;display:flex;gap:16px;flex-shrink:0}
+.slate button{font-size:13.5px;color:var(--muted)}
+.slate button:hover{color:var(--ink)}
+.slate button.stop:hover{color:var(--fail)}
+
+.develop{width:fit-content;max-width:100%;margin:20px auto 0}
+.frame{
+  aspect-ratio:1/1;width:min(100%,72vh);max-width:var(--column);
+  background:var(--sunken);border-radius:14px;overflow:hidden;position:relative;
+}
+.frame img{width:100%;height:100%;object-fit:cover;display:block}
+
+.perf{display:flex;gap:3px;margin-top:10px}
+.develop .said{max-width:100%}
+.perf i{
+  flex:1;height:5px;border-radius:2px;background:var(--line);
+  transition:background .2s ease;
+}
+.perf i.done{background:var(--line-strong)}
+.perf i.now{background:var(--accent)}
+.said{
+  display:flex;align-items:baseline;gap:12px;margin-top:12px;font-size:14px;
+}
+.said .what{font-weight:500}
+.said .when{
+  margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums;
+  font-size:13px;
+}
+
+/* ── takes: a grid that plays on hover (P3) ─────────────────────────────── */
+.takes{max-width:var(--column);margin:56px auto 0;padding:0 22px 64px}
+.takes h2{
+  font-size:12px;font-weight:600;color:var(--muted);margin:0 0 14px;
+  letter-spacing:.02em;
+}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.take{position:relative;border-radius:10px;overflow:hidden;background:var(--sunken)}
+.take .screen{aspect-ratio:16/10;position:relative}
+.take .poster,.take .playing{position:absolute;inset:0}
+.take .poster img{width:100%;height:100%;object-fit:cover;display:block}
+/* hover = the video starts: poster out, moving image in */
+.take .playing{
+  display:none;align-items:center;justify-content:center;
+  background:
+    repeating-linear-gradient(115deg,rgba(255,255,255,.06) 0 14px,transparent 14px 28px),
+    var(--sunken);
+  animation:slide 1.2s linear infinite;
+}
+@keyframes slide{to{background-position:56px 0,0 0}}
+.take:hover .poster{display:none}
+.take:hover .playing{display:flex}
+.take .playing .tc{
+  font-family:var(--mono);font-size:10px;color:var(--ink);opacity:.7;
+  letter-spacing:.04em;
+}
+/* actions surface only on hover, over a dark veil */
+.take .veil{
+  position:absolute;inset:0;display:flex;align-items:flex-end;
+  padding:8px;gap:10px;opacity:0;transition:opacity .15s ease;
+  background:linear-gradient(transparent 55%,rgba(0,0,0,.55));
+}
+.take:hover .veil{opacity:1}
+.take .veil button{color:#fff;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,.6)}
+.take .veil button:hover{text-decoration:underline}
+.take .veil button.del:hover{color:#EE7078}
+.take .cap{
+  padding:8px 2px 0;font-family:var(--serif);font-size:14.5px;line-height:1.25;
+}
+.take .meta{
+  display:flex;gap:8px;padding-bottom:4px;font-size:11px;color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+
+/* ── the strip that keeps a running video visible while composing ───────── */
+.live{
+  display:flex;align-items:center;gap:14px;margin-top:30px;
+  padding-bottom:18px;border-bottom:1px solid var(--line);
+}
+.live .peek{
+  width:64px;height:40px;flex:0 0 64px;border-radius:6px;overflow:hidden;
+  background:var(--sunken);
+}
+.live .peek img{width:100%;height:100%;object-fit:cover;display:block}
+.live .t{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live .n{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.live .acts{margin-left:auto;display:flex;gap:14px;font-size:13px}
+.live .acts button{color:var(--muted)}
+.live .acts button:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <span class="mark">h3.c <i>studio</i></span>
+  <span class="machine" id="machine"><b>NVIDIA GB10</b> · ready</span>
+  <button class="machine" id="flip" style="cursor:pointer">show a render</button>
+  <button class="machine" id="theme" style="cursor:pointer">theme</button>
+</div>
+
+<main>
+  <!-- ── composing ─────────────────────────────────────────────────────── -->
+  <section class="composing">
+    <div class="live">
+      <span class="peek"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='40'%3E%3Crect width='64' height='40' fill='%23444'/%3E%3C/svg%3E"></span>
+      <span>
+        <span class="t">A tall waterfall seen from below, mist rising</span>
+        <span class="n">Painting the picture · 33 % · about 16 min left</span>
+      </span>
+      <span class="acts"><button>Watch</button><button>Stop</button></span>
+    </div>
+
+    <div class="write">
+      <textarea rows="2" aria-label="What should the video show?">A red paper boat drifting on a dark pond, slow camera push</textarea>
+      <div class="under"></div>
+    </div>
+
+    <!-- P1: what the shot starts from, ends on, and keeps — hanging off the
+         prompt. The empty chip opens the library picker on the spot. -->
+    <div class="attach">
+      <button class="chip"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28'%3E%3Crect width='28' height='28' fill='%23922'/%3E%3C/svg%3E"><span>starts from this photo</span><span class="x">✕</span></button>
+      <button class="chip"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28'%3E%3Crect width='28' height='28' fill='%23345'/%3E%3C/svg%3E"><span>a face to keep</span><span class="x">✕</span></button>
+      <button class="chip add">+ a photo, clip or sound</button>
+    </div>
+
+    <p class="shot">
+      <button class="val">2.5 s</button><span class="sep">·</span>
+      <button class="val" aria-expanded="true">square</button><span class="sep">·</span>
+      <button class="val">balanced</button><span class="sep">·</span>
+      <button class="val">variation 42</button>
+      <span class="cost">about <b>14 min</b></span>
+    </p>
+
+    <div class="pick">
+      <button aria-pressed="false"><span class="t">Widescreen</span><span class="c">864×480 · 21 min</span></button>
+      <button aria-pressed="true"><span class="t">Square</span><span class="c">512×512 · 14 min</span></button>
+      <button aria-pressed="false"><span class="t">Vertical</span><span class="c">480×864 · 21 min</span></button>
+    </div>
+
+    <div class="go">
+      <!-- P9: the wait is on the button -->
+      <button class="make">Make the video <span class="wait">≈ 14 MIN</span></button>
+      <button class="more">Everything else</button>
+    </div>
+
+    <p class="starts">
+      <em>or start from</em>
+      <button>a photo</button>
+      <button>a clip</button>
+      <button>a reference face</button>
+    </p>
+    <p class="drop">Drop a photo, clip or sound anywhere on this page to add it to your library.</p>
+
+    <section class="everything">
+      <h2>Everything else</h2>
+      <div class="tabs">
+        <button aria-selected="true">Picture</button>
+        <button aria-selected="false">References</button>
+        <button aria-selected="false">Expert</button>
+      </div>
+      <div class="fields">
+        <label class="field"><span>Detail passes</span><input value="20"></label>
+        <label class="field"><span>Model depth</span><input value="50"></label>
+        <label class="field"><span>Exact width</span><input value="512"></label>
+        <label class="field"><span>Exact height</span><input value="512"></label>
+      </div>
+      <p class="note">Every flag of the command line lives under Expert, named exactly as it is there.</p>
+    </section>
+  </section>
+
+  <!-- ── rendering: the preview is the page (P4) ───────────────────────── -->
+  <section class="rendering">
+    <div class="slate">
+      <span class="quote">“A red paper boat drifting on a dark pond”</span>
+      <span class="acts">
+        <button>Keep making</button>
+        <button class="stop">Stop</button>
+      </span>
+    </div>
+
+    <div class="develop">
+    <div class="frame">
+      <img alt="the sixth pass" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='512' height='512' filter='url(%23n)' opacity='0.85'/%3E%3C/svg%3E">
+    </div>
+
+    <div class="perf">
+      <i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i>
+      <i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i><i></i>
+    </div>
+
+    <p class="said">
+      <span class="what">Painting the picture — pass 6 of 20</span>
+      <span class="when">07:42 · about 16 min left</span>
+    </p>
+    </div>
+  </section>
+</main>
+
+<!-- P3: takes in a grid; hovering starts the video and shows the actions -->
+<section class="takes">
+  <h2>Takes</h2>
+  <div class="grid">
+    <div class="take">
+      <div class="screen">
+        <div class="poster"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='125'%3E%3Crect width='200' height='125' fill='%23922'/%3E%3C/svg%3E"></div>
+        <div class="playing"><span class="tc">00:00 / 01:47</span></div>
+        <div class="veil"><button>Reuse</button><button>Save</button><button class="del">Delete</button></div>
+      </div>
+      <span class="cap">A red paper boat drifting</span>
+      <span class="meta">512×512 · 1:47</span>
+    </div>
+    <div class="take">
+      <div class="screen">
+        <div class="poster"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='125'%3E%3Crect width='200' height='125' fill='%23345'/%3E%3C/svg%3E"></div>
+        <div class="playing"><span class="tc">00:00 / 03:25</span></div>
+        <div class="veil"><button>Reuse</button><button>Save</button><button class="del">Delete</button></div>
+      </div>
+      <span class="cap">A tall waterfall seen from below</span>
+      <span class="meta">864×480 · 3:25</span>
+    </div>
+    <div class="take">
+      <div class="screen">
+        <div class="poster"><img alt="" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='125'%3E%3Crect width='200' height='125' fill='%23564'/%3E%3C/svg%3E"></div>
+        <div class="playing"><span class="tc">00:00 / 01:41</span></div>
+        <div class="veil"><button>Reuse</button><button>Save</button><button class="del">Delete</button></div>
+      </div>
+      <span class="cap">A small red cube spinning</span>
+      <span class="meta">512×512 · 1:41</span>
+    </div>
+  </div>
+</section>
+
+<script>
+const root = document.documentElement;
+document.getElementById("theme").addEventListener("click", () => {
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : prefersDark.matches;
+  root.dataset.theme = dark ? "light" : "dark";
+});
+document.getElementById("flip").addEventListener("click", () => {
+  const rendering = root.dataset.state === "rendering";
+  root.dataset.state = rendering ? "composing" : "rendering";
+  document.getElementById("flip").textContent =
+    rendering ? "show a render" : "show the form";
+  document.getElementById("machine").innerHTML = rendering
+    ? "<b>NVIDIA GB10</b> · ready"
+    : "<b>NVIDIA GB10</b> · rendering";
+});
+for (const group of document.querySelectorAll(".pick")) {
+  group.addEventListener("click", (event) => {
+    const picked = event.target.closest("[aria-pressed]");
+    if (!picked) return;
+    for (const other of group.querySelectorAll("[aria-pressed]")) {
+      other.setAttribute("aria-pressed", String(other === picked));
+    }
+  });
+}
+</script>
+</body>
+</html>

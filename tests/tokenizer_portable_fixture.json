@@ -1,0 +1,13 @@
+{
+  "model": {
+    "type": "BPE",
+    "unk_token": null,
+    "vocab": {"A": 1, "Ġ": 2, "ĠA": 3, "Ã©": 4, "Ã": 5, "©": 6},
+    "merges": ["Ġ A", ["Ã", "©"]]
+  },
+  "normalizer": {"type": "NFC"},
+  "added_tokens": [
+    {"id": 10, "content": "<special>", "single_word": false,
+     "lstrip": false, "rstrip": false, "normalized": false}
+  ]
+}

@@ -1,0 +1,289 @@
+{
+  "version": 1,
+  "description": "Plain-language names for everything the UI shows. The engine's own wording is kept beside each entry, never instead of it: this file is what the interface says, options.schema.json is what h3 accepts.",
+  "options": {
+    "prompt": {
+      "name": "What the video shows",
+      "help": "Describe the scene in a sentence. What is in it, what moves, how it is filmed."
+    },
+    "seconds": {
+      "name": "How long",
+      "help": "The length of the video. Lengths come in fixed steps, so the number is rounded up to the nearest one.",
+      "time": "longer videos take proportionally longer to make"
+    },
+    "frames": {
+      "name": "How long, in frames",
+      "help": "The same setting counted in frames instead of seconds. 24 frames make a second.",
+      "time": "longer videos take proportionally longer to make"
+    },
+    "width": {
+      "name": "Shape",
+      "help": "How wide and tall the video is. Widescreen for a screen, vertical for a phone.",
+      "time": "twice the area is roughly twice the wait"
+    },
+    "height": {
+      "name": "Shape",
+      "help": "How wide and tall the video is. Widescreen for a screen, vertical for a phone.",
+      "time": "twice the area is roughly twice the wait"
+    },
+    "render_width": {
+      "name": "Work smaller, then enlarge",
+      "help": "Draw at a smaller size and scale the result up. Much faster, and fine detail is lost.",
+      "time": "can halve the wait"
+    },
+    "render_height": {
+      "name": "Work smaller, then enlarge",
+      "help": "Draw at a smaller size and scale the result up. Much faster, and fine detail is lost.",
+      "time": "can halve the wait"
+    },
+    "steps": {
+      "name": "Detail passes",
+      "help": "How many times the picture is refined. More passes bring out more detail.",
+      "time": "each pass adds a fixed amount of time"
+    },
+    "dit_layers": {
+      "name": "Model depth",
+      "help": "How much of the model runs. Less is faster and a little looser.",
+      "time": "cutting five layers saves a few percent"
+    },
+    "denoise_reuse": {
+      "name": "How often it redraws",
+      "help": "Redrawing at every pass is closest to the reference. Redrawing less often is faster, and the framing can shift.",
+      "time": "can save around a third of the drawing time"
+    },
+    "core_reuse": {
+      "name": "How often it redraws the main part",
+      "help": "Keeps the quick work fresh at every pass and runs the expensive part less often. An alternative to redrawing less often, not a companion to it.",
+      "time": "similar saving, different trade-off"
+    },
+    "token_reduction": {
+      "name": "Pair up detail while drawing",
+      "help": "Treats neighbouring detail as one while drawing. Faster, and the composition can drift. Leave it off at small sizes.",
+      "time": "saves roughly a quarter of the drawing time"
+    },
+    "ssd_streaming": {
+      "name": "Use less graphics memory",
+      "help": "Reads the model from disk as it goes instead of holding it all in memory. The result is identical; it takes longer.",
+      "time": "about 38 % slower, and needs 1.6 GB instead of 27 GB"
+    },
+    "use_int8_row_fc2": {
+      "name": "Faster maths on Apple M5",
+      "help": "A shortcut that only exists on Apple's M5 chips. On this machine it changes nothing."
+    },
+    "use_reference_rope": {
+      "name": "Original layout grid",
+      "help": "Restores the layout grid as first released, for comparing against reference results."
+    },
+    "seed": {
+      "name": "Variation",
+      "help": "Two videos made with the same settings and the same variation come out the same. Change it to get a different take on the same description."
+    },
+    "first_frame": {
+      "name": "Start from a photo",
+      "help": "The video begins at this picture."
+    },
+    "last_frame": {
+      "name": "End on a photo",
+      "help": "The video ends at this picture."
+    },
+    "ref_image": {
+      "name": "Reference photo",
+      "help": "A photo to take the subject, the look or the setting from. The order of references matters."
+    },
+    "ref_video": {
+      "name": "Reference clip",
+      "help": "A clip to continue or take the look from, keeping its sound."
+    },
+    "ref_silent_video": {
+      "name": "Reference clip, without its sound",
+      "help": "The same, but the clip's own audio is ignored."
+    },
+    "ref_video_audio": {
+      "name": "Reference clip with a different soundtrack",
+      "help": "A clip for the picture and a separate file for the sound."
+    },
+    "ref_audio": {
+      "name": "Reference sound",
+      "help": "A sound to take the mood or the music from. It needs a photo or a clip beside it, and must last between 2 and 15 seconds."
+    },
+    "reference_image_size": {
+      "name": "How reference photos are sized",
+      "help": "Match keeps each photo at the video's shape. Max keeps as much of the photo as the model allows."
+    },
+    "frames_dir": {
+      "name": "Save every frame",
+      "help": "Writes each finished frame as a separate picture file, next to the video."
+    },
+    "preview": {
+      "name": "Watch it being made",
+      "help": "Shows the picture after every pass, so you can stop early if it is going the wrong way.",
+      "time": "adds a short setup and a moment per pass"
+    },
+    "profile": {
+      "name": "Record timings",
+      "help": "Writes how long each stage took into the job's log."
+    },
+    "slower": {
+      "name": "Reference-exact mode",
+      "help": "Forces the slowest, closest-to-reference way of computing each part. For comparing against reference numbers, not for making videos."
+    },
+    "output": {
+      "name": "Where the video goes",
+      "help": "The server picks a folder for each job."
+    },
+    "model_dir": {
+      "name": "Model folder",
+      "help": "Set once when the service starts."
+    }
+  },
+  "phases": {
+    "tokenizer": "Reading your words",
+    "text encoder": "Understanding the description",
+    "refine text": "Understanding the description",
+    "Qwen vision": "Looking at your pictures",
+    "precompute AdaLN": "Getting the model ready",
+    "load transformer core": "Loading the model",
+    "denoise": "Painting the picture",
+    "denoise enqueue": "Painting the picture",
+    "preview VAE load": "Getting the preview ready",
+    "audio VAE": "Preparing the sound",
+    "audio VAE encoder": "Listening to your audio",
+    "video VAE encoder": "Watching your clips",
+    "video VAE load": "Developing the frames",
+    "FFmpeg": "Assembling the video"
+  },
+  "states": {
+    "queued": "Waiting its turn",
+    "running": "Being made",
+    "completed": "Ready",
+    "failed": "Did not finish",
+    "cancelled": "Stopped"
+  },
+  "errors": [
+    {
+      "match": "a prompt is required",
+      "title": "Tell it what to show first.",
+      "fix": "Describe the scene in a sentence — what is in it, what moves, how it is filmed."
+    },
+    {
+      "match": "width and height must be multiples of 32",
+      "title": "That size is not one the model can draw.",
+      "fix": "Width and height both have to be multiples of 32, and at least 32. Pick a shape above, or round your numbers to the nearest 32."
+    },
+    {
+      "match": "canvas exceeds the released 768*1344 pixel limit",
+      "title": "That size is larger than the model can make.",
+      "fix": "The largest is 1344 × 768, however you arrange it. Pick a smaller shape."
+    },
+    {
+      "match": "render width and height must be set together",
+      "title": "The smaller working size needs both numbers.",
+      "fix": "Set the working width and height together, or turn the option off."
+    },
+    {
+      "match": "internal render canvas must be same-aspect",
+      "title": "The smaller working size has to match the shape of the video.",
+      "fix": "Use the same proportions as the output, in multiples of 32, and never larger than it."
+    },
+    {
+      "match": "--seconds and --frames are mutually exclusive",
+      "title": "Choose one way to set the length.",
+      "fix": "Set the length in seconds or in frames, not both."
+    },
+    {
+      "match": "invalid seconds",
+      "title": "That length is not a number the model can use.",
+      "fix": "Use a length between 0.9 and 15.1 seconds."
+    },
+    {
+      "match": "frames must align within the released 5..362 range",
+      "title": "That length is outside what the model was released for.",
+      "fix": "Videos run from about 0.9 to about 15.1 seconds. Pick a length in that range."
+    },
+    {
+      "match": "generation requires at least one trained 22-frame decoder chunk",
+      "title": "That video would be too short to make.",
+      "fix": "The shortest the model can produce is 22 frames, just under a second."
+    },
+    {
+      "match": "denoising steps must be in [2, 1000]",
+      "title": "That number of detail passes is out of range.",
+      "fix": "Use between 2 and 1000 passes. Twenty is the usual choice."
+    },
+    {
+      "match": "denoise reuse must be in [1, 3]",
+      "title": "That amount of reuse is out of range.",
+      "fix": "Reuse between passes goes from 1 (none) to 3 (a lot)."
+    },
+    {
+      "match": "DiT layers must be in [35, 50]",
+      "title": "That model depth is out of range.",
+      "fix": "Depth goes from 35 to 50. Fifty runs the whole model."
+    },
+    {
+      "match": "core reuse must be in [1, 6]",
+      "title": "That amount of reuse is out of range.",
+      "fix": "Reusing the heavy part goes from 1 (never) to 6 (every sixth pass)."
+    },
+    {
+      "match": "core reuse and denoiser reuse cannot be combined",
+      "title": "Those two shortcuts cannot be used together.",
+      "fix": "Pick either reuse between passes or reuse of the heavy part, and leave the other at 1."
+    },
+    {
+      "match": "SSD streaming uses original BF16 weights",
+      "title": "Those two settings do not work together.",
+      "fix": "Using less graphics memory reads the model in its original form, which the Apple M5 shortcut cannot use. Turn one of them off."
+    },
+    {
+      "match": "int8 row FC2 cannot be combined with the BF16 MLP",
+      "title": "Those two settings do not work together.",
+      "fix": "The Apple M5 shortcut and the reference-exact maths are alternatives. Turn one of them off."
+    },
+    {
+      "match": "full references cannot be combined with frame anchors",
+      "title": "Reference material and start or end photos are two different ways to work.",
+      "fix": "Either start and end on your own photos, or give references to draw from. Remove one of the two."
+    },
+    {
+      "match": "Ref2VA supports at most 12 references",
+      "title": "That is more reference material than the model accepts.",
+      "fix": "Keep at most 12 items in total. Remove one before adding another."
+    },
+    {
+      "match": "Ref2VA limits are 9 images, 3 videos, and 3 audio inputs",
+      "title": "Too much of one kind of reference.",
+      "fix": "At most 9 photos, 3 clips and 3 sounds. Remove one of the kind that is full."
+    },
+    {
+      "match": "reference audio requires an image or video reference",
+      "title": "Sound needs something to go with.",
+      "fix": "Add a reference photo or clip beside the sound, or remove the sound."
+    },
+    {
+      "match": "has no soundtrack path",
+      "title": "That clip is missing its soundtrack.",
+      "fix": "Choose the audio file that goes with the clip, or use the clip with its own sound instead."
+    },
+    {
+      "match": "a video soundtrack requires at least 2 seconds",
+      "title": "The video is too short to carry the clip's sound.",
+      "fix": "A clip's sound is trimmed to the length of the video, and needs at least 2 seconds. Make the video at least 2.4 seconds long, or use the clip without its sound."
+    },
+    {
+      "match": "requires at least 2 seconds: the clip is only",
+      "title": "That clip is too short to take sound from.",
+      "fix": "Use a clip of at least 2 seconds, or add it without its sound."
+    },
+    {
+      "match": "reference audio requires at least 2 seconds at 32 kHz",
+      "title": "That sound is too short.",
+      "fix": "Reference sound has to last at least 2 seconds."
+    },
+    {
+      "match": "ordered reference audio exceeds 15 seconds in total",
+      "title": "That is more sound than the model can take in.",
+      "fix": "All the reference sounds together have to fit in 15 seconds. Remove one, or use a shorter file."
+    }
+  ]
+}

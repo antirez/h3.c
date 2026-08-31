@@ -1,13 +1,127 @@
-# h3-metal
+<div align="center">
+  <img src="docs/assets/banner.svg" alt="h3.c — MiniMax-H3 on CUDA and Metal, with the h3c studio web UI" width="600">
+  <br/><br/>
+  <a href="https://github.com/matrixfede/h3.c/actions/workflows/ci.yml"><img src="https://github.com/matrixfede/h3.c/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+</div>
 
-Native MiniMax-H3 inference for Apple Silicon. The project is being built as a
-sequence of working vertical slices: deterministic host/model metadata first,
-then portable Metal block parity, prompt encoding, prompt-to-video/audio, and
-first/last-frame conditioning and then ordered references.
+# h3.c
 
-Prompt-to-video/audio, first/last-frame conditioning, and ordered Ref2VA
-image/video/audio references work end to end. The current work is incremental
-H3-specific Metal performance and memory optimization on M3 Max and M5 Max.
+Native MiniMax-H3 inference in C for NVIDIA CUDA on Linux and Metal on Apple
+Silicon. Prompt-to-video/audio, first/last-frame conditioning, and ordered
+Ref2VA image/video/audio references work end to end on both backends.
+
+**h3c studio**, the included browser front end, exposes every generation
+option of the CLI with a live preview of the denoising — if you would rather
+click than type, start below. The rest of this document is the CLI.
+
+In a hurry: `install.sh` does the setup below for you, and asks before every
+download. See [Installing with the script](#installing-with-the-script).
+
+## h3c studio (Web UI)
+
+`h3c studio` is a small FastAPI backend and a React front end that drive the
+same `h3` binary this document describes. Every CLI option is reachable from
+the browser, generation progress streams live with a weighted progress bar,
+and uploaded photos and clips stay in a reusable library.
+
+```sh
+cp .env.example .env      # set H3_MODEL_DIR to your checkpoint
+docker compose up --build # then open http://127.0.0.1:8080
+```
+
+Docker needs the NVIDIA Container Toolkit; the checkpoint is bind-mounted
+read-only and never enters an image. A local, non-Docker setup and the design
+notes are in [`docs/WEBUI.md`](docs/WEBUI.md).
+
+Sign in with the administrator account you define in `.env`
+(`H3_ADMIN_USERNAME`, `H3_ADMIN_PASSWORD`): it is created once, on the first
+start of an empty database. Every other account is made with a single-use
+invite from the People page, and videos and uploads stay private to the
+person who made them. The service serves plain HTTP and binds to
+`127.0.0.1`; to reach it from another machine, set `H3_BIND` to a private
+address — a Tailscale address, or an SSH tunnel — and put a TLS-terminating
+reverse proxy in front of it if it is anything but a network you trust. See
+[`docs/WEBUI.md`](docs/WEBUI.md#security).
+
+An optional post-processing stage can hand the finished video to an external
+program. This repository ships no such program and no models: see
+[`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md).
+
+### Gallery
+
+All five views of the studio (synthetic demo data):
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/assets/screenshots/login.png" width="430"><br/><sub>Sign in — invites create the other accounts</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/studio.png" width="430"><br/><sub>The prompt page, with the live denoising strip</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/screenshots/create.png" width="430"><br/><sub>Expert page — every engine control, validated live</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/people.png" width="430"><br/><sub>People — accounts, single-use invites, quotas</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/screenshots/takes.png" width="430"><br/><sub>Takes — the finished library, download and reuse</sub></td>
+  </tr>
+</table>
+
+## Platforms and prerequisites
+
+The validated Linux configuration is Ubuntu ARM64, NVIDIA GB10, driver 595.84,
+and CUDA Toolkit 13.0. The supported Linux baseline is a C11 compiler, GNU
+Make, CUDA Toolkit 13.0 or newer, ICU 72 or newer, and FFmpeg/FFprobe 6.1 or
+newer. The build links `cudart`, `cublasLt`, ICU, pthreads, and libm. NVIDIA
+drivers must support the installed toolkit and GPU. macOS continues to use the
+Metal backend and the Objective-C/Foundation tokenizer; its existing Apple
+Silicon optimization switches remain available there.
+
+Install the ordinary Ubuntu build dependencies with your package manager and
+install CUDA from NVIDIA's repository for the target architecture. Verify the
+toolchain before building:
+
+```sh
+cc --version
+nvcc --version
+ffmpeg -version
+pkg-config --modversion icu-uc
+```
+
+The released checkpoint is about 465 GB. If `./MiniMax-H3` already contains
+the complete snapshot, reuse it: no second download is needed. Otherwise the
+current Hugging Face CLI resumes and reuses cached blobs:
+
+```sh
+hf auth login
+hf download MiniMaxAI/MiniMax-H3 --local-dir ./MiniMax-H3
+hf cache verify MiniMaxAI/MiniMax-H3 --local-dir ./MiniMax-H3 \
+  --fail-on-missing-files
+```
+
+Build and run the complete local gate:
+
+```sh
+make -j"$(nproc)"
+./scripts/verify.sh all
+./h3 --info -d ./MiniMax-H3
+```
+
+The GB10 end-to-end command validated with the official checkpoint is:
+
+```sh
+mkdir -p outputs
+./h3 --profile -d ./MiniMax-H3 \
+  -p "A bright red cube rotates smoothly on a white background." \
+  --width 512 --height 512 --frames 22 --steps 20 --layers 50 \
+  --token-reduction -o outputs/gb10-cube.mp4
+```
+
+Linux/CUDA limitations: `--use-int8-row-fc2` is currently a Metal/M5
+specialization and a measured CUDA no-op; there is no verified FP8 execution
+path. `--show` depends on terminal graphics support. `--ssd-streaming` is exact
+and cuts the measured GB10 DiT peak from 27.06 GB to 1.63 GB, but increased
+load-plus-denoise time by 37.6% in the three-run benchmark. See
+[`docs/GB10_PROFILE.md`](docs/GB10_PROFILE.md) for the reproducible measurements.
 
 ## Tutorial
 
@@ -22,7 +136,7 @@ mkdir -p outputs
 ./h3 --info -d ./MiniMax-H3
 ```
 
-`--info` checks the model layout and prints the selected Metal device without
+`--info` checks the model layout and prints the selected GPU device without
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
@@ -402,6 +516,45 @@ Reference flags may be repeated and their command-line order is preserved.
 Standalone audio must accompany an image or video reference. Audio references
 must be 2–15 seconds; at most three audio inputs are accepted and their total
 decoded duration is capped at 15 seconds.
+
+## Installing with the script
+
+`install.sh` checks the prerequisites, puts the repository in place and writes
+a `.env`. It downloads **nothing** unless asked: the checkpoint and the
+optional face-swapping runtime are separate questions, and both can be
+declined. Read it before running it: it is deliberately not written to be
+piped from a URL into a shell.
+
+```sh
+git clone https://github.com/matrixfede/h3.c.git ~/h3
+cd ~/h3
+less install.sh
+./install.sh
+```
+
+Run from outside a checkout, it clones the repository itself:
+
+```sh
+bash install.sh --dir ~/h3
+```
+
+Both accept `--branch NAME` if you want a branch other than the default
+one. Either way the options are the same:
+
+```sh
+./install.sh                    # repository and .env only
+./install.sh --with-model       # and the 465 GB checkpoint
+./install.sh --yes              # no questions; nothing optional is done
+./install.sh --help
+```
+
+`--with-model` runs exactly the `hf download` and `hf cache verify` commands
+documented above, into `<dir>/MiniMax-H3`, and refuses to start if the
+filesystem cannot hold the checkpoint. A snapshot that is already complete is
+left alone.
+
+`--with-faceswap` is off by default and explained in
+[`docs/POSTPROCESSING.md`](docs/POSTPROCESSING.md).
 
 ## Tests and runtime requirements
 

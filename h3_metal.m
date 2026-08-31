@@ -1,7 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include "h3_metal.h"
+#include "h3_device.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -12,7 +12,7 @@ static void h3_copy_string(char *destination, size_t size, NSString *value) {
     snprintf(destination, size, "%s", source ? source : "unknown");
 }
 
-int h3_metal_probe(h3_device_info *info, char *error, size_t error_size) {
+int h3_device_probe(h3_device_info *info, char *error, size_t error_size) {
     if (!info) return 0;
     memset(info, 0, sizeof(*info));
     @autoreleasepool {

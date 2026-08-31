@@ -1,0 +1,14 @@
+{
+  "name": "h3c-dev-tools",
+  "private": true,
+  "type": "module",
+  "description": "Repo-level dev tooling: Playwright for scripts/snapshot_ui.mjs and ESLint for the verify.sh static gate.",
+  "devDependencies": {
+    "eslint": "^9.39.0",
+    "eslint-formatter-compact": "^9.0.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "playwright": "^1.57.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0"
+  }
+}

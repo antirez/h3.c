@@ -1,6 +1,8 @@
 #include "h3_ffmpeg.h"
 
 #include <errno.h>
+#include <math.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
@@ -13,6 +15,8 @@
 #include <unistd.h>
 
 extern char **environ;
+
+#define H3_WRITE_MAX ((size_t)PTRDIFF_MAX)
 
 static const char *ffmpeg_program(void) {
     const char *override = getenv("H3_FFMPEG");
@@ -57,8 +61,7 @@ static int write_all(int descriptor, const uint8_t *data, size_t bytes,
                      char *error, size_t error_size) {
     while (bytes) {
         ssize_t written = write(descriptor, data,
-                                bytes > (size_t)SSIZE_MAX ?
-                                (size_t)SSIZE_MAX : bytes);
+                                bytes > H3_WRITE_MAX ? H3_WRITE_MAX : bytes);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) {
             fail(error, error_size, "cannot stream RGB frames to FFmpeg: %s",
@@ -588,8 +591,7 @@ static void *stream_thread(void *opaque) {
     const uint8_t *data = writer->data;
     size_t remaining = writer->bytes;
     while (remaining) {
-        size_t request = remaining > (size_t)SSIZE_MAX ?
-                         (size_t)SSIZE_MAX : remaining;
+        size_t request = remaining > H3_WRITE_MAX ? H3_WRITE_MAX : remaining;
         ssize_t written = write(writer->descriptor, data, request);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) {
@@ -640,7 +642,8 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
     for (int sample = 0; sample < samples; sample++)
         for (int channel = 0; channel < channels; channel++)
             interleaved[(size_t)sample * (size_t)channels + (size_t)channel] =
-                pcm[(size_t)channel * (size_t)samples + (size_t)sample];
+                fmaxf(-0.5f, fminf(0.5f,
+                    pcm[(size_t)channel * (size_t)samples + (size_t)sample]));
 
     int video_pipe[2] = {-1, -1}, audio_pipe[2] = {-1, -1};
     if (pipe(video_pipe) != 0 || pipe(audio_pipe) != 0) {
@@ -673,7 +676,9 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
         "-i", audio_input,
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-af", "alimiter=limit=0.5:level=disabled",
+        "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", (char *)path, NULL
     };
     posix_spawn_file_actions_t actions;

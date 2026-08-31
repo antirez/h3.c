@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- h3c studio — the frame (R31, concept A). Self-contained colours: the
+       favicon cannot read the page's theme tokens. -->
+  <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="#B5157C" stroke-width="2.6"/>
+  <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="#B5157C"/>
+  <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="#B5157C"/>
+  <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="#B5157C" stroke-width="2.6" stroke-linecap="round"/>
+</svg>

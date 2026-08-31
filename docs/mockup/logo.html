@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h3c studio — logo concepts (T125)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..600&family=Instrument+Serif:ital@0;1&family=Martian+Mono:wght@300..600&display=swap" rel="stylesheet">
+<style>
+/* Same tokens as the app (styles.css): no new colour, no new voice. */
+:root{
+  --ground:#F1F2F3; --surface:#FFFFFF; --sunken:#E5E7E9;
+  --line:#DCDEE1; --line-strong:#9AA0A7;
+  --ink:#101317; --muted:#5A626B;
+  --accent:#B5157C; --accent-ink:#FFFFFF;
+  --serif:"Instrument Serif",ui-serif,Georgia,serif;
+  --sans:"Instrument Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"Martian Mono",ui-monospace,Menlo,monospace;
+}
+body[data-theme="dark"]{
+  --ground:#0F1114; --surface:#171A1E; --sunken:#101317;
+  --line:#272B31; --line-strong:#767D85;
+  --ink:#E9EBEE; --muted:#98A0A9;
+  --accent:#F062AF; --accent-ink:#16040E;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+  font-size:15px;line-height:1.5;padding:40px 6vw 80px}
+h1{font-family:var(--serif);font-weight:400;font-size:28px;margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 30px;font-size:14px}
+h2{font-size:13px;letter-spacing:.02em;color:var(--muted);margin:44px 0 14px;font-weight:600}
+.concept{background:var(--surface);border:1px solid var(--line);border-radius:14px;
+  padding:26px 28px;margin-bottom:18px}
+.concept h3{margin:0;font-family:var(--serif);font-weight:400;font-size:20px}
+.concept .why{color:var(--muted);font-size:13.5px;margin:4px 0 20px;max-width:70ch}
+.row{display:flex;align-items:center;gap:34px;flex-wrap:wrap}
+.cell{display:flex;flex-direction:column;align-items:center;gap:8px}
+.cell small{color:var(--muted);font-family:var(--mono);font-size:10px;letter-spacing:.04em}
+.lockup{display:inline-flex;align-items:center;gap:12px}
+.lockup .name{font-family:var(--serif);font-size:26px;letter-spacing:-.01em;line-height:1}
+.lockup .name span{font-style:italic;color:var(--muted);margin-left:7px}
+.lockup.big .name{font-size:40px}
+.headerbar{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line);
+  padding-bottom:14px;margin-top:6px}
+.headerbar .status{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--muted);
+  letter-spacing:.04em}
+.fav{display:inline-grid;place-items:center;background:var(--sunken);border-radius:6px}
+button.flip{margin-left:14px;font:inherit;font-size:12.5px;color:var(--muted);cursor:pointer;
+  background:none;border:1px solid var(--line);border-radius:999px;padding:4px 12px}
+button.flip:hover{color:var(--ink)}
+</style>
+</head>
+<body data-theme="light">
+
+<h1>Logo — three concepts <button class="flip" id="flip">dark theme</button></h1>
+<p class="sub">Same palette, same voices as the app. Every mark is one SVG; the
+sizes shown are 16, 32 and 128 px, plus the lockup as it would sit in the header.</p>
+
+<!-- ═══ A — the frame ══════════════════════════════════════════════════════
+     The developing frame, already the page's signature, drawn as a mark:
+     an open frame with the perforation on its left edge. -->
+<h2>A — The frame</h2>
+<div class="concept">
+  <h3>The frame</h3>
+  <p class="why">Il fotogramma che si sviluppa è già la firma della pagina: il
+  logo lo disegna. Un fotogramma aperto, la perforazione sul bordo sinistro,
+  l'angolo in basso a destra che si sta ancora "sviluppando" nell'accento.</p>
+  <div class="row">
+    <div class="cell"><span class="fav" style="width:32px;height:32px">
+      <svg width="16" height="16" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="var(--ink)" stroke-width="3"/>
+        <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/>
+      </svg></span><small>16</small></div>
+    <div class="cell"><span class="fav" style="width:48px;height:48px">
+      <svg width="32" height="32" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+        <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/>
+      </svg></span><small>32</small></div>
+    <div class="cell">
+      <svg width="128" height="128" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="var(--ink)" stroke-width="1.8"/>
+        <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
+      </svg><small>128</small></div>
+    <div class="cell">
+      <div class="lockup">
+        <svg width="30" height="30" viewBox="0 0 32 32" aria-label="h3c mark">
+          <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+          <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+          <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+          <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/>
+        </svg>
+        <span class="name">h3c<span>studio</span></span>
+      </div><small>lockup</small></div>
+  </div>
+</div>
+
+<!-- ═══ B — the perforation three ══════════════════════════════════════════
+     The name is h-3-c: the 3 becomes three perforation squares, the middle
+     one lit by the accent, in a vertical film strip. -->
+<h2>B — The perforation three</h2>
+<div class="concept">
+  <h3>The perforation three</h3>
+  <p class="why">Il 3 del nome fatto coi suoi segni più riconoscibili: tre
+  perforazioni in colonna, quella centrale accesa. È il concetto più compatto,
+  il più adatto a favicon e mobile.</p>
+  <div class="row">
+    <div class="cell"><span class="fav" style="width:32px;height:32px">
+      <svg width="16" height="16" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="10.5" y="3.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+        <rect x="10.5" y="12.5" width="11" height="7" rx="2.2" fill="var(--accent)"/>
+        <rect x="10.5" y="21.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+      </svg></span><small>16</small></div>
+    <div class="cell"><span class="fav" style="width:48px;height:48px">
+      <svg width="32" height="32" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="10.5" y="3.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+        <rect x="10.5" y="12.5" width="11" height="7" rx="2.2" fill="var(--accent)"/>
+        <rect x="10.5" y="21.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+      </svg></span><small>32</small></div>
+    <div class="cell">
+      <svg width="128" height="128" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="10.5" y="3.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+        <rect x="10.5" y="12.5" width="11" height="7" rx="2.2" fill="var(--accent)"/>
+        <rect x="10.5" y="21.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+      </svg><small>128</small></div>
+    <div class="cell">
+      <div class="lockup">
+        <svg width="26" height="26" viewBox="0 0 32 32" aria-label="h3c mark">
+          <rect x="10.5" y="3.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+          <rect x="10.5" y="12.5" width="11" height="7" rx="2.2" fill="var(--accent)"/>
+          <rect x="10.5" y="21.5" width="11" height="7" rx="2.2" fill="var(--ink)"/>
+        </svg>
+        <span class="name">h3c<span>studio</span></span>
+      </div><small>lockup</small></div>
+  </div>
+</div>
+
+<!-- ═══ C — the leader ═════════════════════════════════════════════════════
+     The countdown leader of a film reel: a circle with the cross, the
+     accent sweeping the quarter that is "developing". -->
+<h2>C — The leader</h2>
+<div class="concept">
+  <h3>The leader</h3>
+  <p class="why">Il countdown che apre le bobine: cerchio, croce, e il quarto
+  che si sta ancora sviluppando nell'accento. Il più cinematografico dei tre;
+  a 16 px resta un cerchio con una croce, che è comunque un segno solido.</p>
+  <div class="row">
+    <div class="cell"><span class="fav" style="width:32px;height:32px">
+      <svg width="16" height="16" viewBox="0 0 32 32" aria-label="h3c mark">
+        <circle cx="16" cy="16" r="12.5" fill="none" stroke="var(--ink)" stroke-width="3"/>
+        <path d="M16 3.5 A12.5 12.5 0 0 1 28.5 16" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/>
+        <path d="M16 9.5v13M9.5 16h13" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round"/>
+      </svg></span><small>16</small></div>
+    <div class="cell"><span class="fav" style="width:48px;height:48px">
+      <svg width="32" height="32" viewBox="0 0 32 32" aria-label="h3c mark">
+        <circle cx="16" cy="16" r="12.5" fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+        <path d="M16 3.5 A12.5 12.5 0 0 1 28.5 16" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M16 9.5v13M9.5 16h13" stroke="var(--ink)" stroke-width="2" stroke-linecap="round"/>
+      </svg></span><small>32</small></div>
+    <div class="cell">
+      <svg width="128" height="128" viewBox="0 0 32 32" aria-label="h3c mark">
+        <circle cx="16" cy="16" r="12.5" fill="none" stroke="var(--ink)" stroke-width="1.8"/>
+        <path d="M16 3.5 A12.5 12.5 0 0 1 28.5 16" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M16 9.5v13M9.5 16h13" stroke="var(--ink)" stroke-width="1.4" stroke-linecap="round"/>
+      </svg><small>128</small></div>
+    <div class="cell">
+      <div class="lockup">
+        <svg width="28" height="28" viewBox="0 0 32 32" aria-label="h3c mark">
+          <circle cx="16" cy="16" r="12.5" fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+          <path d="M16 3.5 A12.5 12.5 0 0 1 28.5 16" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"/>
+          <path d="M16 9.5v13M9.5 16h13" stroke="var(--ink)" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span class="name">h3c<span>studio</span></span>
+      </div><small>lockup</small></div>
+  </div>
+</div>
+
+<!-- ═══ in situ: the header ═══════════════════════════════════════════════ -->
+<h2>In the header (A shown; B and C swap in identically)</h2>
+<div class="concept">
+  <div class="headerbar">
+    <div class="lockup">
+      <svg width="22" height="22" viewBox="0 0 32 32" aria-label="h3c mark">
+        <rect x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke="var(--ink)" stroke-width="3"/>
+        <rect x="2.5" y="9" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <rect x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4" fill="var(--ink)"/>
+        <path d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+      <span class="name" style="font-size:19px">h3c<span>studio</span></span>
+    </div>
+    <span class="status">NVIDIA GB10 · ready · admin · People · sign out</span>
+  </div>
+</div>
+
+<script>
+document.getElementById("flip").addEventListener("click", () => {
+  const body = document.body;
+  const dark = body.dataset.theme === "dark";
+  body.dataset.theme = dark ? "light" : "dark";
+  document.getElementById("flip").textContent = dark ? "dark theme" : "light theme";
+});
+</script>
+</body>
+</html>

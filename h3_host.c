@@ -1,6 +1,8 @@
 #include "h3_host.h"
 
+#ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
+#endif
 
 #include <float.h>
 #include <limits.h>
@@ -551,6 +553,7 @@ int h3_resize_rgb24_high_quality(const uint8_t *input, int frames,
         *output = pixels;
         return 1;
     }
+#ifdef __APPLE__
     if (input_area > SIZE_MAX / 4 || output_area > SIZE_MAX / 4) {
         free(pixels);
         return 0;
@@ -594,6 +597,39 @@ int h3_resize_rgb24_high_quality(const uint8_t *input, int frames,
         }
     }
     free(source_argb); free(output_argb);
+#else
+    size_t input_frame_bytes = input_area * 3;
+    size_t output_frame_bytes = output_area * 3;
+    for (int frame = 0; frame < frames; frame++) {
+        const uint8_t *source = input + (size_t)frame * input_frame_bytes;
+        uint8_t *destination = pixels + (size_t)frame * output_frame_bytes;
+        for (int y = 0; y < output_height; y++) {
+            double source_y = ((double)y + 0.5) * input_height / output_height - 0.5;
+            int y0 = (int)floor(source_y);
+            double fy = source_y - y0;
+            if (y0 < 0) { y0 = 0; fy = 0.0; }
+            int y1 = y0 + 1;
+            if (y1 >= input_height) { y1 = input_height - 1; fy = 0.0; }
+            for (int x = 0; x < output_width; x++) {
+                double source_x = ((double)x + 0.5) * input_width / output_width - 0.5;
+                int x0 = (int)floor(source_x);
+                double fx = source_x - x0;
+                if (x0 < 0) { x0 = 0; fx = 0.0; }
+                int x1 = x0 + 1;
+                if (x1 >= input_width) { x1 = input_width - 1; fx = 0.0; }
+                for (int channel = 0; channel < 3; channel++) {
+                    double top = source[((size_t)y0 * input_width + x0) * 3 + channel] * (1.0 - fx) +
+                                 source[((size_t)y0 * input_width + x1) * 3 + channel] * fx;
+                    double bottom = source[((size_t)y1 * input_width + x0) * 3 + channel] * (1.0 - fx) +
+                                    source[((size_t)y1 * input_width + x1) * 3 + channel] * fx;
+                    double value = top * (1.0 - fy) + bottom * fy;
+                    destination[((size_t)y * output_width + x) * 3 + channel] =
+                        (uint8_t)lrint(fmin(255.0, fmax(0.0, value)));
+                }
+            }
+        }
+    }
+#endif
     *output = pixels;
     return 1;
 }

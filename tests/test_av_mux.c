@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
     for (int channel = 0; channel < 2; channel++)
         for (int sample = 0; sample < SAMPLES; sample++)
             pcm[(size_t)channel * SAMPLES + (size_t)sample] =
-                0.05f * sinf(2.0f * 3.14159265358979323846f *
+                1.5f * sinf(2.0f * 3.14159265358979323846f *
                              (float)(220 + channel * 110) * (float)sample /
                              32000.0f);
     char error[512];
@@ -89,6 +89,7 @@ int main(int argc, char **argv) {
     if (decoded_samples != SAMPLES)
         die("FFmpeg audio input returned an unexpected sample count");
     double left_energy = 0.0, right_energy = 0.0;
+    float peak = 0.0f;
     for (int sample = 0; sample < decoded_samples; sample++) {
         float left = decoded_pcm[sample];
         float right = decoded_pcm[decoded_samples + sample];
@@ -96,9 +97,12 @@ int main(int argc, char **argv) {
             die("decoded FFmpeg audio contains non-finite PCM");
         left_energy += (double)left * left;
         right_energy += (double)right * right;
+        peak = fmaxf(peak, fmaxf(fabsf(left), fabsf(right)));
     }
     if (left_energy < 1.0 || right_energy < 1.0)
         die("decoded FFmpeg audio has no stereo signal");
+    if (peak > 1.0f)
+        die("decoded FFmpeg audio exceeds the anti-clipping ceiling");
     free(decoded_pcm);
     printf("ok: concurrent FFmpeg video/PCM pipes created %s (%lld bytes)\n",
            path, (long long)status.st_size);

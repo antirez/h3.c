@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h3.c Studio — UI mockup</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --line:#2a2f3a;
+  --text:#e6e9ef; --dim:#98a1b3; --accent:#5aa9ff; --ok:#4ec9a0;
+  --warn:#e0b341; --err:#ef6f6f; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+code,.flag{font-family:var(--mono);font-size:12px}
+.flag{color:var(--accent);opacity:.85}
+header{display:flex;align-items:center;gap:16px;padding:10px 18px;
+  border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+header .spacer{flex:1}
+.badge{font-family:var(--mono);font-size:11px;color:var(--dim);
+  border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+.badge b{color:var(--ok);font-weight:600}
+main{display:grid;grid-template-columns:minmax(560px,1fr) 400px;gap:18px;
+  padding:18px;max-width:1760px;margin:0 auto;align-items:start}
+@media (max-width:1180px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.panel>h2{margin:0;padding:11px 15px;font-size:12px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
+  font-weight:600}
+.body{padding:12px 15px}
+.tabs{display:flex;gap:6px;padding:10px 15px 0}
+.tab{padding:7px 15px;border:1px solid var(--line);border-bottom:none;
+  border-radius:8px 8px 0 0;background:var(--panel2);color:var(--dim);
+  cursor:pointer;font-size:13px}
+.tab[aria-selected=true]{background:var(--panel);color:var(--text);
+  box-shadow:inset 0 2px 0 var(--accent)}
+.tabs .count{font-family:var(--mono);font-size:11px;color:var(--dim);
+  margin-left:6px}
+.field{margin-bottom:10px}
+.field>label{display:flex;align-items:baseline;gap:8px;margin-bottom:4px;
+  font-weight:600;font-size:13px}
+.hint{color:var(--dim);font-size:12px;margin-top:3px}
+.hint.warn{color:var(--warn)} .hint.err{color:var(--err)}
+input[type=text],input[type=number],textarea,select{
+  width:100%;background:var(--panel2);color:var(--text);
+  border:1px solid var(--line);border-radius:7px;padding:8px 10px;font:inherit}
+textarea{resize:vertical;min-height:48px}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.row>*{flex:1;min-width:110px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{padding:4px 10px;border:1px solid var(--line);border-radius:999px;
+  background:var(--panel2);color:var(--dim);cursor:pointer;font-size:12px}
+.chip[aria-pressed=true]{border-color:var(--accent);color:var(--text);
+  background:#1b2735}
+.slider{width:100%;accent-color:var(--accent)}
+.drop{border:1px dashed var(--line);border-radius:8px;padding:11px;
+  text-align:center;color:var(--dim);font-size:12px;background:var(--panel2)}
+.drop .lib{display:inline-block;margin-top:7px;color:var(--accent);
+  border:1px solid var(--line);border-radius:6px;padding:3px 9px;cursor:pointer}
+.sect{border:1px solid var(--line);border-radius:9px;margin-bottom:11px;
+  background:var(--panel2)}
+.sect>summary{cursor:pointer;padding:10px 13px;font-weight:600;font-size:13px;
+  list-style:none;display:flex;align-items:center;gap:9px}
+.sect>summary::-webkit-details-marker{display:none}
+.sect>summary::before{content:"▸";color:var(--dim)}
+.sect[open]>summary::before{content:"▾"}
+.sect .inner{padding:0 13px 13px}
+.check{display:flex;gap:9px;align-items:flex-start;padding:5px 0}
+.check input{margin-top:3px;accent-color:var(--accent)}
+.check .txt{flex:1}
+.check .txt b{font-weight:600;font-size:13px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+@media (max-width:760px){.grid2{grid-template-columns:1fr}}
+.rules{margin:9px 0 0;padding-left:17px;color:var(--dim);font-size:12px}
+.rules li{margin:2px 0}
+.reflist{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.ref{display:flex;align-items:center;gap:10px;padding:9px 11px;
+  border-bottom:1px solid var(--line);font-size:13px}
+.ref:last-child{border-bottom:none}
+.ref .k{font-family:var(--mono);font-size:11px;color:var(--accent);
+  border:1px solid var(--line);border-radius:5px;padding:2px 6px;min-width:64px;
+  text-align:center}
+.ref .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ref .m{color:var(--dim);font-size:12px}
+.ref .btns{color:var(--dim);font-family:var(--mono);letter-spacing:2px}
+.counters{display:flex;gap:14px;font-size:12px;color:var(--dim);margin-top:9px;
+  flex-wrap:wrap}
+.counters b{color:var(--text);font-weight:600}
+.submit{width:100%;padding:11px;border:none;border-radius:9px;
+  background:var(--accent);color:#06121f;font-weight:700;font-size:14px;
+  cursor:pointer;margin-top:4px}
+.cmd{margin-top:11px;background:#0b0d12;border:1px solid var(--line);
+  border-radius:8px;padding:10px;color:var(--dim);font-family:var(--mono);
+  font-size:11px;white-space:pre-wrap;word-break:break-all}
+.job{border-bottom:1px solid var(--line);padding:11px 15px}
+.job:last-child{border-bottom:none}
+.job .top{display:flex;align-items:center;gap:8px}
+.job .st{font-family:var(--mono);font-size:10px;text-transform:uppercase;
+  letter-spacing:.07em;border-radius:4px;padding:2px 7px;border:1px solid}
+.st.run{color:var(--accent);border-color:#27405e;background:#12202f}
+.st.que{color:var(--dim);border-color:var(--line);background:var(--panel2)}
+.st.done{color:var(--ok);border-color:#1f4438;background:#11221d}
+.st.fail{color:var(--err);border-color:#4a2626;background:#231414}
+.job .ttl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:13px}
+.job .x{color:var(--dim);cursor:pointer;font-family:var(--mono)}
+.meta{color:var(--dim);font-size:12px;margin-top:5px;font-family:var(--mono)}
+.bar{height:7px;background:var(--panel2);border-radius:99px;margin-top:8px;
+  overflow:hidden;border:1px solid var(--line)}
+.bar>span{display:block;height:100%;background:var(--accent)}
+.prev{aspect-ratio:16/9;background:linear-gradient(135deg,#1b2230,#12161d);
+  border:1px solid var(--line);border-radius:8px;display:flex;
+  align-items:center;justify-content:center;color:var(--dim);font-size:12px;
+  text-align:center;font-family:var(--mono);margin-top:10px}
+.actions{display:flex;gap:8px;margin-top:10px}
+.actions button{flex:1;padding:8px;border:1px solid var(--line);border-radius:7px;
+  background:var(--panel2);color:var(--text);cursor:pointer;font-size:12px}
+.err-box{border:1px solid #4a2626;background:#1c1414;border-radius:7px;
+  padding:9px 11px;margin-top:8px;color:#f0a0a0;font-family:var(--mono);
+  font-size:11.5px}
+.gal{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.gal .it{border:1px solid var(--line);border-radius:8px;overflow:hidden;
+  background:var(--panel2)}
+.gal .th{aspect-ratio:16/9;background:linear-gradient(135deg,#212a38,#151a22)}
+.gal .cap{padding:6px 8px;font-size:11px;color:var(--dim);font-family:var(--mono)}
+.note{font-size:12px;color:var(--dim);padding:11px 15px;border-top:1px solid var(--line)}
+[hidden]{display:none!important}
+.disabled{opacity:.5}
+</style>
+</head>
+<body>
+<header>
+  <h1>h3.c Studio</h1>
+  <span class="badge">GPU <b>NVIDIA GB10</b> · 121.7 GiB · CUDA 13.0</span>
+  <span class="badge">checkpoint <b>ready</b> · FL2VA + Ref2VA</span>
+  <span class="spacer"></span>
+  <span class="badge">queue <b>1</b> running · 1 queued</span>
+</header>
+
+<main>
+<section class="panel">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-tab="simple">Simple</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="advanced">Advanced</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="refs">References<span class="count">5/12</span></button>
+  </div>
+
+  <!-- ─────────────── SIMPLE ─────────────── -->
+  <div class="body" data-panel="simple">
+    <div class="field">
+      <label>Prompt <span class="flag">--prompt</span></label>
+      <textarea>A red fox walks through fresh snow in a pine forest, tracking shot.</textarea>
+    </div>
+
+    <div class="field">
+      <label>Duration <span class="flag">--seconds</span> / <span class="flag">--frames</span></label>
+      <input class="slider" type="range" min="0.9" max="15.1" step="0.1" value="4.5">
+      <div class="hint">4.5 s requested → rounded up to <b>124 frames = 5.167 s</b> at 24 fps
+        (legal shapes are 5 + 17n, 22…362 frames). The two flags are mutually exclusive.</div>
+    </div>
+
+    <div class="field">
+      <label>Format &amp; size <span class="flag">--width</span> <span class="flag">--height</span></label>
+      <div class="chips" style="margin-bottom:8px">
+        <span class="chip">16:9</span><span class="chip" aria-pressed="true">1:1</span>
+        <span class="chip">9:16</span><span class="chip">4:3</span><span class="chip">3:4</span>
+      </div>
+      <div class="chips">
+        <span class="chip">256²</span><span class="chip" aria-pressed="true">512²</span>
+        <span class="chip">768²</span><span class="chip">1344×768</span><span class="chip">768×1344</span>
+      </div>
+      <div class="hint">512 × 512 = 0.26 MP of the 1.03 MP limit (768 × 1344).
+        Both sides must be multiples of 32 and at least 32.</div>
+    </div>
+
+    <div class="field">
+      <label>Quality preset</label>
+      <div class="chips">
+        <span class="chip">Draft</span><span class="chip" aria-pressed="true">Balanced</span>
+        <span class="chip">Reference</span>
+      </div>
+      <div class="hint">Balanced = <code>--steps 20 --layers 45 --reuse 2 --token-reduction</code>.
+        Estimated 6 min on this GPU. Change any of it in <b>Advanced</b>.</div>
+    </div>
+
+    <div class="field">
+      <label>Live preview <span class="flag">--preview-dir</span></label>
+      <div class="check"><input type="checkbox" checked><span class="txt">
+        <b>Decode one frame after every denoising step</b> — adds a <code>preview VAE load</code>
+        phase and one decode per step.</span></div>
+    </div>
+
+    <div class="field grid2">
+      <div>
+        <label>First frame <span class="flag">--first-frame</span></label>
+        <div class="drop">drop an image<br><span class="lib">choose from library</span></div>
+      </div>
+      <div>
+        <label>Last frame <span class="flag">--last-frame</span></label>
+        <div class="drop">drop an image<br><span class="lib">choose from library</span></div>
+      </div>
+    </div>
+    <div class="hint warn" style="margin:-6px 0 10px">Frame anchors select the FL2VA path and
+      cannot be combined with ordered references. Clear the 5 references to enable them.</div>
+
+    <div class="field">
+      <label>Seed <span class="flag">--seed</span></label>
+      <div class="row"><input type="text" value="42"><span class="chip" style="flex:0 0 auto">random</span></div>
+    </div>
+
+    <button class="submit">Generate video</button>
+    <details class="sect" style="margin-top:8px;margin-bottom:0"><summary>Command this will run</summary>
+    <div class="inner"><div class="cmd" style="margin-top:0">./h3 -d $H3_MODEL_DIR -p "A red fox walks through fresh snow…" --width 512 --height 512 --frames 124 --steps 20 --layers 45 --reuse 2 --token-reduction --seed 42 --preview-dir data/jobs/13/preview -o data/jobs/13/out.mp4</div></div></details>
+  </div>
+
+  <!-- ─────────────── ADVANCED ─────────────── -->
+  <div class="body" data-panel="advanced" hidden>
+    <details class="sect" open><summary>Output canvas</summary><div class="inner">
+      <div class="row">
+        <div><label>Width <span class="flag">--width</span></label><input type="number" value="512"></div>
+        <div><label>Height <span class="flag">--height</span></label><input type="number" value="512"></div>
+      </div>
+      <div class="hint">Multiples of 32, at least 32, product ≤ 768 × 1344 = 1 032 192 px.</div>
+      <div class="check" style="margin-top:9px"><input type="checkbox" checked><span class="txt">
+        <b>Lower internal canvas</b> <span class="flag">--render-width</span> <span class="flag">--render-height</span></span></div>
+      <div class="row">
+        <div><input type="number" value="384"></div><div><input type="number" value="384"></div>
+      </div>
+      <div class="hint">Set both or neither, same aspect ratio as the output, multiples of 32,
+        never larger than the output. Model and VAE run at this size, then upscale.</div>
+      <div class="field" style="margin-top:13px">
+        <label>Output file <span class="flag">--output</span></label>
+        <input type="text" value="data/jobs/13/out.mp4" disabled class="disabled">
+        <div class="hint">Assigned by the server. Empty disables MP4 encoding (<code>-o ''</code>).</div>
+      </div>
+      <div class="check"><input type="checkbox"><span class="txt">
+        <b>Write frames as PPM</b> <span class="flag">--frames-dir</span>
+        <div class="hint">Final frames only; denoising previews are not written here.</div></span></div>
+      <div class="check"><input type="checkbox"><span class="txt">
+        <b>Profile phases</b> <span class="flag">--profile</span>
+        <div class="hint">Per-phase wall time, peak tensor storage, dispatch counts.</div></span></div>
+    </div></details>
+
+    <details class="sect" open><summary>Duration</summary><div class="inner">
+      <div class="row">
+        <div><label><input type="radio" name="dur" checked> Seconds <span class="flag">--seconds</span></label>
+          <input type="number" value="4.5" step="0.1"></div>
+        <div><label><input type="radio" name="dur"> Frames <span class="flag">--frames</span></label>
+          <input type="number" value="124" class="disabled" disabled></div>
+      </div>
+      <div class="hint">Mutually exclusive. 4.5 s → 124 frames = 5.167 s. Requests round up to
+        5 + 17n; below 22 frames generation is refused (one 22-frame decoder chunk minimum),
+        above 362 frames it is out of range.</div>
+    </div></details>
+
+    <details class="sect" open><summary>Sampler</summary><div class="inner">
+      <div class="row">
+        <div><label>Steps <span class="flag">--steps</span></label><input type="number" value="20">
+          <div class="hint">2 … 1000</div></div>
+        <div><label>DiT blocks <span class="flag">--layers</span></label><input type="number" value="45">
+          <div class="hint">35 … 50 — 50 exact, 45 fast, 40 aggressive</div></div>
+      </div>
+      <div class="row" style="margin-top:11px">
+        <div><label><input type="radio" name="reuse" checked> Denoiser reuse <span class="flag">--reuse</span></label>
+          <input type="number" value="2"><div class="hint">1 close, 2 fast, 3 aggressive</div></div>
+        <div><label><input type="radio" name="reuse"> Core reuse <span class="flag">--core-reuse</span></label>
+          <input type="number" value="4" disabled class="disabled"><div class="hint">1 exact, 4 fast, 6 aggressive</div></div>
+      </div>
+      <div class="hint warn">Mutually exclusive: core reuse and denoiser reuse cannot both exceed 1.</div>
+      <div class="check" style="margin-top:9px"><input type="checkbox" checked><span class="txt">
+        <b>Token reduction</b> <span class="flag">--token-reduction</span>
+        <div class="hint">Pairs horizontal video tokens in middle DiT blocks. Keep off at 256 square,
+          and do not combine with both <code>--layers 40</code> and <code>--reuse 3</code>.</div></span></div>
+    </div></details>
+
+    <details class="sect"><summary>Memory and backend</summary><div class="inner">
+      <div class="check"><input type="checkbox"><span class="txt">
+        <b>SSD streaming</b> <span class="flag">--ssd-streaming</span>
+        <div class="hint">Exact low-memory mode: GB10 DiT peak 27.06 GB → 1.63 GB, load+denoise +37.6 %.</div></span></div>
+      <div class="check disabled"><input type="checkbox" disabled><span class="txt">
+        <b>int8 row FC2</b> <span class="flag">--use-int8-row-fc2</span>
+        <div class="hint">Metal/M5 only — a measured no-op on this CUDA backend. Also incompatible with
+          SSD streaming and with the BF16 MLP.</div></span></div>
+      <div class="check"><input type="checkbox"><span class="txt">
+        <b>Reference RoPE</b> <span class="flag">--use-reference-rope</span>
+        <div class="hint">Restores the released 256×256 spatial grid for parity checks.</div></span></div>
+    </div></details>
+
+    <details class="sect"><summary>Parity and debug flags <span class="count">10</span></summary><div class="inner">
+      <div class="hint" style="margin-bottom:7px">Force close-reference implementations. Slower by
+        design; useful only to reproduce reference numerics.</div>
+      <div class="grid2">
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-bf16-mlp</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-bf16-qkv</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-bf16-attention-output</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-row-major-attention-output</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-unfused-int8-inputs</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-unfused-qkv-rope</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-scalar-qkv-rms</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-uncached-int8-scales</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-dynamic-fc1-k</span></span></div>
+        <div class="check"><input type="checkbox"><span class="txt"><span class="flag">--use-slower-grouped-quantizer</span></span></div>
+      </div>
+    </div></details>
+
+    <details class="sect"><summary>Post-processing</summary><div class="inner">
+      <div class="check disabled"><input type="checkbox" disabled><span class="txt">
+        <b>Face replacement</b> <code>faceswap</code>
+        <div class="hint">Unavailable: no model and no runtime installed. Set <code>H3_FACESWAP_CMD</code>
+          to an executable to enable it. This repository ships neither models nor download URLs;
+          known model licences are non-commercial/research only.</div></span></div>
+    </div></details>
+
+    <details class="sect"><summary>Not exposed by this UI <span class="count">5</span></summary><div class="inner">
+      <ul class="rules">
+        <li><span class="flag">--model-dir</span> and <span class="flag">--info</span> — server configuration, from <code>H3_MODEL_DIR</code>.</li>
+        <li><span class="flag">--show</span> and <span class="flag">--zoom</span> — Kitty/Ghostty terminal graphics; the browser uses <span class="flag">--preview-dir</span> instead.</li>
+        <li><span class="flag">--help</span> — CLI only.</li>
+      </ul>
+    </div></details>
+
+    <button class="submit">Generate video</button>
+  </div>
+
+  <!-- ─────────────── REFERENCES ─────────────── -->
+  <div class="body" data-panel="refs" hidden>
+    <div class="field">
+      <label>Image sizing <span class="flag">--ref-image-size</span></label>
+      <div class="chips"><span class="chip" aria-pressed="true">match</span><span class="chip">max</span></div>
+    </div>
+    <div class="field">
+      <label>Ordered references <span class="flag">--ref-*</span></label>
+      <div class="hint" style="margin-bottom:8px">Command-line order is preserved and matters.
+        Ordered references select the Ref2VA checkpoint.</div>
+      <div class="reflist">
+        <div class="ref"><span class="k">image</span><span class="n">fox.png</span>
+          <span class="m">720×720 · --ref-image</span><span class="btns">↑ ↓ ✕</span></div>
+        <div class="ref"><span class="k">video</span><span class="n">clip.mp4</span>
+          <span class="m">keeps audio · --ref-video</span><span class="btns">↑ ↓ ✕</span></div>
+        <div class="ref"><span class="k">video</span><span class="n">silent.mp4</span>
+          <span class="m">drops audio · --ref-silent-video</span><span class="btns">↑ ↓ ✕</span></div>
+        <div class="ref"><span class="k">vid+aud</span><span class="n">scene.mp4 + music.wav</span>
+          <span class="m">--ref-video-audio</span><span class="btns">↑ ↓ ✕</span></div>
+        <div class="ref"><span class="k">audio</span><span class="n">music.wav</span>
+          <span class="m">6.2 s · --ref-audio</span><span class="btns">↑ ↓ ✕</span></div>
+      </div>
+      <div class="counters">
+        <span>total <b>5</b>/12</span><span>images <b>1</b>/9</span>
+        <span>videos <b>3</b>/3</span><span>audio inputs <b>3</b>/3</span>
+        <span>audio duration <b>10.4</b>/15 s</span>
+      </div>
+      <div class="chips" style="margin-top:11px">
+        <span class="chip">+ image</span><span class="chip">+ video</span>
+        <span class="chip">+ silent video</span><span class="chip">+ video&nbsp;+&nbsp;audio</span>
+        <span class="chip">+ audio</span><span class="chip">choose from library</span>
+      </div>
+      <ul class="rules">
+        <li>At most 12 references: 9 images, 3 videos, 3 audio inputs.</li>
+        <li>Audio needs at least one image or video reference alongside it.</li>
+        <li>Standalone audio must last at least 2 s at 32 kHz; total reference audio ≤ 15 s.</li>
+        <li>A video soundtrack is truncated to the output duration and needs ≥ 2 s, so request at least 56 output frames.</li>
+        <li>References cannot be combined with <span class="flag">--first-frame</span> / <span class="flag">--last-frame</span>.</li>
+      </ul>
+      <div class="hint err">Blocked: videos 3/3 and audio inputs 3/3 are full — remove one before adding another.</div>
+    </div>
+    <button class="submit">Generate video</button>
+  </div>
+</section>
+
+<!-- ─────────────── RIGHT COLUMN ─────────────── -->
+<div style="display:grid;gap:18px">
+  <section class="panel">
+    <h2>Queue</h2>
+    <div class="job">
+      <div class="top"><span class="st run">running</span>
+        <span class="ttl">#13 fox in snow</span><span class="x">cancel</span></div>
+      <div class="prev">live preview<br>denoise step 7 of 20</div>
+      <div class="bar"><span style="width:41%"></span></div>
+      <div class="meta">41 % · denoise 7/20 · elapsed 03:41 · remaining ~05:20</div>
+    </div>
+    <div class="job">
+      <div class="top"><span class="st que">queued</span>
+        <span class="ttl">#14 surfer inside a wave</span><span class="x">remove</span></div>
+      <div class="meta">512×512 · 124f · steps 20 · position 1 of 1</div>
+    </div>
+    <div class="job">
+      <div class="top"><span class="st fail">failed</span>
+        <span class="ttl">#12 portrait 1400×800</span><span class="x">dismiss</span></div>
+      <div class="err-box">h3: canvas exceeds the released 768*1344 pixel limit</div>
+      <div class="actions"><button>Fix and resubmit</button><button>Show log</button></div>
+    </div>
+    <div class="job">
+      <div class="top"><span class="st done">done</span>
+        <span class="ttl">#11 red cube on white</span><span class="x">delete</span></div>
+      <div class="meta">512×512 · 22f · 0.917 s · seed 42 · 00:41</div>
+      <div class="actions"><button>Play</button><button>Download</button><button>Reuse settings</button></div>
+    </div>
+    <div class="note">One job runs at a time: a single GPU, 27 GB DiT peak.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Library</h2>
+    <div class="body">
+      <div class="gal">
+        <div class="it"><div class="th"></div><div class="cap">fox.png · 720×720</div></div>
+        <div class="it"><div class="th"></div><div class="cap">portrait.jpg · 1024×1536</div></div>
+        <div class="it"><div class="th"></div><div class="cap">clip.mp4 · 4.2 s</div></div>
+        <div class="it"><div class="th"></div><div class="cap">music.wav · 6.2 s</div></div>
+      </div>
+      <div class="hint" style="margin-top:9px">Uploaded assets stay selectable for later jobs as
+        first/last frame or as ordered references.</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Gallery</h2>
+    <div class="body">
+      <div class="gal">
+        <div class="it"><div class="th"></div><div class="cap">#11 cube · 00:41</div></div>
+        <div class="it"><div class="th"></div><div class="cap">#09 surfer · 06:12</div></div>
+        <div class="it"><div class="th"></div><div class="cap">#08 hummingbird · 05:48</div></div>
+        <div class="it"><div class="th"></div><div class="cap">#07 fox 256² · 01:03</div></div>
+      </div>
+    </div>
+  </section>
+</div>
+</main>
+
+<script>
+const tabs = document.querySelectorAll(".tab");
+for (const tab of tabs) {
+  tab.addEventListener("click", () => {
+    for (const other of tabs) {
+      const on = other === tab;
+      other.setAttribute("aria-selected", String(on));
+      document.querySelector(`[data-panel="${other.dataset.tab}"]`).hidden = !on;
+    }
+  });
+}
+for (const group of document.querySelectorAll(".chips")) {
+  group.addEventListener("click", (event) => {
+    const chip = event.target.closest(".chip");
+    if (!chip) return;
+    for (const other of group.querySelectorAll(".chip")) {
+      other.setAttribute("aria-pressed", String(other === chip));
+    }
+  });
+}
+</script>
+</body>
+</html>

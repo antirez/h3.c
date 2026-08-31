@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en" data-state="composing">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h3.c studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..600&family=Martian+Mono:wght@300..700&display=swap" rel="stylesheet">
+<style>
+/* ── tokens ────────────────────────────────────────────────────────────────
+   Palette taken from SMPTE colour bars, the most recognisable artefact of
+   video work. The neutrals do the work; the magenta is spent in one place:
+   the primary action and the running state.                                */
+:root{
+  --ground:#EDEEF0; --surface:#FFFFFF; --sunken:#E4E6E9;
+  --line:#D3D7DC; --line-strong:#8F959D;
+  --ink:#14171A; --muted:#5C6672;
+  --accent:#B5157C; --accent-ink:#FFFFFF; --accent-wash:#FBEAF4;
+  --ready:#0E7C86; --ready-wash:#E3F1F2;
+  --fail:#C1362F; --fail-wash:#FBE9E8;
+  --sans:"Instrument Sans",ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+  --mono:"Martian Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --radius:10px;
+  --shadow:0 1px 2px rgba(20,23,26,.06),0 8px 24px -12px rgba(20,23,26,.18);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#15181C; --surface:#1C2026; --sunken:#12151A;
+    --line:#2B313A; --line-strong:#6B727B;
+    --ink:#E9EBEE; --muted:#8A94A0;
+    --accent:#E8479F; --accent-ink:#1A0512; --accent-wash:#2A1220;
+    --ready:#3FBCC4; --ready-wash:#12262A;
+    --fail:#E5646B; --fail-wash:#2A1618;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#15181C; --surface:#1C2026; --sunken:#12151A;
+  --line:#2B313A; --line-strong:#6B727B;
+  --ink:#E9EBEE; --muted:#8A94A0;
+  --accent:#E8479F; --accent-ink:#1A0512; --accent-wash:#2A1220;
+  --ready:#3FBCC4; --ready-wash:#12262A;
+  --fail:#E5646B; --fail-wash:#2A1618;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.6);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font-family:var(--sans);font-size:15px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0;font-weight:600;text-wrap:balance}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+
+/* ── shell ──────────────────────────────────────────────────────────────── */
+.bar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:12px 22px;border-bottom:1px solid var(--line);background:var(--surface);
+}
+.wordmark{font-size:15px;letter-spacing:-.015em}
+.wordmark b{font-weight:700}
+.wordmark span{color:var(--muted);font-weight:400}
+.status{
+  display:inline-flex;align-items:center;gap:7px;margin-left:auto;
+  font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted);
+}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ready)}
+[data-state="rendering"] .dot{background:var(--accent)}
+.ghost{
+  font-family:var(--mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line);border-radius:999px;padding:4px 11px;
+}
+.ghost:hover{border-color:var(--line-strong);color:var(--ink)}
+
+main{max-width:1180px;margin:0 auto;padding:34px 22px 22px}
+.stage{max-width:720px;margin:0 auto}
+
+/* ── composing ──────────────────────────────────────────────────────────── */
+[data-state="rendering"] .composing{display:none}
+[data-state="composing"] .rendering{display:none}
+
+.ask{font-size:26px;letter-spacing:-.02em;margin-bottom:14px}
+.prompt{
+  width:100%;min-height:88px;resize:vertical;padding:14px 15px;
+  font:inherit;color:var(--ink);background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);
+}
+.prompt::placeholder{color:var(--muted)}
+.prompt:focus{border-color:var(--accent);outline:none}
+.tries{display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;align-items:baseline}
+.tries em{font-style:normal;color:var(--muted);font-size:13px}
+.try{
+  font-size:13px;color:var(--ink);border:1px solid var(--line);
+  border-radius:999px;padding:3px 11px;background:var(--surface);
+}
+.try:hover{border-color:var(--accent);color:var(--accent)}
+
+.block{margin-top:30px}
+.label{
+  display:flex;align-items:baseline;gap:10px;margin-bottom:10px;
+  font-family:var(--mono);font-size:10.5px;font-weight:500;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+}
+.label .flag{font-size:10px;letter-spacing:0;text-transform:none;opacity:.75}
+.note{color:var(--muted);font-size:13px;margin-top:9px}
+.note b{color:var(--ink);font-weight:600}
+
+/* the timecode readout: the page's memorable type treatment */
+.timecode{
+  display:flex;align-items:baseline;gap:12px;margin-bottom:6px;
+}
+.timecode .value{
+  font-family:var(--mono);font-weight:500;font-size:clamp(30px,6vw,44px);
+  letter-spacing:-.04em;font-variant-numeric:tabular-nums;line-height:1;
+}
+.timecode .unit{font-family:var(--mono);font-size:11px;color:var(--muted)}
+input[type=range]{width:100%;accent-color:var(--accent)}
+
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media (max-width:620px){.cards{grid-template-columns:1fr}}
+.card{
+  text-align:left;padding:13px 14px;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);
+}
+.card:hover{border-color:var(--line-strong)}
+.card[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-wash)}
+.card .name{font-weight:600;font-size:14px;display:block}
+.cost{
+  font-family:var(--mono);font-size:12px;color:var(--accent);
+  font-variant-numeric:tabular-nums;
+}
+.card .cost{display:block;margin-top:3px}
+.shape .cost{font-size:10px}
+.note .cost{margin-left:6px}
+.card .what{color:var(--muted);font-size:12.5px;display:block;margin-top:5px}
+.card[aria-pressed="true"] .what{color:var(--ink)}
+
+.shapes{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.shape{
+  display:flex;flex-direction:column;align-items:center;gap:7px;
+  padding:11px 13px;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);
+}
+.shape:hover{border-color:var(--line-strong)}
+.shape[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-wash)}
+.shape i{display:block;background:var(--line-strong);border-radius:2px}
+.shape[aria-pressed="true"] i{background:var(--accent)}
+.shape .n{font-size:12.5px;font-weight:600}
+.shape .d{font-family:var(--mono);font-size:10px;color:var(--muted)}
+
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:620px){.pair{grid-template-columns:1fr}}
+.slot{
+  display:flex;align-items:center;gap:11px;padding:12px 13px;
+  background:var(--surface);border:1px dashed var(--line-strong);
+  border-radius:var(--radius);width:100%;text-align:left;
+}
+.slot .plus{
+  width:26px;height:26px;flex:0 0 26px;border-radius:6px;
+  border:1px solid var(--line);display:grid;place-items:center;
+  color:var(--muted);font-size:16px;line-height:1;
+}
+.slot:hover{border-color:var(--accent)}
+.slot:hover .plus{color:var(--accent);border-color:var(--accent)}
+.slot .t{font-size:13.5px}
+.slot .s{display:block;color:var(--muted);font-size:12px}
+
+.variation{display:flex;align-items:center;gap:12px}
+.digits{
+  font-family:var(--mono);font-size:19px;letter-spacing:.22em;
+  font-variant-numeric:tabular-nums;padding:7px 12px;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);
+}
+.shuffle{
+  border:1px solid var(--line);border-radius:var(--radius);padding:8px 13px;
+  font-size:13px;background:var(--surface);
+}
+.shuffle:hover{border-color:var(--accent);color:var(--accent)}
+
+.go{
+  display:flex;align-items:center;gap:16px;margin-top:32px;flex-wrap:wrap;
+  padding-top:24px;border-top:1px solid var(--line);
+}
+.make{
+  background:var(--accent);color:var(--accent-ink);font-weight:600;font-size:15px;
+  padding:13px 26px;border-radius:var(--radius);box-shadow:var(--shadow);
+}
+.make:hover{filter:brightness(1.08)}
+.total{font-family:var(--mono);font-size:13px;color:var(--muted)}
+.total b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ── progressive disclosure ─────────────────────────────────────────────── */
+.level{
+  margin-top:14px;border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--surface);
+}
+.level>summary{
+  cursor:pointer;list-style:none;padding:12px 15px;display:flex;
+  align-items:center;gap:10px;font-weight:600;font-size:14px;
+}
+.level>summary::-webkit-details-marker{display:none}
+.level>summary::after{content:"▾";margin-left:auto;color:var(--muted)}
+.level[open]>summary::after{content:"▴"}
+.level>summary small{font-weight:400;color:var(--muted);font-size:12.5px}
+.inner{padding:0 15px 16px;border-top:1px solid var(--line);padding-top:14px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:620px){.row{grid-template-columns:1fr}}
+.field{margin-bottom:14px}
+.field>span{display:block;font-size:13.5px;font-weight:600;margin-bottom:3px}
+.field .flag{font-family:var(--mono);font-size:10.5px;color:var(--muted);font-weight:400}
+.field p{margin:3px 0 6px;color:var(--muted);font-size:12.5px}
+.field .delta{font-family:var(--mono);font-size:11.5px;color:var(--accent)}
+input[type=number],input[type=text],select{
+  width:100%;padding:8px 10px;font:inherit;font-size:14px;color:var(--ink);
+  background:var(--ground);border:1px solid var(--line);border-radius:8px;
+}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:2px 16px}
+@media (max-width:620px){.checks{grid-template-columns:1fr}}
+.check{display:flex;gap:9px;align-items:flex-start;padding:5px 0;font-size:13px}
+.check input{margin-top:3px;accent-color:var(--accent)}
+.check code{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.check .why{display:block;color:var(--muted);font-size:12px}
+.off{opacity:.55}
+
+/* ── the error, in plain words ──────────────────────────────────────────── */
+.problem{
+  margin-top:18px;padding:13px 15px;border-radius:var(--radius);
+  background:var(--fail-wash);border:1px solid var(--fail);
+}
+.problem>b{display:block;font-size:14px;margin-bottom:2px}
+.problem p{margin:0;font-size:13px}
+.problem details{margin-top:8px}
+.problem summary{
+  font-family:var(--mono);font-size:11px;color:var(--muted);cursor:pointer;
+}
+.problem pre{
+  margin:6px 0 0;font-family:var(--mono);font-size:11px;color:var(--muted);
+  white-space:pre-wrap;
+}
+
+/* ── rendering: the signature ───────────────────────────────────────────── */
+.summary{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding-bottom:16px;margin-bottom:22px;border-bottom:1px solid var(--line);
+}
+.summary .quote{font-size:15px;flex:1;min-width:0}
+.summary .meta{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.stop{
+  border:1px solid var(--line);border-radius:999px;padding:6px 15px;font-size:13px;
+}
+.stop:hover{border-color:var(--fail);color:var(--fail)}
+
+.develop{display:flex;gap:20px;align-items:stretch}
+@media (max-width:620px){.develop{gap:12px}}
+/* the perforation rail: one mark per phase, in order, filled as it completes */
+.rail{display:flex;flex-direction:column;gap:6px;padding-top:2px}
+.perf{
+  width:12px;height:22px;border-radius:3px;border:1.5px solid var(--line-strong);
+  background:transparent;
+}
+.perf.done{background:var(--accent);border-color:var(--accent)}
+.perf.now{
+  border-color:var(--accent);
+  background:linear-gradient(var(--accent) 50%,transparent 50%);
+  box-shadow:0 0 0 3px var(--accent-wash);
+  animation:breathe 1.9s ease-in-out infinite;
+}
+@keyframes breathe{50%{opacity:.55}}
+@media (prefers-reduced-motion: reduce){.perf.now{animation:none}}
+
+.frame{
+  flex:1;min-width:0;aspect-ratio:16/9;border-radius:var(--radius);
+  border:1px solid var(--line);background:var(--sunken);
+  overflow:hidden;position:relative;box-shadow:var(--shadow);
+}
+.frame svg{width:100%;height:100%;display:block}
+.frame .stepmark{
+  position:absolute;left:12px;bottom:11px;font-family:var(--mono);font-size:11px;
+  color:#fff;background:rgba(20,23,26,.62);padding:3px 9px;border-radius:999px;
+}
+.phase{margin-top:18px}
+.phase .said{font-size:19px;letter-spacing:-.01em}
+.phase .clock{
+  display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;
+  font-family:var(--mono);font-size:12.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+.phase .clock b{color:var(--ink);font-weight:500}
+.phase .tech{
+  margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--muted);
+}
+
+/* ── takes ──────────────────────────────────────────────────────────────── */
+.takes{max-width:1180px;margin:38px auto 0;padding:20px 22px 30px;
+  border-top:1px solid var(--line)}
+.takes h2{
+  font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:12px;
+}
+.strip{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px}
+.take{
+  flex:0 0 190px;border:1px solid var(--line);border-radius:var(--radius);
+  overflow:hidden;background:var(--surface);text-align:left;
+}
+.take:hover{border-color:var(--line-strong)}
+.take .thumb{aspect-ratio:16/9;background:var(--sunken);display:block;width:100%}
+.take .cap{
+  padding:8px 10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);
+  display:flex;justify-content:space-between;gap:8px;
+}
+.take .cap b{color:var(--ink);font-weight:500}
+.empty{
+  border:1px dashed var(--line-strong);border-radius:var(--radius);
+  padding:22px;text-align:center;color:var(--muted);font-size:13.5px;
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <span class="wordmark"><b>h3.c</b> <span>studio</span></span>
+  <span class="ghost" id="theme" role="button" tabindex="0">light / dark</span>
+  <span class="ghost" id="flip" role="button" tabindex="0">show a render</span>
+  <span class="status"><span class="dot"></span><span id="machine">NVIDIA GB10 · ready</span></span>
+</header>
+
+<main>
+  <!-- ══ composing ═══════════════════════════════════════════════════════ -->
+  <section class="stage composing">
+    <h1 class="ask">What should the video show?</h1>
+    <textarea class="prompt" placeholder="A red fox walks through fresh snow in a pine forest, tracking shot.">A red fox walks through fresh snow in a pine forest, tracking shot.</textarea>
+    <div class="tries">
+      <em>Try:</em>
+      <button class="try">a fox in the snow</button>
+      <button class="try">a surfer inside a wave</button>
+      <button class="try">a red cube turning on white</button>
+    </div>
+
+    <div class="block">
+      <div class="label">How long <span class="flag">--seconds</span></div>
+      <div class="timecode">
+        <span class="value">00:04.5</span>
+        <span class="unit">seconds · 24 fps</span>
+      </div>
+      <input type="range" min="0.9" max="15.1" step="0.1" value="4.5" aria-label="Length in seconds">
+      <p class="note">Videos come in fixed lengths. The nearest to 4.5 s is
+        <b>4.5 s</b> — 107 frames. <span class="cost">≈ 6 min to make</span></p>
+    </div>
+
+    <div class="block">
+      <div class="label">Shape <span class="flag">--width --height</span></div>
+      <div class="shapes">
+        <button class="shape" aria-pressed="false">
+          <i style="width:44px;height:25px"></i><span class="n">Widescreen</span>
+          <span class="d">864×480</span><span class="cost">≈ 9 min</span>
+        </button>
+        <button class="shape" aria-pressed="true">
+          <i style="width:32px;height:32px"></i><span class="n">Square</span>
+          <span class="d">512×512</span><span class="cost">≈ 6 min</span>
+        </button>
+        <button class="shape" aria-pressed="false">
+          <i style="width:25px;height:44px"></i><span class="n">Vertical</span>
+          <span class="d">480×864</span><span class="cost">≈ 9 min</span>
+        </button>
+        <button class="shape" aria-pressed="false" style="border-style:dashed">
+          <i style="width:34px;height:26px;background:none;border:1px dashed var(--line-strong)"></i>
+          <span class="n">More sizes</span><span class="d">up to 768p</span>
+          <span class="cost">up to ≈ 40 min</span>
+        </button>
+      </div>
+      <p class="note">Bigger pictures take longer — the times above are for the
+        quality picked below. The largest this model was released for is
+        <b>1344 × 768</b>.</p>
+    </div>
+
+    <div class="block">
+      <div class="label">Quality <span class="flag">--steps --layers --reuse</span></div>
+      <div class="cards">
+        <button class="card" aria-pressed="false">
+          <span class="name">Quick look</span>
+          <span class="cost">≈ 2 min</span>
+          <span class="what">Rough, for checking the idea.</span>
+        </button>
+        <button class="card" aria-pressed="true">
+          <span class="name">Balanced</span>
+          <span class="cost">≈ 6 min</span>
+          <span class="what">Good detail, sensible wait.</span>
+        </button>
+        <button class="card" aria-pressed="false">
+          <span class="name">Best quality</span>
+          <span class="cost">≈ 18 min</span>
+          <span class="what">Every pass, nothing skipped.</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="label">Start and end <span class="flag">--first-frame --last-frame</span></div>
+      <div class="pair">
+        <button class="slot"><span class="plus">+</span>
+          <span class="t">Start from a photo<span class="s">the first frame</span></span>
+        </button>
+        <button class="slot"><span class="plus">+</span>
+          <span class="t">End on a photo<span class="s">the last frame</span></span>
+        </button>
+      </div>
+      <p class="note">Optional. Add a photo and the video begins — or ends — there.</p>
+    </div>
+
+    <div class="block">
+      <div class="label">Variation <span class="flag">--seed</span></div>
+      <div class="variation">
+        <span class="digits">42</span>
+        <button class="shuffle">Try another</button>
+        <span class="note" style="margin:0">Same settings and same variation give
+          the same video, every time.</span>
+      </div>
+    </div>
+
+    <div class="problem" role="status">
+      <b>That size is larger than the model can make.</b>
+      <p>The largest is 1344 × 768. Pick a smaller shape, or use <b>More sizes</b>
+        to set one by hand.</p>
+      <details>
+        <summary>what h3 reported</summary>
+        <pre>h3: canvas exceeds the released 768*1344 pixel limit</pre>
+      </details>
+    </div>
+
+    <div class="go">
+      <button class="make">Make the video</button>
+      <span class="total">about <b>6 min</b> on this machine · nothing else is queued</span>
+    </div>
+
+    <details class="level">
+      <summary>Fine-tune <small>quality, length and size, one control at a time</small></summary>
+      <div class="inner">
+        <div class="row">
+          <div class="field">
+            <span>Detail passes <span class="flag">--steps</span></span>
+            <p>How many times the picture is refined. More passes, more detail.</p>
+            <input type="number" value="20">
+            <span class="delta">each pass adds ≈ 12 s</span>
+          </div>
+          <div class="field">
+            <span>Model depth <span class="flag">--layers</span></span>
+            <p>How much of the model runs. Less is faster and slightly looser.</p>
+            <input type="number" value="45">
+            <span class="delta">45 instead of 50 saves ≈ 40 s</span>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <span>How often it redraws <span class="flag">--reuse</span></span>
+            <p>Redrawing at every pass is closest to the reference. Less often is faster, and the framing can shift.</p>
+            <select><option>Every pass — closest to reference</option>
+              <option selected>Every other pass — validated fast setting</option>
+              <option>Rarely — preview quality</option></select>
+            <span class="delta">saves ≈ 2 min at this length</span>
+          </div>
+          <div class="field">
+            <span>Work smaller, then enlarge <span class="flag">--render-width</span></span>
+            <p>Draw at a smaller size and scale up. Much faster, less fine detail.</p>
+            <select><option selected>Off — draw at full size</option>
+              <option>384 × 384, enlarged to 512 × 512</option>
+              <option>320 × 320, enlarged to 512 × 512</option></select>
+            <span class="delta">saves ≈ 3 min</span>
+          </div>
+        </div>
+        <div class="check">
+          <input type="checkbox" checked>
+          <span>Watch it being made <code>--preview-dir</code>
+            <span class="why">Shows a picture after every pass. Adds about 15 s.</span></span>
+        </div>
+        <div class="check">
+          <input type="checkbox">
+          <span>Pair up detail while drawing <code>--token-reduction</code>
+            <span class="why">Faster, but the composition can drift. Leave off at small sizes.</span></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="level">
+      <summary>Expert <small>every h3 flag, named as it is on the command line</small></summary>
+      <div class="inner">
+        <div class="row">
+          <div class="field"><span>Text and variation <span class="flag">--prompt --seed</span></span>
+            <p>The prompt is sent as written. The same prompt, settings and seed
+              produce the same video on the same build.</p></div>
+          <div class="field"><span>References <span class="flag">--ref-image --ref-video --ref-silent-video --ref-video-audio --ref-audio --ref-image-size</span></span>
+            <p>Ordered Ref2VA references: at most 12 — 9 images, 3 videos, 3 audio
+              inputs. Audio needs a picture or a clip beside it, lasts 2–15 s, and
+              cannot be combined with a start or end frame.</p></div>
+          <div class="field"><span>Duration and canvas <span class="flag">--frames --seconds --width --height --render-width --render-height</span></span>
+            <p>Frames round up to 5 + 17n, 22…362. Sides are multiples of 32 and the
+              area stays under 768 × 1344.</p></div>
+        </div>
+        <div class="field"><span>Sampler <span class="flag">--steps --layers --reuse --core-reuse --token-reduction</span></span>
+          <p>Steps 2…1000, layers 35…50, reuse 1…3, core reuse 1…6. Reuse and core
+            reuse cannot both exceed 1.</p></div>
+        <div class="checks">
+          <div class="check"><input type="checkbox"><span>SSD streaming <code>--ssd-streaming</code>
+            <span class="why">27.06 GB → 1.63 GB of GPU memory, about 38 % slower.</span></span></div>
+          <div class="check off"><input type="checkbox" disabled><span>int8 row FC2 <code>--use-int8-row-fc2</code>
+            <span class="why">Metal/M5 only — measured as a no-op on CUDA.</span></span></div>
+          <div class="check"><input type="checkbox"><span>Reference RoPE <code>--use-reference-rope</code>
+            <span class="why">Restores the released 256 × 256 grid for parity checks.</span></span></div>
+          <div class="check"><input type="checkbox"><span>Write frames <code>--frames-dir</code>
+            <span class="why">Every final frame as a PPM file.</span></span></div>
+          <div class="check"><input type="checkbox"><span>Profile phases <code>--profile</code>
+            <span class="why">Per-phase wall time and peak memory in the log.</span></span></div>
+          <div class="check off"><input type="checkbox" disabled><span>Face replacement <code>faceswap</code>
+            <span class="why">Unavailable: no model and no runtime installed.</span></span></div>
+        </div>
+        <div class="field" style="margin-top:8px"><span>Parity flags <span class="flag">10</span></span>
+          <p>Force close-reference implementations, slower by design:
+            <code style="font-family:var(--mono);font-size:11px">--use-slower-bf16-mlp --use-slower-bf16-qkv
+            --use-slower-bf16-attention-output --use-slower-row-major-attention-output
+            --use-slower-unfused-int8-inputs --use-slower-unfused-qkv-rope
+            --use-slower-scalar-qkv-rms --use-slower-uncached-int8-scales
+            --use-slower-dynamic-fc1-k --use-slower-grouped-quantizer</code></p></div>
+        <div class="field"><span>Set by the server <span class="flag">--model-dir --output --info</span></span>
+          <p>Not exposed: <code style="font-family:var(--mono);font-size:11px">--show</code> and
+            <code style="font-family:var(--mono);font-size:11px">--zoom</code> draw in a terminal, which a browser has none of.</p></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ══ rendering ═══════════════════════════════════════════════════════ -->
+  <section class="stage rendering">
+    <div class="summary">
+      <span class="quote">“A red fox walks through fresh snow in a pine forest”</span>
+      <span class="meta">4.5 s · widescreen · variation 42</span>
+      <button class="stop">Stop</button>
+    </div>
+
+    <div class="develop">
+      <div class="rail" aria-hidden="true">
+        <span class="perf done" title="Reading the prompt"></span>
+        <span class="perf done" title="Understanding the prompt"></span>
+        <span class="perf done" title="Loading the model"></span>
+        <span class="perf now" title="Painting the picture"></span>
+        <span class="perf" title="Adding the sound"></span>
+        <span class="perf" title="Assembling the video"></span>
+      </div>
+      <div class="frame">
+        <svg viewBox="0 0 320 180" preserveAspectRatio="xMidYMid slice" role="img"
+             aria-label="The picture emerging from noise, pass 7 of 20">
+          <defs>
+            <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.9"
+              numOctaves="3" seed="7"/><feColorMatrix type="saturate" values="0.35"/></filter>
+            <radialGradient id="subject" cx="46%" cy="58%" r="42%">
+              <stop offset="0%" stop-color="#D9752F"/>
+              <stop offset="55%" stop-color="#B4551F" stop-opacity=".85"/>
+              <stop offset="100%" stop-color="#7C93A8" stop-opacity="0"/>
+            </radialGradient>
+            <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#AFC2D2"/><stop offset="100%" stop-color="#E8EDF1"/>
+            </linearGradient>
+          </defs>
+          <rect width="320" height="180" fill="url(#ground)"/>
+          <ellipse cx="150" cy="108" rx="78" ry="46" fill="url(#subject)"/>
+          <rect width="320" height="180" filter="url(#grain)" opacity=".42"/>
+        </svg>
+        <span class="stepmark">pass 7 of 20</span>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="said">Painting the picture — pass 7 of 20</div>
+      <div class="clock">
+        <span>elapsed <b>00:03:41</b></span>
+        <span>about <b>5 min</b> left</span>
+        <span>41 % done</span>
+      </div>
+      <div class="tech">denoise 7/20 · 864×480 · seed 42</div>
+    </div>
+  </section>
+</main>
+
+<section class="takes">
+  <h2>Takes</h2>
+  <div class="strip">
+    <button class="take"><span class="thumb"></span>
+      <span class="cap"><b>fox in the snow</b><span>4.5 s</span></span></button>
+    <button class="take"><span class="thumb"></span>
+      <span class="cap"><b>surfer</b><span>2.3 s</span></span></button>
+    <button class="take"><span class="thumb"></span>
+      <span class="cap"><b>red cube</b><span>0.9 s</span></span></button>
+    <button class="take"><span class="thumb"></span>
+      <span class="cap"><b>hummingbird</b><span>4.5 s</span></span></button>
+  </div>
+</section>
+
+<script>
+const root = document.documentElement;
+const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+document.getElementById("theme").addEventListener("click", () => {
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : prefersDark.matches;
+  root.dataset.theme = dark ? "light" : "dark";
+});
+document.getElementById("flip").addEventListener("click", () => {
+  const rendering = root.dataset.state === "rendering";
+  root.dataset.state = rendering ? "composing" : "rendering";
+  document.getElementById("flip").textContent =
+    rendering ? "show a render" : "show the form";
+  document.getElementById("machine").textContent =
+    rendering ? "NVIDIA GB10 · ready" : "NVIDIA GB10 · rendering";
+});
+for (const group of document.querySelectorAll(".cards, .shapes")) {
+  group.addEventListener("click", (event) => {
+    const picked = event.target.closest("[aria-pressed]");
+    if (!picked) return;
+    for (const other of group.querySelectorAll("[aria-pressed]")) {
+      other.setAttribute("aria-pressed", String(other === picked));
+    }
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# Optional override that wires an already installed face-swapping runtime into
+# the post-processing stage. It is NOT active by default:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.faceswap.yml up
+#
+# This repository ships no models, no weights and no download URLs. You install
+# the runtime yourself, you check its licence, and you are responsible for the
+# consent of anyone whose face you process. See docs/POSTPROCESSING.md for the
+# contract the executable must satisfy.
+
+services:
+  api:
+    environment:
+      # Path *inside the container* of the executable implementing the
+      # --input/--output contract.
+      H3_FACESWAP_CMD: ${H3_FACESWAP_CMD:?set H3_FACESWAP_CMD to your runtime}
+    volumes:
+      # Mount your own runtime and its models read-only.
+      - ${H3_FACESWAP_DIR:?set H3_FACESWAP_DIR to the runtime directory}:/opt/faceswap:ro

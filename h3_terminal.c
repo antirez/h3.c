@@ -192,7 +192,7 @@ static int encode_png(const uint8_t *pixels, size_t size,
         unlink(raw_path);
         return 0;
     }
-    int output = mkstemps(path, 4);
+    int output = mkstemp(path);
     if (output < 0) {
         fail(error, error_size, "cannot create terminal PNG temporary file: %s",
              strerror(errno));
@@ -205,7 +205,7 @@ static int encode_png(const uint8_t *pixels, size_t size,
     char *arguments[] = {
         "ffmpeg", "-v", "error", "-y", "-f", "rawvideo",
         "-pixel_format", "rgb24", "-video_size", dimensions,
-        "-i", raw_path, "-frames:v", "1", path, NULL
+        "-i", raw_path, "-frames:v", "1", "-f", "image2", path, NULL
     };
     pid_t child = 0;
     int spawn_error = posix_spawnp(&child, "ffmpeg", NULL, NULL,
@@ -261,7 +261,7 @@ static int iterm2_display(const uint8_t *pixels, size_t size,
         fail(error, error_size, "invalid iTerm2 display dimensions");
         return 0;
     }
-    char path[] = "/tmp/h3-terminal-XXXXXX.png";
+    char path[] = "/tmp/h3-terminal-XXXXXX";
     if (!encode_png(pixels, size, width, height, path, error, error_size))
         return 0;
     size_t png_size = 0;

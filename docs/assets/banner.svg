@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="200" viewBox="0 0 720 200" role="img" aria-label="h3c studio — prompt-to-video on your own GPU">
+  <!-- Hero for the README: the lockup of concept A (the approved header
+       mark, 128 px stroke weight) with the wordmark in the app's serif,
+       and the status line in its mono. Same tokens, both themes. -->
+  <style>
+    .frame { stroke: #101317 }
+    .perf  { fill: #101317 }
+    .develop { stroke: #B5157C }
+    .name  { fill: #101317; font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
+             font-size: 88px; letter-spacing: -0.01em }
+    .studio { fill: #5A626B; font-style: italic }
+    .status { fill: #5A626B; font-family: "Martian Mono", ui-monospace, Menlo, monospace;
+              font-size: 15px; font-weight: 300; letter-spacing: 0.05em }
+    @media (prefers-color-scheme: dark) {
+      .frame { stroke: #E9EBEE }
+      .perf  { fill: #E9EBEE }
+      .develop { stroke: #F062AF }
+      .name  { fill: #E9EBEE }
+      .studio { fill: #98A0A9 }
+      .status { fill: #98A0A9 }
+    }
+  </style>
+  <g transform="translate(36 52) scale(3)">
+    <rect class="frame" x="7" y="5" width="20" height="22" rx="3.5" fill="none" stroke-width="1.8"/>
+    <rect class="perf" x="2.5" y="9" width="3.5" height="4.5" rx="1.4"/>
+    <rect class="perf" x="2.5" y="18.5" width="3.5" height="4.5" rx="1.4"/>
+    <path class="develop" d="M13 27v-3.5a2 2 0 0 1 2-2h12" fill="none" stroke-width="1.8" stroke-linecap="round"/>
+  </g>
+  <text class="name" x="158" y="126">h3c <tspan class="studio">studio</tspan></text>
+  <text class="status" x="160" y="162">PROMPT-TO-VIDEO ON YOUR OWN GPU · CUDA AND METAL</text>
+</svg>

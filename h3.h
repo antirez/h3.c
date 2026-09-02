@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define H3_VERSION "0.1.0-dev"
+#define H3_VERSION "0.2.0-dev"
 #define H3_DEFAULT_WIDTH 864
 #define H3_DEFAULT_HEIGHT 480
 #define H3_DEFAULT_FRAMES 56
@@ -45,6 +45,18 @@ typedef enum {
     H3_REFERENCE_IMAGE_MATCH = 0,
     H3_REFERENCE_IMAGE_MAX = 1
 } h3_reference_image_size;
+
+typedef enum {
+    H3_LORA_FL2VA = 1,
+    H3_LORA_REF2VA = 2,
+    H3_LORA_BOTH = 3
+} h3_lora_scope;
+
+typedef struct {
+    const char *path;
+    float scale;
+    h3_lora_scope scope;
+} h3_lora_spec;
 
 typedef struct {
     int width;
@@ -126,12 +138,14 @@ typedef struct {
     h3_frame_callback on_frame;
     h3_progress_callback on_progress;
     void *callback_opaque;
+    const h3_lora_spec *loras;
+    size_t lora_count;
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 0 \
 }
 
 typedef struct {

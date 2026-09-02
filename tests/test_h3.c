@@ -72,6 +72,7 @@ static void test_schedule(void) {
     h3_params defaults = H3_PARAMS_DEFAULT;
     CHECK(defaults.steps == 20);
     CHECK(defaults.use_reference_rope == 0);
+    CHECK(defaults.loras == NULL && defaults.lora_count == 0);
 
     h3_sigma_schedule schedule;
     CHECK(h3_schedule_build(20, &schedule));
@@ -138,6 +139,48 @@ static void test_dit_reuse_schedule(void) {
         CHECK(selected[step] == (step % 3 == 0 || step == 49));
     CHECK(h3_dit_reuse_schedule(20, 1, selected, sizeof(selected)) == 20);
     CHECK(h3_dit_reuse_schedule(20, 3, selected, 19) == -1);
+}
+
+static void test_token_reduction_topologies(void) {
+    uint32_t full, reduced, first, second, parent;
+    CHECK(h3_dit_token_reduction_shape(
+        7, 4, 6, H3_TOKEN_REDUCTION_HORIZONTAL, &full, &reduced));
+    CHECK(full == 42 && reduced == 28);
+    CHECK(h3_dit_token_reduction_pair(
+        7, 4, 6, H3_TOKEN_REDUCTION_HORIZONTAL, 0, &first, &second));
+    CHECK(first == 0 && second == 1);
+    CHECK(h3_dit_token_reduction_pair(
+        7, 4, 6, H3_TOKEN_REDUCTION_HORIZONTAL, 1, &first, &second));
+    CHECK(first == 2 && second == 2);
+    CHECK(h3_dit_token_reduction_parent(
+        7, 4, 6, H3_TOKEN_REDUCTION_HORIZONTAL, 5, &parent));
+    CHECK(parent == 3);
+
+    CHECK(h3_dit_token_reduction_shape(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, &full, &reduced));
+    CHECK(full == 42 && reduced == 24);
+    for (uint32_t row = 0; row < 6; row++) {
+        CHECK(h3_dit_token_reduction_pair(
+            7, 4, 6, H3_TOKEN_REDUCTION_TIME, row, &first, &second));
+        CHECK(first == row && second == row);
+    }
+    CHECK(h3_dit_token_reduction_pair(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, 6, &first, &second));
+    CHECK(first == 6 && second == 12);
+    CHECK(h3_dit_token_reduction_pair(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, 23, &first, &second));
+    CHECK(first == 35 && second == 41);
+    CHECK(h3_dit_token_reduction_parent(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, 0, &parent));
+    CHECK(parent == 0);
+    CHECK(h3_dit_token_reduction_parent(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, 12, &parent));
+    CHECK(parent == 6);
+    CHECK(h3_dit_token_reduction_parent(
+        7, 4, 6, H3_TOKEN_REDUCTION_TIME, 41, &parent));
+    CHECK(parent == 23);
+    CHECK(!h3_dit_token_reduction_shape(
+        0, 4, 6, H3_TOKEN_REDUCTION_TIME, &full, &reduced));
 }
 
 static void check_segments(const h3_layout *layout,
@@ -400,6 +443,7 @@ int main(void) {
     test_temporal_and_canvas();
     test_schedule();
     test_dit_reuse_schedule();
+    test_token_reduction_topologies();
     test_layout_tiny();
     test_layout_fl2va();
     test_layout_ref2va();

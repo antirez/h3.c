@@ -1,5 +1,6 @@
 #include "h3_internal.h"
 #include "h3_audio_vae.h"
+#include "h3_lora.h"
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
@@ -13,6 +14,7 @@
 #include "h3_vision_encoder.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -163,13 +165,14 @@ failed:
 
 static char *h3_prepared_key(const char *conditioning,
                              const h3_params *params,
-                             int render_width, int render_height) {
+                             int render_width, int render_height,
+                             const char *lora_signature) {
     h3_key key = {0};
     if (!h3_key_append(
             &key,
             "%s|shape=%dx%dx%d|steps=%d|layers=%d|reuse-core=%d|reduce=%d"
             "|row-fc2=%d|reference-rope=%d|ssd-streaming=%d"
-            "|slow=%d%d%d%d%d%d%d%d%d%d",
+            "|slow=%d%d%d%d%d%d%d%d%d%d|lora=%s",
             conditioning, render_width, render_height, params->frames,
             params->steps, params->dit_layers, params->core_reuse,
             params->token_reduction, params->use_int8_row_fc2,
@@ -184,7 +187,8 @@ static char *h3_prepared_key(const char *conditioning,
             params->use_slower_scalar_qkv_rms,
             params->use_slower_uncached_int8_scales,
             params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer)) {
+            params->use_slower_grouped_quantizer,
+            lora_signature ? lora_signature : "none")) {
         free(key.text);
         return NULL;
     }
@@ -592,6 +596,41 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "full references cannot be combined with frame anchors");
         return 0;
     }
+    if (params->lora_count > 8 || (params->lora_count && !params->loras)) {
+        h3_set_error(ctx, "runtime LoRA count must be in [0, 8]");
+        return 0;
+    }
+    if (params->lora_count && getenv("H3_DISABLE_RUNTIME_LORA")) {
+        h3_set_error(ctx,
+            "runtime LoRA is disabled by H3_DISABLE_RUNTIME_LORA");
+        return 0;
+    }
+    if (params->lora_count && params->ssd_streaming) {
+        h3_set_error(ctx, "runtime LoRA cannot be combined with SSD streaming");
+        return 0;
+    }
+    if (params->lora_count) {
+        const char *sidecar = getenv("H3_INT8_SIDECAR");
+        if (sidecar && *sidecar) {
+            h3_set_error(ctx,
+                "runtime LoRA cannot be combined with H3_INT8_SIDECAR");
+            return 0;
+        }
+        h3_lora_scope active = params->reference_count ?
+            H3_LORA_REF2VA : H3_LORA_FL2VA;
+        for (size_t index = 0; index < params->lora_count; index++) {
+            const h3_lora_spec *lora = &params->loras[index];
+            if (!lora->path || !*lora->path || !isfinite(lora->scale) ||
+                (lora->scope != H3_LORA_FL2VA &&
+                 lora->scope != H3_LORA_REF2VA &&
+                 lora->scope != H3_LORA_BOTH) || !(lora->scope & active)) {
+                h3_set_error(ctx,
+                    "runtime LoRA %zu has invalid path, scale, or scope",
+                    index + 1);
+                return 0;
+            }
+        }
+    }
     size_t images = 0, videos = 0, audio_inputs = 0, visual = 0;
     for (size_t index = 0; index < params->reference_count; index++) {
         const h3_reference *reference = &params->references[index];
@@ -652,6 +691,13 @@ static void h3_progress_emit(h3_generation_progress *state, const char *phase,
     }
 }
 
+static void h3_lora_progress_bridge(size_t completed, size_t total,
+                                    void *opaque) {
+    int safe_completed = completed > INT_MAX ? INT_MAX : (int)completed;
+    int safe_total = total > INT_MAX ? INT_MAX : (int)total;
+    h3_progress_emit(opaque, "LoRA merge", safe_completed, safe_total);
+}
+
 static void h3_text_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "text encoder", completed, total);
 }
@@ -663,6 +709,11 @@ static void h3_dit_progress_bridge(const char *phase, int completed, int total,
 
 static void h3_vae_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "video VAE load", completed, total);
+}
+
+static void h3_vae_decode_progress_bridge(int completed, int total,
+                                          void *opaque) {
+    h3_progress_emit(opaque, "video VAE decode", completed, total);
 }
 
 static void h3_preview_vae_progress_bridge(int completed, int total,
@@ -769,6 +820,8 @@ static int h3_deliver_denoise_preview(int completed_steps, int total_steps,
     h3_video_frames decoded;
     memset(&decoded, 0, sizeof(decoded));
     int frame_index = 0;
+    h3_video_vae_decoder_set_progress(
+        preview->decoder, h3_preview_vae_progress_bridge, preview->progress);
     if (!h3_video_vae_decoder_preview(
             preview->decoder, video_latent, preview->latent_t,
             &decoded, &frame_index, detail, sizeof(detail))) {
@@ -890,6 +943,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_reference_presentation *presentations = NULL;
     double **presentation_timestamps = NULL;
     h3_layout_ref *layout_references = NULL;
+    h3_lora_set *lora_set = NULL;
     int keyframes[2] = {0, 0};
     size_t keyframe_count = 0;
     float *condition_video_rows = NULL;
@@ -918,6 +972,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     int conditioned = 0;
     int dit_is_cached = 0;
     int decoder_is_cached = 0;
+    int lora_merge_started = 0;
+    char detail[512];
     char *tokenizer_path = h3_path(ctx->model_dir, ref2va ?
         "Ref2VA/tokenizer/tokenizer.json" : "FL2VA/tokenizer/tokenizer.json");
     char *text_path = h3_path(ctx->model_dir, ref2va ?
@@ -933,6 +989,27 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "out of memory resolving generation model paths");
         goto cleanup;
     }
+    if (params->lora_count) {
+        h3_progress_emit(&progress, "LoRA inspect", 0,
+                         (int)params->lora_count);
+        h3_weight_store *lora_base = h3_weight_store_open(
+            dit_path, detail, sizeof(detail));
+        if (!lora_base) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        lora_set = h3_lora_set_open(
+            params->loras, params->lora_count, lora_base,
+            ref2va ? H3_LORA_REF2VA : H3_LORA_FL2VA,
+            detail, sizeof(detail));
+        h3_weight_store_free(lora_base);
+        if (!lora_set) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        h3_progress_emit(&progress, "LoRA inspect", (int)params->lora_count,
+                         (int)params->lora_count);
+    }
     conditioning_key = h3_conditioning_key(
         prompt, params, render_width, render_height, ref2va);
     if (!conditioning_key) {
@@ -940,7 +1017,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     prepared_key = h3_prepared_key(
-        conditioning_key, params, render_width, render_height);
+        conditioning_key, params, render_width, render_height,
+        h3_lora_set_signature(lora_set));
     if (!prepared_key) {
         h3_set_error(ctx, "out of memory constructing prepared-model cache key");
         goto cleanup;
@@ -968,7 +1046,6 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     }
     conditioning_hit = ctx->cache_enabled && ctx->conditioning_key &&
         !strcmp(ctx->conditioning_key, conditioning_key);
-    char detail[512];
     if (conditioning_hit) {
         size_t cached_reference_count = 0;
         if (!h3_conditioning_cache_load(
@@ -1225,7 +1302,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             keyframes[keyframe_count++] = 0;
             if (!h3_ffmpeg_read_image_f32(
                     params->first_frame, render_width, render_height,
-                    H3_IMAGE_FIT_STRETCH, &condition_pixels[visual_count],
+                    H3_IMAGE_FIT_COVER, &condition_pixels[visual_count],
                     detail, sizeof(detail))) {
                 h3_set_error(ctx, "%s", detail);
                 goto cleanup;
@@ -1475,6 +1552,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         fprintf(stderr, "h3: prepared DiT cache hit\n");
     } else if (conditioned) {
+        if (lora_set) {
+            h3_lora_set_progress(
+                lora_set, h3_lora_progress_bridge, &progress);
+            lora_merge_started = 1;
+        }
         dit = h3_dit_load_conditioned(
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
@@ -1492,10 +1574,16 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             params->use_slower_dynamic_fc1_k,
             params->use_slower_grouped_quantizer,
             params->use_int8_row_fc2,
+            lora_set,
             condition_video_rows, condition_video_elements,
             condition_audio_rows, condition_audio_elements,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
     } else {
+        if (lora_set) {
+            h3_lora_set_progress(
+                lora_set, h3_lora_progress_bridge, &progress);
+            lora_merge_started = 1;
+        }
         dit = h3_dit_load_t2va(
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
@@ -1513,12 +1601,14 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             params->use_slower_dynamic_fc1_k,
             params->use_slower_grouped_quantizer,
             params->use_int8_row_fc2,
+            lora_set,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
     }
     if (!dit) {
         h3_set_error(ctx, "%s", detail);
         goto cleanup;
     }
+    if (lora_merge_started) h3_lora_set_finish(lora_set);
     if (ctx->cache_enabled && !dit_is_cached) {
         char *key_copy = strdup(prepared_key);
         if (!key_copy) {
@@ -1614,6 +1704,9 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             goto cleanup;
         }
     }
+    if (preview_decoder)
+        h3_video_vae_decoder_set_progress(
+            preview_decoder, h3_vae_decode_progress_bridge, &progress);
     int video_ok = preview_decoder ?
         h3_video_vae_decoder_decode(
             preview_decoder, video, temporal.video_t, &frames,
@@ -1693,6 +1786,7 @@ cleanup:
     free(conditioning_key);
     free(prepared_key);
     free(decoder_key);
+    h3_lora_set_free(lora_set);
     free(tokenizer_path); free(text_path); free(dit_path); free(vae_path);
     free(audio_vae_path);
     h3_tokenizer_free(tokenizer);

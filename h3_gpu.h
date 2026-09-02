@@ -32,6 +32,8 @@ typedef struct {
     double gpu_seconds;
 } h3_gpu_stats;
 
+/* Pass NULL to compile the shader source embedded in the library. The default
+ * source filename also falls back to the embedded copy when it is absent. */
 h3_gpu *h3_gpu_create(const char *shader_source_path,
                       char *error, size_t error_size);
 void h3_gpu_free(h3_gpu *gpu);
@@ -51,6 +53,8 @@ h3_gpu_tensor *h3_gpu_tensor_from_u32(h3_gpu *gpu, const uint32_t *values,
 /* Allocate shared Metal storage and pread BF16 payload directly into it. */
 h3_gpu_tensor *h3_gpu_tensor_load_bf16(h3_gpu *gpu, const char *path,
                                        uint64_t file_offset, size_t elements);
+h3_gpu_tensor *h3_gpu_tensor_load_i8(h3_gpu *gpu, const char *path,
+                                     uint64_t file_offset, size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *gpu, const char *path,
                                       uint64_t file_offset, size_t elements);
 /* Fill an existing shared BF16 buffer from a file. The tensor and its
@@ -75,6 +79,9 @@ int h3_gpu_tensor_read_f32_range(const h3_gpu_tensor *tensor,
                                  size_t elements);
 int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
                             size_t elements);
+int h3_gpu_tensor_read_bf16_range(const h3_gpu_tensor *tensor,
+                                  size_t source_offset,
+                                  uint16_t *values, size_t elements);
 int h3_gpu_tensor_write_f32(h3_gpu_tensor *tensor, const float *values,
                             size_t elements);
 int h3_gpu_tensor_write_f32_range(h3_gpu_tensor *tensor,
@@ -90,7 +97,37 @@ int h3_gpu_begin(h3_gpu *gpu);
 /* Commit the current command buffer without waiting, then continue encoding on
  * the same ordered queue. h3_gpu_submit() waits and validates the whole chain. */
 int h3_gpu_continue(h3_gpu *gpu);
+/* Wait for and validate the oldest in-flight command buffers until at most
+ * `keep` remain, without touching the buffer currently being encoded. Lets a
+ * caller overlap CPU work with the newest committed buffers while safely
+ * reading results produced by older ones. */
+int h3_gpu_flight_limit(h3_gpu *gpu, int keep);
 int h3_gpu_submit(h3_gpu *gpu);
+/* Mixes a salt into MPSGraph cache keys so pipelined callers can give each
+ * activation slot independent graph objects; encoding with one salt then
+ * never blocks on the other salt's in-flight execution. Default 0. */
+void h3_gpu_set_graph_salt(h3_gpu *gpu, int salt);
+/* Experimental M5 TensorOps flash SDPA over head-major BF16 Q/K/V with
+ * head_dim 128: streaming K/V tiles with an online softmax, no attention
+ * matrix materialization. Benchmark path; requires the Metal 4 int8 tier. */
+int h3_gpu_sdpa_flash_bf16_head_major(h3_gpu *gpu, h3_gpu_tensor *output,
+                                      const h3_gpu_tensor *query,
+                                      const h3_gpu_tensor *key,
+                                      const h3_gpu_tensor *value,
+                                      uint32_t sequence, uint32_t heads,
+                                      uint32_t head_dim, float scale);
+/* Windowed attention composed from MPSGraph SDPA calls over a head-major
+ * BF16 sequence: contiguous video tokens attend within +/- window_frames
+ * temporal frames plus all non-video (global) tokens; global tokens attend
+ * to everything. pack_* are caller-sized scratch tensors (see the .m). */
+int h3_gpu_sdpa_windowed_bf16_head_major(
+        h3_gpu *gpu, h3_gpu_tensor *output,
+        const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+        const h3_gpu_tensor *value, h3_gpu_tensor *pack_q,
+        h3_gpu_tensor *pack_k, h3_gpu_tensor *pack_v, h3_gpu_tensor *pack_o,
+        uint32_t rows, uint32_t heads, uint32_t head_dim, float scale,
+        uint32_t video_start, uint32_t video_frames, uint32_t frame_rows,
+        uint32_t window_frames);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown
@@ -166,6 +203,12 @@ int h3_gpu_sdpa_f32(h3_gpu *gpu, h3_gpu_tensor *output,
                     const h3_gpu_tensor *query, const h3_gpu_tensor *key,
                     const h3_gpu_tensor *value, uint32_t sequence,
                     uint32_t heads, uint32_t head_dim, float scale);
+int h3_gpu_sdpa_batch_f32(h3_gpu *gpu, h3_gpu_tensor *output,
+                          const h3_gpu_tensor *query,
+                          const h3_gpu_tensor *key,
+                          const h3_gpu_tensor *value, uint32_t batch,
+                          uint32_t sequence, uint32_t heads,
+                          uint32_t head_dim, float scale);
 int h3_gpu_swiglu_f32(h3_gpu *gpu, h3_gpu_tensor *output,
                       const h3_gpu_tensor *fused, uint32_t rows,
                       uint32_t width);
@@ -497,6 +540,13 @@ int h3_gpu_sdpa_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
 /* Preserve SDPA's native [head,row,dimension] output for an immediately
  * following layout-aware projection. */
 int h3_gpu_sdpa_bf16_head_major_output(
+                     h3_gpu *gpu, h3_gpu_tensor *output,
+                     const h3_gpu_tensor *query, const h3_gpu_tensor *key,
+                     const h3_gpu_tensor *value, uint32_t sequence,
+                     uint32_t heads, uint32_t head_dim, float scale);
+/* Profiling entry point for Q/K/V already stored as
+ * [head, sequence, dimension], matching the M5 fused QKV fast path. */
+int h3_gpu_sdpa_bf16_head_major_io(
                      h3_gpu *gpu, h3_gpu_tensor *output,
                      const h3_gpu_tensor *query, const h3_gpu_tensor *key,
                      const h3_gpu_tensor *value, uint32_t sequence,

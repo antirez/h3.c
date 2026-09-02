@@ -27,6 +27,7 @@ typedef struct {
     const char *model_dir;
     h3_params params;
     h3_reference references[12];
+    h3_lora_spec loras[8];
     char *first_frame;
     char *last_frame;
     char output_dir[H3_CLI_PATH];
@@ -42,6 +43,8 @@ typedef struct {
     int completed;
     int total;
     int display_failed;
+    int worker_mode;
+    int worker_config_error;
 } h3_cli_state;
 
 static char *skip_spaces(char *text) {
@@ -274,6 +277,198 @@ static void clear_references(h3_cli_state *state) {
     h3_cache_clear(state->ctx);
 }
 
+/* Worker requests deliberately preserve h3_ctx caches. h3_generate keys every
+ * cached artifact by prompt, reference metadata, shape, and quality settings,
+ * so changing the request inputs safely invalidates only what no longer
+ * matches while retaining reusable VideoVAE and exact-request state. */
+static void worker_reset_inputs(h3_cli_state *state) {
+    for (size_t index = 0; index < state->params.reference_count; index++)
+        free_reference(&state->references[index]);
+    state->params.reference_count = 0;
+    free(state->first_frame);
+    free(state->last_frame);
+    state->first_frame = NULL;
+    state->last_frame = NULL;
+    for (size_t index = 0; index < state->params.lora_count; index++)
+        free((char *)state->loras[index].path);
+    memset(state->loras, 0, sizeof(state->loras));
+    state->params.lora_count = 0;
+    state->worker_config_error = 0;
+}
+
+static int hex_nibble(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static char *decode_hex(const char *encoded, size_t maximum) {
+    if (!encoded) return NULL;
+    size_t encoded_length = strlen(encoded);
+    if (encoded_length % 2) return NULL;
+    size_t length = encoded_length / 2;
+    if (length > maximum) return NULL;
+    char *decoded = malloc(length + 1);
+    if (!decoded) return NULL;
+    for (size_t index = 0; index < length; index++) {
+        int high = hex_nibble(encoded[index * 2]);
+        int low = hex_nibble(encoded[index * 2 + 1]);
+        if (high < 0 || low < 0) {
+            free(decoded);
+            return NULL;
+        }
+        decoded[index] = (char)((high << 4) | low);
+        if (!decoded[index]) {
+            free(decoded);
+            return NULL;
+        }
+    }
+    decoded[length] = '\0';
+    return decoded;
+}
+
+static char *take_word(char **cursor) {
+    char *word = skip_spaces(*cursor);
+    if (!*word) {
+        *cursor = word;
+        return NULL;
+    }
+    char *end = word;
+    while (*end && !isspace((unsigned char)*end)) end++;
+    if (*end) *end++ = '\0';
+    *cursor = end;
+    return word;
+}
+
+static int valid_worker_job_id(const char *job_id) {
+    if (!job_id || !*job_id || strlen(job_id) > 64) return 0;
+    for (const unsigned char *at = (const unsigned char *)job_id; *at; at++)
+        if (!isalnum(*at) && *at != '-' && *at != '_') return 0;
+    return 1;
+}
+
+static void worker_config_fail(h3_cli_state *state, const char *message) {
+    state->worker_config_error = 1;
+    fprintf(stderr, "h3: worker configuration: %s\n", message);
+}
+
+static void worker_set_anchor(h3_cli_state *state, char *argument) {
+    char *cursor = argument;
+    char *which = take_word(&cursor);
+    char *encoded = take_word(&cursor);
+    if (!which || !encoded || take_word(&cursor) ||
+        (strcasecmp(which, "first") && strcasecmp(which, "last"))) {
+        worker_config_fail(state, "invalid anchor command");
+        return;
+    }
+    char *path = decode_hex(encoded, H3_CLI_PATH - 1);
+    if (!path) {
+        worker_config_fail(state, "invalid anchor path encoding");
+        return;
+    }
+    if (state->params.reference_count) {
+        free(path);
+        worker_config_fail(state,
+                           "frame anchors cannot be combined with references");
+        return;
+    }
+    if (!validate_anchor(path)) {
+        free(path);
+        state->worker_config_error = 1;
+        return;
+    }
+    char **slot = !strcasecmp(which, "first") ?
+        &state->first_frame : &state->last_frame;
+    free(*slot);
+    *slot = path;
+}
+
+static void worker_add_reference(h3_cli_state *state, char *argument) {
+    char *cursor = argument;
+    char *kind = take_word(&cursor);
+    char *encoded = take_word(&cursor);
+    if (!kind || !encoded || take_word(&cursor)) {
+        worker_config_fail(state, "invalid reference command");
+        return;
+    }
+    if (state->first_frame || state->last_frame) {
+        worker_config_fail(state,
+                           "references cannot be combined with frame anchors");
+        return;
+    }
+    if (!h3_model(state->ctx)->ref2va_transformer.files) {
+        worker_config_fail(state, "references require the Ref2VA checkpoint");
+        return;
+    }
+    if (state->params.reference_count >= 12) {
+        worker_config_fail(state, "too many ordered references");
+        return;
+    }
+    char *path = decode_hex(encoded, H3_CLI_PATH - 1);
+    if (!path) {
+        worker_config_fail(state, "invalid reference path encoding");
+        return;
+    }
+    h3_reference reference;
+    memset(&reference, 0, sizeof(reference));
+    if (!strcasecmp(kind, "image")) {
+        reference.kind = H3_REFERENCE_IMAGE;
+    } else if (!strcasecmp(kind, "video")) {
+        reference.kind = H3_REFERENCE_VIDEO;
+        reference.include_embedded_audio = 1;
+    } else if (!strcasecmp(kind, "silent-video")) {
+        reference.kind = H3_REFERENCE_VIDEO;
+    } else if (!strcasecmp(kind, "audio")) {
+        reference.kind = H3_REFERENCE_AUDIO;
+    } else {
+        free(path);
+        worker_config_fail(state, "unknown reference kind");
+        return;
+    }
+    if (reference.kind != H3_REFERENCE_AUDIO && !validate_anchor(path)) {
+        free(path);
+        state->worker_config_error = 1;
+        return;
+    }
+    reference.path = path;
+    state->references[state->params.reference_count++] = reference;
+}
+
+static void worker_add_lora(h3_cli_state *state, char *argument) {
+    char *cursor = argument;
+    char *scope_text = take_word(&cursor);
+    char *scale_text = take_word(&cursor);
+    char *encoded = take_word(&cursor);
+    if (!scope_text || !scale_text || !encoded || take_word(&cursor) ||
+        state->params.lora_count >= 8) {
+        worker_config_fail(state, "invalid runtime LoRA command");
+        return;
+    }
+    h3_lora_scope scope;
+    if (!strcasecmp(scope_text, "fl2va")) scope = H3_LORA_FL2VA;
+    else if (!strcasecmp(scope_text, "ref2va")) scope = H3_LORA_REF2VA;
+    else if (!strcasecmp(scope_text, "both")) scope = H3_LORA_BOTH;
+    else {
+        worker_config_fail(state, "unknown runtime LoRA scope");
+        return;
+    }
+    char *end = NULL;
+    errno = 0;
+    float scale = strtof(scale_text, &end);
+    if (errno || end == scale_text || !end || *end || !isfinite(scale)) {
+        worker_config_fail(state, "invalid runtime LoRA scale");
+        return;
+    }
+    char *path = decode_hex(encoded, H3_CLI_PATH - 1);
+    if (!path) {
+        worker_config_fail(state, "invalid runtime LoRA path encoding");
+        return;
+    }
+    state->loras[state->params.lora_count++] =
+        (h3_lora_spec){path, scale, scope};
+}
+
 static void list_references(const h3_cli_state *state) {
     if (!state->params.reference_count) {
         puts("References: none");
@@ -422,11 +617,17 @@ static void open_video(const char *path) {
         fprintf(stderr, "h3: cannot open %s: %s\n", path, strerror(status));
 }
 
-static int generate(h3_cli_state *state, const char *prompt) {
+static int generate(h3_cli_state *state, const char *prompt,
+                    const char *requested_output) {
     char output[H3_CLI_PATH];
-    unsigned number = ++state->output_count;
-    int length = snprintf(output, sizeof(output), "%s/video-%04u.mp4",
+    int length;
+    if (requested_output) {
+        length = snprintf(output, sizeof(output), "%s", requested_output);
+    } else {
+        unsigned number = ++state->output_count;
+        length = snprintf(output, sizeof(output), "%s/video-%04u.mp4",
                           state->output_dir, number);
+    }
     if (length < 0 || (size_t)length >= sizeof(output)) {
         fprintf(stderr, "h3: output path is too long\n");
         return 0;
@@ -465,6 +666,48 @@ static int generate(h3_cli_state *state, const char *prompt) {
     return 1;
 }
 
+static void worker_run(h3_cli_state *state, char *argument) {
+    char *cursor = argument;
+    char *job_id = take_word(&cursor);
+    char *output_hex = take_word(&cursor);
+    char *prompt_hex = take_word(&cursor);
+    int syntax_ok = valid_worker_job_id(job_id) && output_hex && prompt_hex &&
+        !take_word(&cursor);
+    if (!syntax_ok) {
+        worker_config_fail(state, "invalid run command");
+        if (valid_worker_job_id(job_id)) {
+            printf("H3_WORKER_ERROR %s\n", job_id);
+            fflush(stdout);
+        }
+        return;
+    }
+    char *output = decode_hex(output_hex, H3_CLI_PATH - 1);
+    char *prompt = decode_hex(prompt_hex, SIZE_MAX - 1);
+    if (!output || !*output || !prompt || !*prompt) {
+        free(output);
+        free(prompt);
+        worker_config_fail(state, "invalid output or prompt encoding");
+        printf("H3_WORKER_ERROR %s\n", job_id);
+        fflush(stdout);
+        return;
+    }
+    if (state->worker_config_error) {
+        fprintf(stderr, "h3: worker job rejected after configuration error\n");
+        printf("H3_WORKER_ERROR %s\n", job_id);
+        fflush(stdout);
+        free(output);
+        free(prompt);
+        return;
+    }
+    printf("H3_WORKER_START %s\n", job_id);
+    fflush(stdout);
+    int ok = generate(state, prompt, output);
+    printf("H3_WORKER_%s %s\n", ok ? "DONE" : "ERROR", job_id);
+    fflush(stdout);
+    free(output);
+    free(prompt);
+}
+
 static int set_integer(char *argument, const char *name, int minimum,
                        int maximum, int *slot) {
     argument = skip_spaces(argument);
@@ -489,7 +732,17 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
     if (*argument) *argument++ = '\0';
     argument = skip_spaces(argument);
 
-    if (!strcasecmp(command, "help")) print_help();
+    if (!strcasecmp(command, "worker-reset") && state->worker_mode)
+        worker_reset_inputs(state);
+    else if (!strcasecmp(command, "worker-anchor") && state->worker_mode)
+        worker_set_anchor(state, argument);
+    else if (!strcasecmp(command, "worker-ref") && state->worker_mode)
+        worker_add_reference(state, argument);
+    else if (!strcasecmp(command, "worker-lora") && state->worker_mode)
+        worker_add_lora(state, argument);
+    else if (!strcasecmp(command, "worker-run") && state->worker_mode)
+        worker_run(state, argument);
+    else if (!strcasecmp(command, "help")) print_help();
     else if (!strcasecmp(command, "status")) print_status(state);
     else if (!strcasecmp(command, "quit") || !strcasecmp(command, "exit"))
         return 1;
@@ -690,17 +943,22 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
 
 int h3_cli_run(h3_ctx *ctx, const char *model_dir,
                const h3_params *initial, int show,
-               int seed_was_given) {
+               int seed_was_given, int worker_mode) {
     h3_cli_state state;
     memset(&state, 0, sizeof(state));
     state.ctx = ctx;
+    state.worker_mode = worker_mode;
     h3_cache_set_enabled(ctx, 1);
     state.model_dir = model_dir;
     state.params = *initial;
     const h3_reference *initial_references = initial->references;
     size_t initial_reference_count = initial->reference_count;
+    const h3_lora_spec *initial_loras = initial->loras;
+    size_t initial_lora_count = initial->lora_count;
     state.params.references = state.references;
     state.params.reference_count = 0;
+    state.params.loras = state.loras;
+    state.params.lora_count = 0;
     state.params.output_path = NULL;
     state.params.first_frame = NULL;
     state.params.last_frame = NULL;
@@ -714,8 +972,9 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
     if (initial->last_frame) state.last_frame = strdup(initial->last_frame);
     if ((initial->first_frame && !state.first_frame) ||
         (initial->last_frame && !state.last_frame) ||
-        initial_reference_count > 12 ||
-        (initial_reference_count && !initial_references)) {
+        initial_reference_count > 12 || initial_lora_count > 8 ||
+        (initial_reference_count && !initial_references) ||
+        (initial_lora_count && !initial_loras)) {
         fprintf(stderr, "h3: cannot copy initial interactive inputs\n");
         free(state.first_frame);
         free(state.last_frame);
@@ -733,6 +992,18 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
         }
         state.params.reference_count++;
     }
+    for (size_t index = 0; index < initial_lora_count; index++) {
+        state.loras[index] = initial_loras[index];
+        state.loras[index].path = initial_loras[index].path ?
+            strdup(initial_loras[index].path) : NULL;
+        if (!state.loras[index].path) {
+            fprintf(stderr, "h3: cannot copy initial runtime LoRA %zu\n",
+                    index + 1);
+            worker_reset_inputs(&state);
+            return 1;
+        }
+        state.params.lora_count++;
+    }
     snprintf(state.output_dir, sizeof(state.output_dir), "/tmp/h3-XXXXXX");
     if (!mkdtemp(state.output_dir)) {
         fprintf(stderr, "h3: cannot create session directory: %s\n",
@@ -745,26 +1016,32 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
 
     char history[H3_CLI_PATH] = {0};
     const char *user_home = getenv("HOME");
-    if (user_home && strlen(user_home) + sizeof("/.h3_history") < sizeof(history)) {
+    if (!worker_mode && user_home &&
+        strlen(user_home) + sizeof("/.h3_history") < sizeof(history)) {
         snprintf(history, sizeof(history), "%s/.h3_history", user_home);
         linenoiseHistoryLoad(history);
     }
     linenoiseHistorySetMaxLen(500);
     linenoiseSetMultiLine(1);
 
-    printf("H3 Interactive Mode\nModel: %s\nOutputs: %s\n", model_dir,
-           state.output_dir);
-    if (show && state.terminal == H3_TERM_NONE)
-        puts("Display unavailable in this terminal.");
-    puts("Type a prompt to generate video; !help lists commands.");
-    print_status(&state);
+    if (worker_mode) {
+        puts("H3_WORKER_READY");
+        fflush(stdout);
+    } else {
+        printf("H3 Interactive Mode\nModel: %s\nOutputs: %s\n", model_dir,
+               state.output_dir);
+        if (show && state.terminal == H3_TERM_NONE)
+            puts("Display unavailable in this terminal.");
+        puts("Type a prompt to generate video; !help lists commands.");
+        print_status(&state);
+    }
 
     char *line;
-    while ((line = linenoise("h3> ")) != NULL) {
+    while ((line = linenoise(worker_mode ? "" : "h3> ")) != NULL) {
         trim_trailing(line);
         char *input = skip_spaces(line);
         if (*input) {
-            linenoiseHistoryAdd(input);
+            if (!worker_mode) linenoiseHistoryAdd(input);
             int repeat = 0;
             int quit = *input == '!' ? process_command(&state, input, &repeat) : 0;
             if (quit) {
@@ -775,19 +1052,22 @@ int h3_cli_run(h3_ctx *ctx, const char *model_dir,
                 char *prompt = strdup(state.last_prompt);
                 if (!prompt) fprintf(stderr, "h3: out of memory copying prompt\n");
                 else {
-                    generate(&state, prompt);
+                    generate(&state, prompt, NULL);
                     free(prompt);
                 }
             }
-            else if (*input != '!') generate(&state, input);
+            else if (*input != '!') {
+                if (worker_mode)
+                    fprintf(stderr, "h3: worker accepts commands only\n");
+                else
+                    generate(&state, input, NULL);
+            }
         }
         free(line);
     }
     if (*history) linenoiseHistorySave(history);
-    free(state.first_frame);
-    free(state.last_frame);
     free(state.last_prompt);
-    clear_references(&state);
-    puts("Goodbye.");
+    worker_reset_inputs(&state);
+    if (!worker_mode) puts("Goodbye.");
     return 0;
 }

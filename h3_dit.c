@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 enum {
@@ -70,6 +71,9 @@ typedef struct {
 struct h3_dit {
     h3_gpu *gpu;
     h3_weight_store *weights;
+    h3_weight_store *int8_weights;
+    const h3_lora_set *loras;
+    size_t lora_peak_scratch;
     h3_dit_schedule *schedule;
     int fused_mlp;
     int nax_mlp;
@@ -92,6 +96,12 @@ struct h3_dit {
     int fused_patch_projection;
     int fused_patch_pack;
     int token_reduction;
+    h3_token_reduction_axis token_reduction_axis;
+    uint32_t attn_window_frames;
+    h3_gpu_tensor *attn_pack_q;
+    h3_gpu_tensor *attn_pack_k;
+    h3_gpu_tensor *attn_pack_v;
+    h3_gpu_tensor *attn_pack_o;
     int token_reduction_active;
     unsigned token_reduction_begin;
     unsigned token_reduction_end;
@@ -150,6 +160,19 @@ struct h3_dit {
     h3_gpu_tensor *final_video_b;
     h3_gpu_tensor *final_audio_w;
     h3_gpu_tensor *final_audio_b;
+    /* PDD (Parallel Decoding Distillation) per-evaluation output heads.
+     * When pdd_evaluations is nonzero, encode_forward binds the step's
+     * premixed head before encoding; the checkpoint heads are preserved in
+     * pdd_saved_* so teardown frees each tensor exactly once. */
+    unsigned pdd_evaluations;
+    h3_gpu_tensor *pdd_video_w[16];
+    h3_gpu_tensor *pdd_video_b[16];
+    h3_gpu_tensor *pdd_audio_w[16];
+    h3_gpu_tensor *pdd_audio_b[16];
+    h3_gpu_tensor *pdd_saved_video_w;
+    h3_gpu_tensor *pdd_saved_video_b;
+    h3_gpu_tensor *pdd_saved_audio_w;
+    h3_gpu_tensor *pdd_saved_audio_b;
     h3_gpu_tensor *video_input;
     h3_gpu_tensor *audio_input;
     h3_gpu_tensor *video_projected_f32;
@@ -244,6 +267,10 @@ static h3_gpu_tensor *bf1(h3_dit *dit, const char *name, uint64_t width,
 
 static h3_gpu_tensor *bf2(h3_dit *dit, const char *name, uint64_t rows,
                           uint64_t columns, char *error, size_t error_size) {
+    if (dit->loras)
+        return h3_weight_load_bf16_with_loras(
+            dit->weights, dit->gpu, name, rows, columns, dit->loras,
+            &dit->lora_peak_scratch, error, error_size);
     uint64_t shape[] = {rows, columns};
     return h3_weight_load_bf16(dit->weights, dit->gpu, name, 2, shape,
                                error, error_size);
@@ -261,6 +288,98 @@ static h3_gpu_tensor *f2(h3_dit *dit, const char *name, uint64_t rows,
     uint64_t shape[] = {rows, columns};
     return h3_weight_load_f32(dit->weights, dit->gpu, name, 2, shape,
                               error, error_size);
+}
+
+static h3_gpu_tensor *sidecar_i8_2(h3_dit *dit, const char *name,
+                                   uint64_t rows, uint64_t columns,
+                                   char *error, size_t error_size) {
+    uint64_t shape[] = {rows, columns};
+    return h3_weight_load_i8(dit->int8_weights, dit->gpu, name, 2, shape,
+                             error, error_size);
+}
+
+static h3_gpu_tensor *sidecar_scale(h3_dit *dit, const char *name,
+                                    uint64_t rows,
+                                    char *error, size_t error_size) {
+    char scale_name[192];
+    int length = snprintf(scale_name, sizeof(scale_name), "%s.h3_scale", name);
+    if (length < 0 || (size_t)length >= sizeof(scale_name)) {
+        fail(error, error_size, "INT8 sidecar tensor name is too long");
+        return NULL;
+    }
+    uint64_t shape[] = {rows};
+    return h3_weight_load_f32(dit->int8_weights, dit->gpu, scale_name, 1,
+                              shape, error, error_size);
+}
+
+static char *sidecar_path(const char *directory, const char *name) {
+    size_t length = strlen(directory) + strlen(name) + 2;
+    char *path = malloc(length);
+    if (path) snprintf(path, length, "%s/%s", directory, name);
+    return path;
+}
+
+static int sidecar_matches_source(const char *sidecar,
+                                  const char *weight_directory,
+                                  size_t expected_shards,
+                                  char *error, size_t error_size) {
+    char *manifest_path = sidecar_path(sidecar, "source.tsv");
+    if (!manifest_path) {
+        fail(error, error_size, "out of memory resolving sidecar manifest");
+        return 0;
+    }
+    FILE *manifest = fopen(manifest_path, "r");
+    free(manifest_path);
+    if (!manifest) {
+        fail(error, error_size, "INT8 sidecar source.tsv is missing");
+        return 0;
+    }
+    char line[1024];
+    if (!fgets(line, sizeof(line), manifest)) {
+        fail(error, error_size, "INT8 sidecar source.tsv is empty");
+        fclose(manifest);
+        return 0;
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strcmp(line, "h3-int8-sidecar-v1")) {
+        fail(error, error_size, "unsupported INT8 sidecar manifest format");
+        fclose(manifest);
+        return 0;
+    }
+    size_t count = 0;
+    while (fgets(line, sizeof(line), manifest)) {
+        char name[256], hash[65], trailing;
+        unsigned long long size;
+        long long mtime_ns;
+        line[strcspn(line, "\r\n")] = '\0';
+        if (sscanf(line, "%255[^\t]\t%llu\t%lld\t%64s%c",
+                   name, &size, &mtime_ns, hash, &trailing) != 4) {
+            fail(error, error_size, "invalid INT8 sidecar source entry");
+            fclose(manifest);
+            return 0;
+        }
+        char *source_path = sidecar_path(weight_directory, name);
+        struct stat status;
+        int valid = source_path && stat(source_path, &status) == 0 &&
+            S_ISREG(status.st_mode) &&
+            (unsigned long long)status.st_size == size &&
+            (long long)status.st_mtimespec.tv_sec * 1000000000LL +
+                status.st_mtimespec.tv_nsec == mtime_ns;
+        free(source_path);
+        if (!valid) {
+            fail(error, error_size,
+                 "INT8 sidecar does not match source shard %s", name);
+            fclose(manifest);
+            return 0;
+        }
+        count++;
+    }
+    int ok = !ferror(manifest) && count == expected_shards;
+    fclose(manifest);
+    if (!ok)
+        fail(error, error_size,
+             "INT8 sidecar source shard count does not match checkpoint");
+    return ok;
 }
 
 static int copy_layout(h3_dit *dit, const h3_layout *layout,
@@ -375,6 +494,81 @@ static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
     return 1;
 }
 
+int h3_dit_token_reduction_shape(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis,
+        uint32_t *full_rows, uint32_t *reduced_rows) {
+    if (latent_t < 1 || latent_h < 2 || latent_w < 2 ||
+        latent_h % 2 || latent_w % 2 || !full_rows || !reduced_rows ||
+        (axis != H3_TOKEN_REDUCTION_HORIZONTAL &&
+         axis != H3_TOKEN_REDUCTION_TIME)) return 0;
+    uint64_t spatial_height = (uint64_t)(unsigned)latent_h / 2;
+    uint64_t spatial_width = (uint64_t)(unsigned)latent_w / 2;
+    uint64_t spatial = spatial_height * spatial_width;
+    uint64_t full = (uint64_t)(unsigned)latent_t * spatial;
+    uint64_t reduced = axis == H3_TOKEN_REDUCTION_HORIZONTAL ?
+        (uint64_t)(unsigned)latent_t * spatial_height *
+            ((spatial_width + 1) / 2) :
+        (1u + (uint64_t)(unsigned)latent_t / 2u) * spatial;
+    if (!spatial || full > UINT32_MAX || reduced > UINT32_MAX) return 0;
+    *full_rows = (uint32_t)full;
+    *reduced_rows = (uint32_t)reduced;
+    return 1;
+}
+
+int h3_dit_token_reduction_pair(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis, uint32_t reduced_row,
+        uint32_t *first, uint32_t *second) {
+    uint32_t full_rows, reduced_rows;
+    if (!first || !second ||
+        !h3_dit_token_reduction_shape(
+            latent_t, latent_h, latent_w, axis, &full_rows, &reduced_rows) ||
+        reduced_row >= reduced_rows) return 0;
+    uint32_t spatial_height = (uint32_t)latent_h / 2;
+    uint32_t spatial_width = (uint32_t)latent_w / 2;
+    if (axis == H3_TOKEN_REDUCTION_HORIZONTAL) {
+        uint32_t reduced_width = (spatial_width + 1) / 2;
+        uint32_t source = (reduced_row / reduced_width) * spatial_width +
+                          (reduced_row % reduced_width) * 2;
+        *first = source;
+        *second = source + (source % spatial_width + 1 < spatial_width ? 1u : 0u);
+    } else {
+        uint32_t spatial = spatial_height * spatial_width;
+        uint32_t reduced_time = reduced_row / spatial;
+        uint32_t spatial_index = reduced_row % spatial;
+        uint32_t source_time = reduced_time ? 1u + (reduced_time - 1u) * 2u : 0u;
+        *first = source_time * spatial + spatial_index;
+        *second = reduced_time && source_time + 1u < (uint32_t)latent_t ?
+            *first + spatial : *first;
+    }
+    return *first < full_rows && *second < full_rows;
+}
+
+int h3_dit_token_reduction_parent(
+        int latent_t, int latent_h, int latent_w,
+        h3_token_reduction_axis axis, uint32_t full_row,
+        uint32_t *parent) {
+    uint32_t full_rows, reduced_rows;
+    if (!parent ||
+        !h3_dit_token_reduction_shape(
+            latent_t, latent_h, latent_w, axis, &full_rows, &reduced_rows) ||
+        full_row >= full_rows) return 0;
+    uint32_t spatial_height = (uint32_t)latent_h / 2;
+    uint32_t spatial_width = (uint32_t)latent_w / 2;
+    if (axis == H3_TOKEN_REDUCTION_HORIZONTAL) {
+        uint32_t reduced_width = (spatial_width + 1) / 2;
+        *parent = (full_row / spatial_width) * reduced_width +
+                  (full_row % spatial_width) / 2;
+    } else {
+        uint32_t spatial = spatial_height * spatial_width;
+        uint32_t time = full_row / spatial;
+        uint32_t reduced_time = time ? 1u + (time - 1u) / 2u : 0u;
+        *parent = reduced_time * spatial + full_row % spatial;
+    }
+    return *parent < reduced_rows;
+}
+
 static int configure_token_reduction(h3_dit *dit, int requested,
                                      char *error, size_t error_size) {
     const char *enabled = getenv("H3_TOKEN_REDUCTION");
@@ -444,31 +638,45 @@ static int configure_token_reduction(h3_dit *dit, int requested,
             return 0;
         }
     }
-    uint32_t spatial_height = (uint32_t)dit->latent_h / 2;
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint64_t reduced_video =
-        (uint64_t)(uint32_t)dit->latent_t * spatial_height * reduced_width;
-    if (!spatial_height || !spatial_width ||
-        (uint64_t)(uint32_t)dit->latent_t * spatial_height * spatial_width !=
-            dit->video_rows ||
+    h3_token_reduction_axis axis = H3_TOKEN_REDUCTION_HORIZONTAL;
+    const char *axis_text = getenv("H3_TOKEN_REDUCTION_AXIS");
+    if (axis_text && *axis_text) {
+        if (!strcmp(axis_text, "horizontal"))
+            axis = H3_TOKEN_REDUCTION_HORIZONTAL;
+        else if (!strcmp(axis_text, "time"))
+            axis = H3_TOKEN_REDUCTION_TIME;
+        else {
+            fail(error, error_size,
+                 "H3_TOKEN_REDUCTION_AXIS must be horizontal or time");
+            return 0;
+        }
+    }
+    uint32_t full_video, reduced_video;
+    if (!h3_dit_token_reduction_shape(
+            dit->latent_t, dit->latent_h, dit->latent_w, axis,
+            &full_video, &reduced_video) ||
+        full_video != dit->video_rows ||
         dit->video_target_start + dit->video_rows != dit->sequence ||
-        reduced_video > UINT32_MAX ||
         reduced_video > UINT32_MAX - dit->video_target_start) {
         fail(error, error_size,
              "token reduction requires the target video to end the packed layout");
         return 0;
     }
     dit->token_reduction = 1;
+    dit->token_reduction_axis = axis;
     dit->token_reduction_begin = begin;
     dit->token_reduction_end = end;
     dit->token_reduction_early_steps = early_steps;
     dit->token_reduction_early_end = early_end;
     dit->token_reduction_scale = scale;
-    dit->reduced_video_rows = (uint32_t)reduced_video;
+    dit->reduced_video_rows = reduced_video;
     dit->token_baseline_rows = dit->video_rows - dit->reduced_video_rows;
     dit->reduced_sequence = dit->video_target_start +
                             dit->reduced_video_rows;
+    if (getenv("H3_PROFILE"))
+        fprintf(stderr, "h3: %s token reduction %u -> %u target rows\n",
+                axis == H3_TOKEN_REDUCTION_TIME ? "temporal" : "horizontal",
+                full_video, reduced_video);
     return 1;
 }
 
@@ -479,49 +687,67 @@ static void token_pool_sources(const h3_dit *dit, uint32_t reduced_row,
         *second = reduced_row;
         return;
     }
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint32_t local = reduced_row - dit->video_target_start;
-    uint32_t source = dit->video_target_start +
-        (local / reduced_width) * spatial_width +
-        (local % reduced_width) * 2;
-    *first = source;
-    *second = source + ((source - dit->video_target_start) % spatial_width + 1 <
-                        spatial_width ? 1u : 0u);
+    uint32_t local_first, local_second;
+    int ok = h3_dit_token_reduction_pair(
+        dit->latent_t, dit->latent_h, dit->latent_w,
+        dit->token_reduction_axis,
+        reduced_row - dit->video_target_start,
+        &local_first, &local_second);
+    *first = ok ? dit->video_target_start + local_first : reduced_row;
+    *second = ok ? dit->video_target_start + local_second : reduced_row;
 }
 
 static uint32_t token_reduced_parent(const h3_dit *dit, uint32_t full_row) {
     if (full_row < dit->video_target_start) return full_row;
-    uint32_t spatial_width = (uint32_t)dit->latent_w / 2;
-    uint32_t reduced_width = (spatial_width + 1) / 2;
-    uint32_t local = full_row - dit->video_target_start;
-    return dit->video_target_start + (local / spatial_width) * reduced_width +
-           (local % spatial_width) / 2;
+    uint32_t parent;
+    int ok = h3_dit_token_reduction_parent(
+        dit->latent_t, dit->latent_h, dit->latent_w,
+        dit->token_reduction_axis,
+        full_row - dit->video_target_start, &parent);
+    return ok ? dit->video_target_start + parent : full_row;
 }
 
 static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,
-                      char *error, size_t error_size) {
+                      int allow_sidecar, char *error, size_t error_size) {
     char name[160];
 #define LOAD1(field, suffix, width) do {                                       \
     snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
     block->field = bf1(dit, name, width, error, error_size);                    \
     if (!block->field) return 0;                                                \
 } while (0)
-#define LOAD2(field, suffix, rows, columns) do {                               \
+#define LOAD_MATRIX(field, int8_field, scales_field, suffix, rows, columns,    \
+                    enabled, keep_bf16) do {                                   \
     snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
-    block->field = bf2(dit, name, rows, columns, error, error_size);            \
-    if (!block->field) return 0;                                                \
+    if ((enabled) && dit->int8_weights && allow_sidecar) {                     \
+        block->int8_field = sidecar_i8_2(                                      \
+            dit, name, rows, columns, error, error_size);                      \
+        block->scales_field = sidecar_scale(                                   \
+            dit, name, rows, error, error_size);                               \
+        if (!block->int8_field || !block->scales_field) return 0;              \
+        if (keep_bf16) {                                                       \
+            block->field = bf2(dit, name, rows, columns, error, error_size);   \
+            if (!block->field) return 0;                                       \
+        }                                                                      \
+    } else {                                                                   \
+        block->field = bf2(dit, name, rows, columns, error, error_size);       \
+        if (!block->field) return 0;                                           \
+    }                                                                          \
 } while (0)
     LOAD1(norm1, "norm1.weight", HIDDEN);
     LOAD1(norm2, "norm2.weight", HIDDEN);
-    LOAD2(qkv, "attn.qkv_proj.weight", INNER * 3, HIDDEN);
+    LOAD_MATRIX(qkv, qkv_int8, qkv_scales, "attn.qkv_proj.weight",
+                INNER * 3, HIDDEN, dit->int8_qkv, dit->keep_bf16_qkv);
     LOAD1(q_norm, "attn.q_norm.weight", HEAD_DIM);
     LOAD1(k_norm, "attn.k_norm.weight", HEAD_DIM);
-    LOAD2(out, "attn.out_proj.weight", HIDDEN, INNER);
-    LOAD2(fc1, "mlp.fc1.weight", FFN * 2, HIDDEN);
-    LOAD2(fc2, "mlp.fc2.weight", HIDDEN, FFN);
+    LOAD_MATRIX(out, out_int8, out_scales, "attn.out_proj.weight",
+                HIDDEN, INNER, dit->int8_attention_out,
+                dit->keep_bf16_attention_out);
+    LOAD_MATRIX(fc1, fc1_int8, fc1_scales, "mlp.fc1.weight",
+                FFN * 2, HIDDEN, dit->int8_mlp, dit->keep_bf16_mlp);
+    LOAD_MATRIX(fc2, fc2_int8, fc2_scales, "mlp.fc2.weight",
+                HIDDEN, FFN, dit->int8_mlp, dit->keep_bf16_mlp);
 #undef LOAD1
-#undef LOAD2
+#undef LOAD_MATRIX
     return 1;
 }
 
@@ -816,9 +1042,9 @@ static int refine_text(h3_dit *dit, const h3_text_embedding *text,
     h3_gpu_tensor *value = NULL, *heads = NULL, *branch = NULL, *fc1 = NULL;
     h3_gpu_tensor *activated = NULL;
     int ok = source && condition_w && condition_b &&
-        load_block(dit, &refiner[0], "token_refiner.blocks.0.",
+        load_block(dit, &refiner[0], "token_refiner.blocks.0.", 0,
                    error, error_size) &&
-        load_block(dit, &refiner[1], "token_refiner.blocks.1.",
+        load_block(dit, &refiner[1], "token_refiner.blocks.1.", 0,
                    error, error_size);
     if (ok) final_norm = bf1(dit, "token_refiner.final_norm.weight", HIDDEN,
                              error, error_size);
@@ -1254,15 +1480,15 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                 !prepare_stream_layer(dit, index, error, error_size))
                 return 0;
         } else {
-            if (!load_block(dit, &dit->blocks[index], prefix,
+            if (!load_block(dit, &dit->blocks[index], prefix, 1,
                             error, error_size)) return 0;
-            if (dit->int8_mlp &&
+            if (dit->int8_mlp && !dit->blocks[index].fc1_int8 &&
                 !quantize_block_mlp(dit, &dit->blocks[index],
                                     error, error_size)) return 0;
-            if (dit->int8_qkv &&
+            if (dit->int8_qkv && !dit->blocks[index].qkv_int8 &&
                 !quantize_block_qkv(dit, &dit->blocks[index],
                                     error, error_size)) return 0;
-            if (dit->int8_attention_out &&
+            if (dit->int8_attention_out && !dit->blocks[index].out_int8 &&
                 !quantize_block_attention_out(
                     dit, &dit->blocks[index], error, error_size)) return 0;
         }
@@ -1348,6 +1574,81 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
             return 0;
         }
     }
+    const char *pdd_heads = getenv("H3_PDD_HEADS");
+    if (pdd_heads && *pdd_heads && strcmp(pdd_heads, "0") != 0) {
+        char name[96];
+        char probe_error[128];
+        unsigned count = 0;
+        while (count < 16) {
+            snprintf(name, sizeof(name),
+                     "final_layer.video_out.weight.step%u", count);
+            h3_gpu_tensor *weight = f2(dit, name, VIDEO_PATCH, HIDDEN,
+                                       probe_error, sizeof(probe_error));
+            if (!weight) break;
+            dit->pdd_video_w[count] = weight;
+            snprintf(name, sizeof(name),
+                     "final_layer.video_out.bias.step%u", count);
+            dit->pdd_video_b[count] = f1(dit, name, VIDEO_PATCH,
+                                         error, error_size);
+            snprintf(name, sizeof(name),
+                     "final_layer.audio_out.weight.step%u", count);
+            dit->pdd_audio_w[count] = f2(dit, name, AUDIO_CHANNELS, HIDDEN,
+                                         error, error_size);
+            snprintf(name, sizeof(name),
+                     "final_layer.audio_out.bias.step%u", count);
+            dit->pdd_audio_b[count] = f1(dit, name, AUDIO_CHANNELS,
+                                         error, error_size);
+            if (!dit->pdd_video_b[count] || !dit->pdd_audio_w[count] ||
+                !dit->pdd_audio_b[count]) return 0;
+            count++;
+        }
+        if (count < 2) {
+            fail(error, error_size,
+                 "H3_PDD_HEADS is set but the checkpoint has no "
+                 "final_layer.*.step* head tensors");
+            return 0;
+        }
+        if (dit->bf16_final) {
+            int ok = h3_gpu_begin(dit->gpu);
+            for (unsigned step = 0; ok && step < count; step++) {
+                h3_gpu_tensor **slots[4] = {
+                    &dit->pdd_video_w[step], &dit->pdd_video_b[step],
+                    &dit->pdd_audio_w[step], &dit->pdd_audio_b[step]
+                };
+                size_t elements[4] = {
+                    (size_t)VIDEO_PATCH * HIDDEN, VIDEO_PATCH,
+                    (size_t)AUDIO_CHANNELS * HIDDEN, AUDIO_CHANNELS
+                };
+                for (unsigned index = 0; ok && index < 4; index++) {
+                    h3_gpu_tensor *target = h3_gpu_tensor_new_bf16(
+                        dit->gpu, elements[index]);
+                    ok = target && h3_gpu_cast_f32_to_bf16(
+                        dit->gpu, target, *slots[index],
+                        (uint32_t)elements[index]);
+                    if (ok) {
+                        h3_gpu_tensor_free(*slots[index]);
+                        *slots[index] = target;
+                    } else {
+                        h3_gpu_tensor_free(target);
+                    }
+                }
+            }
+            if (ok) ok = h3_gpu_submit(dit->gpu);
+            if (!ok) {
+                fail(error, error_size,
+                     "cannot convert PDD heads: %s", h3_gpu_error(dit->gpu));
+                return 0;
+            }
+        }
+        dit->pdd_saved_video_w = dit->final_video_w;
+        dit->pdd_saved_video_b = dit->final_video_b;
+        dit->pdd_saved_audio_w = dit->final_audio_w;
+        dit->pdd_saved_audio_b = dit->final_audio_b;
+        dit->pdd_evaluations = count;
+        if (getenv("H3_PROFILE"))
+            fprintf(stderr, "h3: PDD per-step heads active "
+                    "(%u evaluations)\n", count);
+    }
     return dit->video_patch_w && dit->video_patch_b && dit->audio_patch_w &&
            dit->audio_patch_b && dit->final_norm && dit->final_video_w &&
            dit->final_video_b && dit->final_audio_w && dit->final_audio_b;
@@ -1432,6 +1733,49 @@ static int allocate_activations(h3_dit *dit, char *error, size_t error_size) {
              "cannot allocate DiT activation buffers: %s",
              h3_gpu_error(dit->gpu));
         return 0;
+    }
+    /* Windowed video attention (experimental): H3_ATTN_WINDOW=W restricts
+     * target-video tokens to +/- W temporal latent frames plus all global
+     * (non-video) tokens, composed from MPSGraph SDPA slabs. Requires the
+     * head-major attention path and a video segment that ends the layout. */
+    const char *window_text = getenv("H3_ATTN_WINDOW");
+    if (window_text && *window_text) {
+        char *end = NULL;
+        long window = strtol(window_text, &end, 10);
+        uint32_t frame_rows = dit->latent_t > 0 &&
+            dit->video_rows % (uint32_t)dit->latent_t == 0 ?
+            dit->video_rows / (uint32_t)dit->latent_t : 0;
+        if (!end || *end || window < 1 || window > dit->latent_t ||
+            !frame_rows ||
+            dit->video_target_start + dit->video_rows != dit->sequence) {
+            fail(error, error_size,
+                 "H3_ATTN_WINDOW requires 1..latent_t frames and a "
+                 "trailing video segment");
+            return 0;
+        }
+        dit->attn_window_frames = (uint32_t)window;
+        uint32_t global_rows = dit->video_target_start;
+        uint32_t q_pack = (uint32_t)window * frame_rows;
+        if (global_rows > q_pack) q_pack = global_rows;
+        uint32_t kv_frames = (uint32_t)dit->latent_t <
+            3u * (uint32_t)window ? (uint32_t)dit->latent_t :
+            3u * (uint32_t)window;
+        uint32_t kv_pack = kv_frames * frame_rows + global_rows;
+        dit->attn_pack_q = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)q_pack * INNER);
+        dit->attn_pack_k = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)kv_pack * INNER);
+        dit->attn_pack_v = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)kv_pack * INNER);
+        dit->attn_pack_o = h3_gpu_tensor_new_bf16(
+            dit->gpu, (size_t)q_pack * INNER);
+        if (!dit->attn_pack_q || !dit->attn_pack_k || !dit->attn_pack_v ||
+            !dit->attn_pack_o) {
+            fail(error, error_size,
+                 "cannot allocate windowed attention scratch: %s",
+                 h3_gpu_error(dit->gpu));
+            return 0;
+        }
     }
     if (getenv("H3_DISABLE_FUSED_FINAL_SLICE")) {
         dit->final_audio_input = h3_gpu_tensor_new_bf16(
@@ -1577,6 +1921,7 @@ static h3_dit *load_dit(const char *weight_directory,
                         int use_slower_dynamic_fc1_k,
                         int use_slower_grouped_quantizer,
                         int use_int8_row_fc2,
+                        const h3_lora_set *loras,
                         const float *condition_video_rows,
                         size_t condition_video_elements,
                         const float *condition_audio_rows,
@@ -1606,6 +1951,7 @@ static h3_dit *load_dit(const char *weight_directory,
     dit->bf16_final = getenv("H3_DIT_F32_FINAL") == NULL;
     dit->core_reuse_interval = core_reuse_interval;
     dit->ssd_streaming = ssd_streaming;
+    dit->loras = loras;
     dit->spatial_rope_scale = spatial_rope_scale;
     configure_active_blocks(dit, active_blocks);
     if (!copy_layout(dit, layout, error, error_size) ||
@@ -1662,6 +2008,68 @@ static h3_dit *load_dit(const char *weight_directory,
         (getenv("H3_INT8_KEEP_BF16_MLP") ||
          getenv("H3_BENCH_INT8_MLP_AB") ||
          getenv("H3_INT8_MLP_STAGE"));
+    char *automatic_sidecar = NULL;
+    const char *int8_sidecar = getenv("H3_INT8_SIDECAR");
+    int sidecar_is_explicit = int8_sidecar && *int8_sidecar;
+    if (loras && dit->ssd_streaming) {
+        fail(error, error_size,
+             "runtime LoRA cannot be combined with SSD streaming");
+        goto failed;
+    }
+    if (loras && sidecar_is_explicit) {
+        fail(error, error_size,
+             "runtime LoRA cannot be combined with H3_INT8_SIDECAR");
+        goto failed;
+    }
+    if (!loras && !sidecar_is_explicit &&
+        !getenv("H3_DISABLE_INT8_SIDECAR") &&
+        !dit->ssd_streaming &&
+        (dit->int8_mlp || dit->int8_qkv || dit->int8_attention_out)) {
+        automatic_sidecar = sidecar_path(weight_directory, ".h3-int8");
+        if (automatic_sidecar) {
+            struct stat status;
+            char detail[256];
+            if (stat(automatic_sidecar, &status) == 0 &&
+                S_ISDIR(status.st_mode)) {
+                if (sidecar_matches_source(
+                        automatic_sidecar, weight_directory,
+                        h3_weight_store_shards(dit->weights),
+                        detail, sizeof(detail))) {
+                    int8_sidecar = automatic_sidecar;
+                } else if (getenv("H3_PROFILE")) {
+                    fprintf(stderr,
+                            "h3: ignoring incompatible automatic INT8 "
+                            "sidecar: %s\n", detail);
+                }
+            }
+        }
+    }
+    if (int8_sidecar && *int8_sidecar) {
+        if (dit->ssd_streaming ||
+            (!dit->int8_mlp && !dit->int8_qkv && !dit->int8_attention_out)) {
+            fail(error, error_size,
+                 "H3_INT8_SIDECAR requires the resident M5 INT8 path");
+            free(automatic_sidecar);
+            goto failed;
+        }
+        if (sidecar_is_explicit && !sidecar_matches_source(
+                int8_sidecar, weight_directory,
+                h3_weight_store_shards(dit->weights),
+                error, error_size)) {
+            free(automatic_sidecar);
+            goto failed;
+        }
+        dit->int8_weights = h3_weight_store_open(
+            int8_sidecar, error, error_size);
+        if (!dit->int8_weights) {
+            free(automatic_sidecar);
+            goto failed;
+        }
+        if (getenv("H3_PROFILE"))
+            fprintf(stderr, "h3: loading prequantized INT8 weights from %s\n",
+                    int8_sidecar);
+    }
+    free(automatic_sidecar);
     h3_gpu_profile_set_label(dit->gpu, "H3 DiT");
     report(progress, progress_opaque, "refine text", 0, 1);
     if (!refine_text(dit, text, error, error_size)) goto failed;
@@ -1669,7 +2077,8 @@ static h3_dit *load_dit(const char *weight_directory,
     schedule_progress schedule_state = {progress, progress_opaque};
     dit->schedule = h3_dit_schedule_precompute(
         dit->weights, dit->gpu, sigmas, dit->video_condition_rows != 0,
-        dit->audio_condition_rows != 0, schedule_report, &schedule_state,
+        dit->audio_condition_rows != 0, loras, &dit->lora_peak_scratch,
+        schedule_report, &schedule_state,
         error, error_size);
     if (dit->schedule) {
         configure_gate_ranked_blocks(dit);
@@ -1692,6 +2101,10 @@ static h3_dit *load_dit(const char *weight_directory,
         goto failed;
     }
     h3_gpu_profile_mark(dit->gpu, "load");
+    if (loras && getenv("H3_PROFILE"))
+        fprintf(stderr, "h3: runtime LoRA peak host scratch %.1f MiB\n",
+                (double)dit->lora_peak_scratch / (1024.0 * 1024.0));
+    dit->loras = NULL;
     return dit;
 failed:
     h3_dit_free(dit);
@@ -1719,6 +2132,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size) {
     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
@@ -1734,7 +2148,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                     use_slower_uncached_int8_scales,
                     use_slower_dynamic_fc1_k,
                     use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
+                    use_int8_row_fc2, loras,
                     NULL, 0, NULL, 0, progress, progress_opaque,
                     error, error_size);
 }
@@ -1761,6 +2175,7 @@ h3_dit *h3_dit_load_conditioned(
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          const float *condition_video_rows,
                          size_t condition_video_elements,
                          const float *condition_audio_rows,
@@ -1780,7 +2195,7 @@ h3_dit *h3_dit_load_conditioned(
                     use_slower_uncached_int8_scales,
                     use_slower_dynamic_fc1_k,
                     use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
+                    use_int8_row_fc2, loras,
                     condition_video_rows, condition_video_elements,
                     condition_audio_rows, condition_audio_elements,
                     progress, progress_opaque, error, error_size);
@@ -1923,12 +2338,46 @@ static int run_block(h3_dit *dit, unsigned index, int step,
         !dit->use_slower_row_major_attention_output &&
         !dit->use_slower_uncached_int8_scales &&
         !getenv("H3_DISABLE_HEAD_MAJOR_ATTENTION_OUTPUT");
-    if (head_major_attention_output)
-        OP(h3_gpu_sdpa_bf16_head_major_output(
-            dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
-            rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),
-           "DiT head-major full attention");
-    else
+    if (head_major_attention_output) {
+        /* Resolve the current video slab geometry: reduction repacks video
+         * rows in place at the end of the sequence, halving either the
+         * per-frame rows (horizontal) or the frame count (time). */
+        uint32_t window = dit->attn_window_frames;
+        uint32_t frames = 0, frame_rows = 0;
+        if (window && rows > dit->video_target_start) {
+            uint32_t video_now = rows - dit->video_target_start;
+            uint32_t full_frame_rows = dit->latent_t > 0 ?
+                dit->video_rows / (uint32_t)dit->latent_t : 0;
+            if (video_now == dit->video_rows) {
+                frames = (uint32_t)dit->latent_t;
+                frame_rows = full_frame_rows;
+            } else if (dit->token_reduction_axis ==
+                           H3_TOKEN_REDUCTION_TIME &&
+                       full_frame_rows &&
+                       video_now % full_frame_rows == 0) {
+                frames = video_now / full_frame_rows;
+                frame_rows = full_frame_rows;
+            } else if (dit->latent_t > 0 &&
+                       video_now % (uint32_t)dit->latent_t == 0) {
+                frames = (uint32_t)dit->latent_t;
+                frame_rows = video_now / (uint32_t)dit->latent_t;
+            }
+        }
+        if (window && frames > 3 * window && frame_rows)
+            OP(h3_gpu_sdpa_windowed_bf16_head_major(
+                dit->gpu, dit->attention_heads, dit->query, dit->key,
+                dit->value, dit->attn_pack_q, dit->attn_pack_k,
+                dit->attn_pack_v, dit->attn_pack_o, rows, HEADS, HEAD_DIM,
+                1.0f / sqrtf((float)HEAD_DIM), dit->video_target_start,
+                frames, frame_rows, window),
+               "DiT windowed head-major attention");
+        else
+            OP(h3_gpu_sdpa_bf16_head_major_output(
+                dit->gpu, dit->attention_heads, dit->query, dit->key,
+                dit->value, rows, HEADS, HEAD_DIM,
+                1.0f / sqrtf((float)HEAD_DIM)),
+               "DiT head-major full attention");
+    } else
         OP(h3_gpu_sdpa_bf16(
             dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
             rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),
@@ -2050,6 +2499,15 @@ static int run_block(h3_dit *dit, unsigned index, int step,
 static int encode_forward(h3_dit *dit, int step, int begin, int submit,
                           int disable_command_split, char *error,
                           size_t error_size) {
+    if (dit->pdd_evaluations) {
+        unsigned index = step < 0 ? 0u : (unsigned)step;
+        if (index >= dit->pdd_evaluations)
+            index = dit->pdd_evaluations - 1;
+        dit->final_video_w = dit->pdd_video_w[index];
+        dit->final_video_b = dit->pdd_video_b[index];
+        dit->final_audio_w = dit->pdd_audio_w[index];
+        dit->final_audio_b = dit->pdd_audio_b[index];
+    }
 #define OP(call, label) do {                                                    \
     if (!gpu_op(dit, (call), error, error_size, label)) return 0;               \
 } while (0)
@@ -2871,6 +3329,14 @@ int h3_dit_denoise_euler_preview(
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
+    if (dit->pdd_evaluations &&
+        ((unsigned)dit->sigmas.steps != dit->pdd_evaluations ||
+         reuse_interval != 1)) {
+        fail(error, error_size,
+             "H3_PDD_HEADS requires --steps %u --reuse 1 to match the "
+             "distilled evaluation grid", dit->pdd_evaluations);
+        return 0;
+    }
     if (gpu_sampler_requested(dit))
         return denoise_euler_gpu(dit, video_latent, audio_latent,
                                  reuse_interval, progress, progress_opaque,
@@ -3019,6 +3485,18 @@ void h3_dit_free(h3_dit *dit) {
     free_block(&dit->stream_slots[0]);
     free_block(&dit->stream_slots[1]);
     free_tensor(&dit->final_norm);
+    if (dit->pdd_evaluations) {
+        dit->final_video_w = dit->pdd_saved_video_w;
+        dit->final_video_b = dit->pdd_saved_video_b;
+        dit->final_audio_w = dit->pdd_saved_audio_w;
+        dit->final_audio_b = dit->pdd_saved_audio_b;
+        for (unsigned step = 0; step < dit->pdd_evaluations; step++) {
+            free_tensor(&dit->pdd_video_w[step]);
+            free_tensor(&dit->pdd_video_b[step]);
+            free_tensor(&dit->pdd_audio_w[step]);
+            free_tensor(&dit->pdd_audio_b[step]);
+        }
+    }
     free_tensor(&dit->final_video_w); free_tensor(&dit->final_video_b);
     free_tensor(&dit->final_audio_w); free_tensor(&dit->final_audio_b);
 #define FREE(field) free_tensor(&dit->field)
@@ -3033,6 +3511,8 @@ void h3_dit_free(h3_dit *dit) {
     FREE(core_input); FREE(core_residual);
     FREE(mod_attention); FREE(qkv); FREE(query); FREE(key); FREE(value);
     FREE(attention_heads); FREE(attention_output);
+    FREE(attn_pack_q); FREE(attn_pack_k); FREE(attn_pack_v);
+    FREE(attn_pack_o);
     FREE(token_pool_pairs); FREE(token_baseline_indices);
     FREE(token_expand_parents); FREE(token_original); FREE(mod_mlp); FREE(fc1);
     FREE(activated); FREE(mlp_output); FREE(int8_activation);
@@ -3056,6 +3536,7 @@ void h3_dit_free(h3_dit *dit) {
                 dit->stream_wait_seconds);
     }
     h3_gpu_free(dit->gpu);
+    h3_weight_store_free(dit->int8_weights);
     h3_weight_store_free(dit->weights);
     h3_layout_free(&dit->layout);
     free(dit);

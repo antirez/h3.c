@@ -3,12 +3,18 @@
 
 #include "h3_gpu.h"
 #include "h3_host.h"
+#include "h3_lora.h"
 #include "h3_text_encoder.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 typedef struct h3_dit h3_dit;
+
+typedef enum {
+    H3_TOKEN_REDUCTION_HORIZONTAL = 0,
+    H3_TOKEN_REDUCTION_TIME = 1
+} h3_token_reduction_axis;
 
 typedef void (*h3_dit_progress)(const char *phase, int completed, int total,
                                 void *opaque);
@@ -41,6 +47,7 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size);
 
@@ -69,6 +76,7 @@ h3_dit *h3_dit_load_conditioned(
                          int use_slower_dynamic_fc1_k,
                          int use_slower_grouped_quantizer,
                          int use_int8_row_fc2,
+                         const h3_lora_set *loras,
                          const float *condition_video_rows,
                          size_t condition_video_elements,
                          const float *condition_audio_rows,
@@ -123,6 +131,19 @@ int h3_dit_denoise_euler_preview(
  * quality-tuned aggressive schedule remains pinned by cheap host tests. */
 int h3_dit_reuse_schedule(int steps, int reuse_interval, uint8_t *selected,
                           size_t selected_count);
+
+/* Pure host helpers for the token-reduction topology. Temporal reduction
+ * preserves time index zero, then pairs indices 1+2k and 2+2k. Indices are
+ * local to the target-video segment. */
+int h3_dit_token_reduction_shape(
+    int latent_t, int latent_h, int latent_w, h3_token_reduction_axis axis,
+    uint32_t *full_rows, uint32_t *reduced_rows);
+int h3_dit_token_reduction_pair(
+    int latent_t, int latent_h, int latent_w, h3_token_reduction_axis axis,
+    uint32_t reduced_row, uint32_t *first, uint32_t *second);
+int h3_dit_token_reduction_parent(
+    int latent_t, int latent_h, int latent_w, h3_token_reduction_axis axis,
+    uint32_t full_row, uint32_t *parent);
 
 int h3_dit_get_gpu_stats(const h3_dit *dit, h3_gpu_stats *stats);
 

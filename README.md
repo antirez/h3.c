@@ -26,6 +26,14 @@ mkdir -p outputs
 mapping all weights or generating media. Run `./h3 --help` for the complete CLI
 reference.
 
+The Metal shader source is embedded in the executable and compiled at runtime,
+so `h3` can be installed as a standalone binary:
+
+```sh
+mkdir -p "$HOME/bin"
+install -m 755 h3 "$HOME/bin/h3"
+```
+
 Without `-p`, the same binary starts an Iris-style interactive session:
 
 ```sh
@@ -127,6 +135,49 @@ uses the released linear base grid with one terminal point. On the 512-square,
 against a 29-pass reference; an independent surfer test measured 0.547. The
 four-pass denoise took about 3.5 seconds on M5 Max, versus 26.4 seconds for the
 reference.
+
+Runtime LoRAs use loading-time folding: the base checkpoint stays read-only,
+only matched matrices are copied in bounded row tiles, and the completed BF16
+weights continue through the existing M5 INT8 path. No LoRA GEMM is added to
+denoising:
+
+```sh
+./h3 -d ./MiniMax-H3 \
+  --lora adapter.safetensors --lora-scale 0.8 --lora-scope fl2va \
+  -p "A person walks" --width 512 --height 512 --frames 22 \
+  --steps 20 --layers 45 --reuse 2 -o outputs/walk.mp4
+```
+
+Up to eight adapters may be supplied and are folded in command-line order,
+rounding to BF16 after each adapter. `--lora-scale` and `--lora-scope` modify
+the preceding `--lora`; defaults are `1.0` and `fl2va`. Runtime LoRA is
+incompatible with SSD streaming and prequantized INT8 sidecars. Set
+`H3_DISABLE_RUNTIME_LORA=1` to reject runtime LoRA requests globally.
+
+LoRA adapters can alternatively be folded into a BF16 transformer offline. The tool accepts
+native `lora_A/B`, AI Toolkit / Diffusers `diffusion_model.*.lora_A/B`, and
+Kohya / ComfyUI `lora_unet_*` down/up keys. F16, BF16, and F32 adapters are
+supported; Kohya alpha values are applied as `alpha / rank`.
+
+```sh
+# Validate names, shapes, dtypes, and pair coverage without writing a model.
+python3 tools/fold_turbo_lora.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --lora adapter.safetensors --dry-run
+
+# Produce a folded transformer tree.
+python3 tools/fold_turbo_lora.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --lora adapter.safetensors \
+  --out MiniMax-H3-custom/FL2VA/transformer \
+  --scale 1.0
+```
+
+The output retains the checkpoint's tensor names and alignment. Each update
+and folded weight is checked for finite values, followed by a per-tensor parity
+probe before bytes are written. Validate an unfamiliar adapter with
+`--dry-run` first. Folding changes most transformer payload pages, so budget
+close to one additional transformer copy even when APFS cloning is available.
 
 For a low-memory run, add `--ssd-streaming`:
 
@@ -501,6 +552,9 @@ therefore opt-in rather than the close-reference default.
 `H3_TOKEN_REDUCTION_BLOCKS` can override the later `4:30` interval;
 `H3_TOKEN_REDUCTION_EARLY=STEPS:END` overrides the early schedule and `0`
 disables it. `H3_DISABLE_TOKEN_REDUCTION=1` provides an in-context exact oracle.
+`H3_TOKEN_REDUCTION_AXIS=time` is an experimental long-video mode: it preserves
+the first temporal latent and pairs subsequent adjacent temporal latents while
+leaving every spatial position intact. The default remains `horizontal`.
 `H3_DISABLE_FUSED_TOKEN_POOL_ADALN=1` and
 `H3_DISABLE_FUSED_TOKEN_ADALN=1` independently restore the two-kernel entry and
 exit boundaries for diagnosis.
@@ -664,8 +718,8 @@ waveform agrees with the corrected MLX oracle to relative L2 `6.94e-5`.
 `--first-frame`, `--last-frame`, and their combination use the released visual
 VAE encoder, Qwen3-VL vision tower and three-deepstack multimodal presentation,
 0.999 condition augmentation, and fixed condition rows in the native DiT. The
-first image is stretched to the target canvas; the last image is aspect-cover
-scaled and center cropped, matching the reference implementation. `--ref-image`
+first and last images are aspect-cover scaled and center cropped to prevent
+geometric distortion when their source ratio differs from the target. `--ref-image`
 selects the distinct Ref2VA transformer, preserves ordered `<Picture N>`
 presentation, and uses the released down-only aspect-preserving reference canvas.
 `--ref-silent-video` additionally performs bounded 24 fps decoding, the visual
@@ -715,6 +769,23 @@ MLP weights only when an A/B diagnostic requests them. Normal int8 loading
 releases each block's BF16 FC1/FC2 buffers after their submitted quantization
 finishes, reducing measured peak tensor storage to 25.9 GiB from the BF16
 path's 36.4 GiB. Runtime weight quantization still adds startup time.
+
+The sidecar path prequantizes the four large matrix families and loads their I8
+weights and F32 row scales directly on later runs:
+
+```sh
+python3 tools/build_int8_sidecar.py \
+  --checkpoint MiniMax-H3/FL2VA/transformer \
+  --out MiniMax-H3/FL2VA/transformer/.h3-int8
+
+./h3 -d MiniMax-H3 -p "A person walks" -o outputs/walk.mp4
+```
+
+On M5, a complete `.h3-int8` beside the active transformer is selected
+automatically after its source manifest matches every checkpoint shard. Set
+`H3_DISABLE_INT8_SIDECAR=1` to force online quantization for A/B tests, or use
+`H3_INT8_SIDECAR=PATH` for an explicit nonstandard location. This path is
+incompatible with `--ssd-streaming`.
 
 The fastest M5 path also quantizes each DiT QKV projection and writes its
 Q/K/V tiles directly in head-major attention layout before the existing Q/K

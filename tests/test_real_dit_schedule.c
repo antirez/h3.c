@@ -44,7 +44,8 @@ int main(int argc, char **argv) {
     h3_sigma_schedule sigmas;
     if (!h3_schedule_build(20, &sigmas)) die("cannot build 20-step schedule");
     h3_dit_schedule *schedule = h3_dit_schedule_precompute(
-        weights, gpu, &sigmas, 1, 0, progress, NULL, error, sizeof(error));
+        weights, gpu, &sigmas, 1, 0, NULL, NULL,
+        progress, NULL, error, sizeof(error));
     if (!schedule) die(error);
     if (h3_dit_schedule_steps(schedule) != 20 ||
         h3_dit_schedule_time_rows(schedule) != 40 ||

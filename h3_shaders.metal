@@ -3977,11 +3977,10 @@ kernel void h3_gqa_causal_bf16(
     threadgroup float shared_query[128];
 
     for (uint d = tid; d < args.head_dim; d += threads) {
-        /* MLX's fused SDPA applies the scale to Q before the tiled QK
-         * contraction. Matching that order matters at sharp late-layer
-         * attention boundaries. */
-        shared_query[d] = h3_bf16_to_f32(h3_f32_to_bf16(
-            h3_bf16_to_f32(query[q_base + d]) * args.scale));
+        /* Keep Q scaling in F32 through the QK contraction. Rounding the
+         * product back to BF16 discards precision without reducing storage. */
+        shared_query[d] =
+            h3_bf16_to_f32(query[q_base + d]) * args.scale;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -4329,4 +4328,176 @@ kernel void h3_silu_mul_bf16(device const ushort *gate [[buffer(0)]],
     float value = h3_bf16_to_f32(gate[gid]);
     float other = h3_bf16_to_f32(up[gid]);
     output[gid] = h3_f32_to_bf16(value / (1.0f + exp(-value)) * other);
+}
+
+struct h3_sdpa_flash_args {
+    uint sequence;
+    uint heads;
+    float scale;
+};
+
+/* v0 flash SDPA over head-major BF16 Q/K/V with head_dim 128. One
+ * threadgroup owns one (head, 64-query-row block) pair and streams K/V in
+ * 64-token tiles with an online softmax. Scores and probabilities live in
+ * threadgroup memory; the PV accumulator stays in TensorOps cooperative
+ * fragments across the whole key loop, so only the finished 64x128 output
+ * block reaches device memory. */
+kernel void h3_sdpa_flash_bf16_hm(
+        device bfloat *query [[buffer(0)]],
+        device bfloat *key [[buffer(1)]],
+        device bfloat *value [[buffer(2)]],
+        device bfloat *output [[buffer(3)]],
+        constant h3_sdpa_flash_args &args [[buffer(4)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    constexpr int Q_TILE = 64;
+    constexpr int K_TILE = 64;
+    constexpr int HEAD_DIM = 128;
+    uint q_start = group.x * Q_TILE;
+    if (q_start >= args.sequence) return;
+    size_t head_base = (size_t)group.y * args.sequence * HEAD_DIM;
+    device bfloat *q_head = query + head_base;
+    device bfloat *k_head = key + head_base;
+    device bfloat *v_head = value + head_base;
+    device bfloat *o_head = output + head_base;
+
+    threadgroup float scores[Q_TILE * K_TILE];
+    threadgroup bfloat probs[Q_TILE * K_TILE];
+    threadgroup float row_max[Q_TILE];
+    threadgroup float row_sum[Q_TILE];
+    threadgroup float row_rescale[Q_TILE];
+    if (tid < Q_TILE) {
+        row_max[tid] = -INFINITY;
+        row_sum[tid] = 0.0f;
+    }
+
+    auto q_tensor = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        q_head, dextents<int32_t, 2>(HEAD_DIM, (int)args.sequence));
+    auto k_tensor = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        k_head, dextents<int32_t, 2>(HEAD_DIM, (int)args.sequence));
+    auto v_tensor = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        v_head, dextents<int32_t, 2>(HEAD_DIM, (int)args.sequence));
+    auto p_tensor = tensor(probs, dextents<int32_t, 2>(K_TILE, Q_TILE));
+
+    matmul2d<matmul2d_descriptor(Q_TILE, K_TILE, HEAD_DIM, false, true, true),
+             execution_simdgroups<8>> mm_qk;
+    matmul2d<matmul2d_descriptor(Q_TILE, HEAD_DIM, K_TILE, false, false, true,
+                                 matmul2d_descriptor::mode::
+                                     multiply_accumulate),
+             execution_simdgroups<8>> mm_pv;
+    auto q_slice = q_tensor.slice<HEAD_DIM, Q_TILE>(0, (int)q_start);
+    auto k_first = k_tensor.slice<HEAD_DIM, K_TILE>(0, 0);
+    auto v_first = v_tensor.slice<HEAD_DIM, K_TILE>(0, 0);
+    auto o_accum = mm_pv.template get_destination_cooperative_tensor<
+        decltype(p_tensor), decltype(v_first), float>();
+    #pragma clang loop unroll(full)
+    for (ushort element = 0; element < o_accum.get_capacity(); element++)
+        if (o_accum.is_valid_element(element)) o_accum[element] = 0.0f;
+
+    for (uint k_start = 0; k_start < args.sequence; k_start += K_TILE) {
+        auto k_slice = k_tensor.slice<HEAD_DIM, K_TILE>(0, (int)k_start);
+        auto s_frag = mm_qk.template get_destination_cooperative_tensor<
+            decltype(q_slice), decltype(k_slice), float>();
+        mm_qk.run(q_slice, k_slice, s_frag);
+        #pragma clang loop unroll(full)
+        for (ushort element = 0; element < s_frag.get_capacity(); element++) {
+            if (!s_frag.is_valid_element(element)) continue;
+            auto index = s_frag.get_multidimensional_index(element);
+            uint row = (uint)index[1];
+            uint column = (uint)index[0];
+            scores[row * K_TILE + column] =
+                k_start + column < args.sequence ?
+                    s_frag[element] * args.scale : -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < Q_TILE) {
+            uint row = tid;
+            if (q_start + row < args.sequence) {
+                float tile_max = -INFINITY;
+                for (int j = 0; j < K_TILE; j++)
+                    tile_max = max(tile_max, scores[row * K_TILE + j]);
+                float m_old = row_max[row];
+                float m_new = max(m_old, tile_max);
+                float rescale = exp(m_old - m_new);
+                float sum = 0.0f;
+                for (int j = 0; j < K_TILE; j++) {
+                    float p = exp(scores[row * K_TILE + j] - m_new);
+                    probs[row * K_TILE + j] = (bfloat)p;
+                    sum += p;
+                }
+                row_max[row] = m_new;
+                row_rescale[row] = rescale;
+                row_sum[row] = row_sum[row] * rescale + sum;
+            } else {
+                row_rescale[row] = 1.0f;
+                for (int j = 0; j < K_TILE; j++)
+                    probs[row * K_TILE + j] = (bfloat)0.0f;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        #pragma clang loop unroll(full)
+        for (ushort element = 0; element < o_accum.get_capacity();
+             element++) {
+            if (!o_accum.is_valid_element(element)) continue;
+            auto index = o_accum.get_multidimensional_index(element);
+            o_accum[element] *= row_rescale[(uint)index[1]];
+        }
+        auto v_slice = v_tensor.slice<HEAD_DIM, K_TILE>(0, (int)k_start);
+        mm_pv.run(p_tensor, v_slice, o_accum);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    #pragma clang loop unroll(full)
+    for (ushort element = 0; element < o_accum.get_capacity(); element++) {
+        if (!o_accum.is_valid_element(element)) continue;
+        auto index = o_accum.get_multidimensional_index(element);
+        uint row = q_start + (uint)index[1];
+        if (row < args.sequence)
+            o_head[(size_t)row * HEAD_DIM + (uint)index[0]] =
+                (bfloat)(o_accum[element] / row_sum[(uint)index[1]]);
+    }
+}
+
+struct h3_rows_pack_args {
+    uint full_rows;
+    uint packed_rows;
+    uint head_dim;
+    uint heads;
+    uint range_count;
+    uint range_start[3];
+    uint range_length[3];
+    uint scatter;
+};
+
+/* Packs up to three strided row ranges of a head-major [heads][full_rows][D]
+ * tensor into a dense [heads][packed_rows][D] scratch (scatter=0), or writes
+ * the dense scratch back into those ranges (scatter=1). Pure row movement for
+ * the windowed-attention composition; no arithmetic. */
+kernel void h3_rows_pack_bf16_hm(
+        device bfloat *full [[buffer(0)]],
+        device bfloat *packed [[buffer(1)]],
+        constant h3_rows_pack_args &args [[buffer(2)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    uint element = gid.x;
+    uint head = gid.y;
+    uint packed_row = element / args.head_dim;
+    uint column = element % args.head_dim;
+    if (packed_row >= args.packed_rows || head >= args.heads) return;
+    uint remaining = packed_row;
+    uint full_row = 0;
+    bool found = false;
+    for (uint range = 0; range < args.range_count && !found; range++) {
+        if (remaining < args.range_length[range]) {
+            full_row = args.range_start[range] + remaining;
+            found = true;
+        } else {
+            remaining -= args.range_length[range];
+        }
+    }
+    if (!found) return;
+    size_t full_index = ((size_t)head * args.full_rows + full_row) *
+        args.head_dim + column;
+    size_t packed_index = ((size_t)head * args.packed_rows + packed_row) *
+        args.head_dim + column;
+    if (args.scatter) full[full_index] = packed[packed_index];
+    else packed[packed_index] = full[full_index];
 }

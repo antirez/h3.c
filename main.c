@@ -54,10 +54,14 @@ static void usage(const char *program) {
         "      --ref-silent-video PATH  Append video without its audio\n"
         "      --ref-video-audio VIDEO AUDIO  Append video + soundtrack\n"
         "      --ref-audio PATH    Append an ordered standalone audio clip\n"
+        "      --lora PATH         Append a runtime LoRA (maximum 8)\n"
+        "      --lora-scale N      Set scale on the preceding --lora\n"
+        "      --lora-scope S      Set preceding LoRA scope: fl2va/ref2va/both\n"
         "      --frames-dir PATH  Write generated frames as PPM files\n"
         "      --show             Display a frame after every denoising step (M5)\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase Metal timing and allocation data\n"
+        "      --worker           Run the persistent stdin worker protocol\n"
         "      --info             Inspect model/device without mapping weights\n"
         "  -h, --help             Show this help\n",
         program, program, program);
@@ -101,6 +105,17 @@ static uint64_t parse_u64(const char *value, const char *label) {
         exit(2);
     }
     return (uint64_t)parsed;
+}
+
+static float parse_float(const char *value, const char *label) {
+    char *end = NULL;
+    errno = 0;
+    float parsed = strtof(value, &end);
+    if (errno || !end || *end || !isfinite(parsed)) {
+        fprintf(stderr, "h3: invalid %s: %s\n", label, value);
+        exit(2);
+    }
+    return parsed;
 }
 
 static h3_reference *append_reference(h3_reference references[12],
@@ -250,8 +265,9 @@ int main(int argc, char **argv) {
            OPT_SEED,
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
-           OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+           OPT_REF_AUDIO, OPT_LORA, OPT_LORA_SCALE, OPT_LORA_SCOPE,
+           OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
+           OPT_PROFILE, OPT_WORKER, OPT_INFO };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -299,10 +315,14 @@ int main(int argc, char **argv) {
         {"ref-silent-video", required_argument, NULL, OPT_REF_SILENT_VIDEO},
         {"ref-video-audio", required_argument, NULL, OPT_REF_VIDEO_AUDIO},
         {"ref-audio", required_argument, NULL, OPT_REF_AUDIO},
+        {"lora", required_argument, NULL, OPT_LORA},
+        {"lora-scale", required_argument, NULL, OPT_LORA_SCALE},
+        {"lora-scope", required_argument, NULL, OPT_LORA_SCOPE},
         {"frames-dir", required_argument, NULL, OPT_FRAMES_DIR},
         {"show", no_argument, NULL, OPT_SHOW},
         {"zoom", required_argument, NULL, OPT_ZOOM},
         {"profile", no_argument, NULL, OPT_PROFILE},
+        {"worker", no_argument, NULL, OPT_WORKER},
         {"info", no_argument, NULL, OPT_INFO},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -313,9 +333,12 @@ int main(int argc, char **argv) {
     h3_params params = H3_PARAMS_DEFAULT;
     h3_reference references[12];
     size_t reference_count = 0;
+    h3_lora_spec loras[8];
+    size_t lora_count = 0;
     cli_state cli = {{0}, 0, -1, -1, H3_TERM_NONE, 0, NULL, 0};
     int show = 0;
     int profile = 0;
+    int worker = 0;
     int info = 0;
     int frames_given = 0;
     int seconds_given = 0;
@@ -451,6 +474,39 @@ int main(int argc, char **argv) {
                 reference->path = optarg;
                 break;
             }
+            case OPT_LORA:
+                if (lora_count >= 8) {
+                    fprintf(stderr, "h3: at most 8 runtime LoRAs are supported\n");
+                    return 2;
+                }
+                loras[lora_count++] = (h3_lora_spec){
+                    optarg, 1.0f, H3_LORA_FL2VA
+                };
+                break;
+            case OPT_LORA_SCALE:
+                if (!lora_count) {
+                    fprintf(stderr, "h3: --lora-scale must follow --lora\n");
+                    return 2;
+                }
+                loras[lora_count - 1].scale = parse_float(optarg, "LoRA scale");
+                break;
+            case OPT_LORA_SCOPE:
+                if (!lora_count) {
+                    fprintf(stderr, "h3: --lora-scope must follow --lora\n");
+                    return 2;
+                }
+                if (!strcmp(optarg, "fl2va"))
+                    loras[lora_count - 1].scope = H3_LORA_FL2VA;
+                else if (!strcmp(optarg, "ref2va"))
+                    loras[lora_count - 1].scope = H3_LORA_REF2VA;
+                else if (!strcmp(optarg, "both"))
+                    loras[lora_count - 1].scope = H3_LORA_BOTH;
+                else {
+                    fprintf(stderr,
+                        "h3: --lora-scope must be fl2va, ref2va, or both\n");
+                    return 2;
+                }
+                break;
             case OPT_FRAMES_DIR: cli.frames_dir = optarg; break;
             case OPT_SHOW: show = 1; break;
             case OPT_ZOOM:
@@ -460,6 +516,7 @@ int main(int argc, char **argv) {
                 }
                 break;
             case OPT_PROFILE: profile = 1; break;
+            case OPT_WORKER: worker = 1; break;
             case OPT_INFO: info = 1; break;
             default: usage(argv[0]); return 2;
         }
@@ -472,6 +529,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "h3: --seconds and --frames are mutually exclusive\n");
         return 2;
     }
+    if (worker && (prompt || info)) {
+        fprintf(stderr, "h3: --worker cannot be combined with --prompt or --info\n");
+        return 2;
+    }
     if (prompt && params.steps >= 2 && params.steps <= 7 &&
         params.denoise_reuse > 1) {
         fprintf(stderr,
@@ -480,6 +541,8 @@ int main(int argc, char **argv) {
     }
     params.references = references;
     params.reference_count = reference_count;
+    params.loras = loras;
+    params.lora_count = lora_count;
     if (cli.frames_dir && mkdir(cli.frames_dir, 0755) != 0 &&
         errno != EEXIST) {
         fprintf(stderr, "h3: cannot create frames directory %s: %s\n",
@@ -522,7 +585,8 @@ int main(int argc, char **argv) {
         if (cli.frames_dir)
             fprintf(stderr, "h3: wrote frames to %s\n", cli.frames_dir);
     } else if (!info) {
-        int cli_status = h3_cli_run(ctx, model_dir, &params, show, seed_given);
+        int cli_status = h3_cli_run(
+            ctx, model_dir, &params, show, seed_given, worker);
         h3_free(ctx);
         return cli_status;
     }

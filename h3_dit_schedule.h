@@ -3,6 +3,7 @@
 
 #include "h3_gpu.h"
 #include "h3_host.h"
+#include "h3_lora.h"
 #include "h3_weights.h"
 
 #include <stddef.h>
@@ -25,7 +26,7 @@ typedef void (*h3_dit_schedule_progress)(int completed_blocks,
 h3_dit_schedule *h3_dit_schedule_precompute(
     const h3_weight_store *weights, h3_gpu *gpu,
     const h3_sigma_schedule *sigmas, int visual_condition,
-    int audio_condition,
+    int audio_condition, const h3_lora_set *loras, size_t *peak_scratch,
     h3_dit_schedule_progress progress, void *progress_opaque,
     char *error, size_t error_size);
 void h3_dit_schedule_free(h3_dit_schedule *schedule);

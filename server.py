@@ -42,22 +42,37 @@ UPLOADS = HERE / "uploads"
 UPLOADS.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 REF2VA_MODES = {"ref-image", "ref-video", "ref-audio", "multi-ref"}
-# Files that visually anchor a generation. Anchored jobs keep windowed
-# attention (2.2x faster on long clips, and the anchor pins appearance);
-# unanchored text-to-video needs dense attention or object permanence
-# collapses (A/B verdict: background "dream scroll" with +/-2 windows).
+# Image files that visually anchor a generation.
 ATTN_ANCHOR_FILE_KEYS = (
-    "ref_image", "ref_image_audio", "ref_video", "first_frame", "last_frame"
+    "ref_image", "ref_image_audio", "first_frame", "last_frame"
 )
+# A reference video contributes one vision span per sampled block, so it
+# always behaves like a crowd of competing anchors.
+ATTN_MULTI_ANCHOR_FILE_KEYS = ("ref_video",)
 
 
 def attention_window_for_request(request, override=None):
-    """Pick the H3_ATTN_WINDOW value for one video job (None = dense)."""
+    """Pick the H3_ATTN_WINDOW value for one video job (None = dense).
+
+    Windowed attention is only safe with exactly one visual anchor:
+
+    - zero anchors (plain text-to-video) lose object permanence, so the
+      background "dream scrolls" and morphs while the subject walks;
+    - two or more anchors make the model abandon the prompt and replay the
+      references instead. Measured on a two-image job (face from Picture 1,
+      pose from Picture 2): windowed output spliced both references at a
+      window-slab boundary (frame RMSE 151 vs 2 for dense) and, over 73
+      frames, dissolved into the second reference's identity outright,
+      while dense kept Picture 1's subject in Picture 2's setting.
+    """
     if override is not None:
         return override or None
     files = request.get("files") or {}
-    anchored = any(files.get(key) for key in ATTN_ANCHOR_FILE_KEYS)
-    return "2" if anchored else None
+    if any(files.get(key) for key in ATTN_MULTI_ANCHOR_FILE_KEYS):
+        return None
+    anchors = sum(len(files.get(key) or [])
+                  for key in ATTN_ANCHOR_FILE_KEYS)
+    return "2" if anchors == 1 else None
 SENSENOVA_DIR = Path(os.environ.get(
     "SENSENOVA_DIR", "/Users/lrb/models/SenseNova-U1.5-8B-MoT"
 )).resolve()

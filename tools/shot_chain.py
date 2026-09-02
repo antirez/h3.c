@@ -188,10 +188,13 @@ def main():
         command += args.extra
         print(f"SHOT {index + 1}/{len(shots)} rendering "
               f"({shot['seconds']:g}s): {shot['prompt'][:70]}", flush=True)
-        # An unanchored first shot is plain text-to-video: windowed
-        # attention breaks object permanence there (background drift), so
-        # drop it; every anchored shot keeps the inherited environment.
-        if index == 0 and not args.ref_image and "H3_ATTN_WINDOW" in os.environ:
+        # Windowed attention needs exactly one visual anchor. A first shot
+        # with no reference is plain text-to-video (background drift), and
+        # one with several references makes the model replay them instead
+        # of the prompt; both need dense attention. Chained shots always
+        # carry exactly one anchor, so they keep the inherited environment.
+        if index == 0 and len(args.ref_image) != 1 and \
+                "H3_ATTN_WINDOW" in os.environ:
             shot_env = dict(os.environ)
             shot_env.pop("H3_ATTN_WINDOW")
             elapsed = run_logged(command, log, env=shot_env, replace=True)

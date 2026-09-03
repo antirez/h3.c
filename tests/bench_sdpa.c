@@ -66,7 +66,8 @@ static int parse_positive(const char *text, int *value) {
 
 static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
                      int head_major, int flash, uint32_t window_frames,
-                     uint32_t frame_rows, uint32_t global_rows) {
+                     uint32_t slab_frames, uint32_t frame_rows,
+                     uint32_t global_rows) {
     size_t width = (size_t)H3_BENCH_HEADS * H3_BENCH_HEAD_DIM;
     if (sequence > SIZE_MAX / width) return 0;
     size_t elements = (size_t)sequence * width;
@@ -96,9 +97,10 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
             return 0;
         }
         frames = (sequence - global_rows) / frame_rows;
-        uint32_t kv_frames = frames < 3 * window_frames ? frames :
-            3 * window_frames;
-        uint32_t q_pack = window_frames * frame_rows;
+        uint32_t slab = slab_frames ? slab_frames : window_frames;
+        uint32_t span = slab + 2 * window_frames;
+        uint32_t kv_frames = frames < span ? frames : span;
+        uint32_t q_pack = slab * frame_rows;
         if (global_rows > q_pack) q_pack = global_rows;
         size_t q_elements = (size_t)q_pack * H3_BENCH_HEADS *
             H3_BENCH_HEAD_DIM;
@@ -117,7 +119,7 @@ static int benchmark(h3_gpu *gpu, uint32_t sequence, int warmup, int repeats,
     (window_frames ? h3_gpu_sdpa_windowed_bf16_head_major( \
          gpu, output, query, key, value, pack_q, pack_k, pack_v, pack_o, \
          sequence, H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale, \
-         global_rows, frames, frame_rows, window_frames) : \
+         global_rows, frames, frame_rows, window_frames, slab_frames) : \
      flash ? h3_gpu_sdpa_flash_bf16_head_major( \
          gpu, output, query, key, value, sequence, \
          H3_BENCH_HEADS, H3_BENCH_HEAD_DIM, scale) : \
@@ -220,6 +222,7 @@ int main(int argc, char **argv) {
     int head_major = 1;
     int flash = 0;
     int window = 0;
+    int slab = 0;
     int frame_rows = 1000;
     int global_rows = 2000;
     uint32_t sequences[32] = {2000, 8000, 20000, 38000};
@@ -236,6 +239,8 @@ int main(int argc, char **argv) {
             flash = 1;
         } else if (!strcmp(argv[index], "--window") && index + 1 < argc) {
             if (!parse_positive(argv[++index], &window)) return 2;
+        } else if (!strcmp(argv[index], "--slab") && index + 1 < argc) {
+            if (!parse_positive(argv[++index], &slab)) return 2;
         } else if (!strcmp(argv[index], "--frame-rows") && index + 1 < argc) {
             if (!parse_positive(argv[++index], &frame_rows)) return 2;
         } else if (!strcmp(argv[index], "--globals") && index + 1 < argc) {
@@ -258,8 +263,8 @@ int main(int argc, char **argv) {
     int ok = 1;
     for (size_t index = 0; index < sequence_count; index++)
         if (!benchmark(gpu, sequences[index], warmup, repeats, head_major,
-                       flash, (uint32_t)window, (uint32_t)frame_rows,
-                       (uint32_t)global_rows)) {
+                       flash, (uint32_t)window, (uint32_t)slab,
+                       (uint32_t)frame_rows, (uint32_t)global_rows)) {
             ok = 0;
             break;
         }

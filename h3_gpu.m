@@ -1912,10 +1912,13 @@ static int h3_gpu_sdpa_rect_encode(H3GPU *gpu, H3SDPA *cache,
 
 /* Windowed attention composed from MPSGraph SDPA calls. Video tokens are one
  * contiguous [video_frames x frame_rows] block; each query slab of
- * window_frames frames attends to its +/- window_frames frame neighborhood
+ * slab_frames frames attends to its +/- window_frames frame neighborhood
  * plus every non-video (global) token, and global tokens attend to the full
  * sequence. Q/K/V slabs are packed into caller-provided scratch tensors, so
- * the only new GPU code is a row copy; all attention math stays on MPSGraph. */
+ * the only new GPU code is a row copy; all attention math stays on MPSGraph.
+ * Slabs start at video frame 0 and step by slab_frames, so slab_frames=5
+ * keeps each 1+4 latent group (see h3_frame_per_token) inside one span;
+ * see the H3_ATTN_SLAB notes in h3_dit.c for why that matters. */
 int h3_gpu_sdpa_windowed_bf16_head_major(
         h3_gpu *opaque, h3_gpu_tensor *output,
         const h3_gpu_tensor *query, const h3_gpu_tensor *key,
@@ -1923,10 +1926,11 @@ int h3_gpu_sdpa_windowed_bf16_head_major(
         h3_gpu_tensor *pack_k, h3_gpu_tensor *pack_v, h3_gpu_tensor *pack_o,
         uint32_t rows, uint32_t heads, uint32_t head_dim, float scale,
         uint32_t video_start, uint32_t video_frames, uint32_t frame_rows,
-        uint32_t window_frames) {
+        uint32_t window_frames, uint32_t slab_frames) {
     H3GPU *gpu = GPU(opaque);
     size_t count = (size_t)rows * heads * head_dim;
     uint64_t video_rows64 = (uint64_t)video_frames * frame_rows;
+    if (!slab_frames) slab_frames = window_frames;
     if (!gpu || !window_frames || !video_frames || !frame_rows ||
         video_rows64 > rows || video_start > rows - (uint32_t)video_rows64 ||
         !h3_gpu_require_command(gpu) ||
@@ -1941,9 +1945,9 @@ int h3_gpu_sdpa_windowed_bf16_head_major(
     uint32_t global_head = video_start;
     uint32_t global_tail = rows - video_end;
     uint32_t global_rows = global_head + global_tail;
-    uint32_t slab_frames = window_frames;
-    uint32_t kv_frames_max = video_frames < 3 * window_frames ?
-        video_frames : 3 * window_frames;
+    if (slab_frames > video_frames) slab_frames = video_frames;
+    uint32_t kv_frames_max = video_frames < slab_frames + 2 * window_frames ?
+        video_frames : slab_frames + 2 * window_frames;
     uint32_t q_pack_max = slab_frames * frame_rows;
     if (global_rows > q_pack_max) q_pack_max = global_rows;
     uint32_t kv_pack_max = kv_frames_max * frame_rows + global_rows;

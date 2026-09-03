@@ -6,6 +6,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +28,10 @@ enum {
     ROPE_FREQS = 16,
     ROPE_HALF = 48,
     SLOTS = 6,
-    FINAL_SLOTS = 2
+    FINAL_SLOTS = 2,
+    /* Video latents are grouped 1+4 per 17 output frames (h3_frame_per_token
+     * in h3_host.c); windowed-attention slabs default to whole groups. */
+    ATTN_SLAB_GROUP = 5
 };
 
 typedef struct {
@@ -98,6 +102,9 @@ struct h3_dit {
     int token_reduction;
     h3_token_reduction_axis token_reduction_axis;
     uint32_t attn_window_frames;
+    uint32_t attn_slab_frames;
+    uint32_t attn_dense_steps;
+    uint32_t attn_dense_layer_stride;
     h3_gpu_tensor *attn_pack_q;
     h3_gpu_tensor *attn_pack_k;
     h3_gpu_tensor *attn_pack_v;
@@ -1737,7 +1744,15 @@ static int allocate_activations(h3_dit *dit, char *error, size_t error_size) {
     /* Windowed video attention (experimental): H3_ATTN_WINDOW=W restricts
      * target-video tokens to +/- W temporal latent frames plus all global
      * (non-video) tokens, composed from MPSGraph SDPA slabs. Requires the
-     * head-major attention path and a video segment that ends the layout. */
+     * head-major attention path and a video segment that ends the layout.
+     * H3_ATTN_SLAB=S sets how many consecutive query frames share one K/V
+     * span [slab-W, slab+S+W). Video latents come in groups of five (RoPE
+     * spacing {1,4,4,4,4} frames, see h3_frame_per_token): the first latent
+     * of each group is the 1-frame anchor the other four depend on. Slabs
+     * that are not aligned to those groups leave the offset-3/4 latents
+     * without their anchor and the decoded video dissolves for ~4 frames
+     * once per (mis)aligned group. Default S=5 keeps every group intact;
+     * S=W restores the original, ~20% cheaper but flickering, geometry. */
     const char *window_text = getenv("H3_ATTN_WINDOW");
     if (window_text && *window_text) {
         char *end = NULL;
@@ -1753,13 +1768,48 @@ static int allocate_activations(h3_dit *dit, char *error, size_t error_size) {
                  "trailing video segment");
             return 0;
         }
+        long slab = ATTN_SLAB_GROUP < dit->latent_t ?
+            ATTN_SLAB_GROUP : dit->latent_t;
+        const char *slab_text = getenv("H3_ATTN_SLAB");
+        if (slab_text && *slab_text) {
+            end = NULL;
+            slab = strtol(slab_text, &end, 10);
+            if (!end || *end || slab < 1 || slab > dit->latent_t) {
+                fail(error, error_size,
+                     "H3_ATTN_SLAB requires 1..latent_t frames");
+                return 0;
+            }
+        }
         dit->attn_window_frames = (uint32_t)window;
+        dit->attn_slab_frames = (uint32_t)slab;
+        /* Optional dense passes inside a windowed run: the first
+         * H3_ATTN_DENSE_STEPS denoising steps and/or every
+         * H3_ATTN_DENSE_LAYER_STRIDE-th DiT block use full attention so the
+         * global temporal pacing is still decided with the whole clip in
+         * view, while the remaining passes stay windowed. */
+        static const struct { const char *name; size_t offset; } dense[] = {
+            {"H3_ATTN_DENSE_STEPS", offsetof(h3_dit, attn_dense_steps)},
+            {"H3_ATTN_DENSE_LAYER_STRIDE",
+             offsetof(h3_dit, attn_dense_layer_stride)},
+        };
+        for (size_t i = 0; i < sizeof(dense) / sizeof(dense[0]); i++) {
+            const char *text = getenv(dense[i].name);
+            if (!text || !*text) continue;
+            end = NULL;
+            long value = strtol(text, &end, 10);
+            if (!end || *end || value < 0 || value > INT32_MAX) {
+                fail(error, error_size, "%s must be a non-negative integer",
+                     dense[i].name);
+                return 0;
+            }
+            *(uint32_t *)((char *)dit + dense[i].offset) = (uint32_t)value;
+        }
         uint32_t global_rows = dit->video_target_start;
-        uint32_t q_pack = (uint32_t)window * frame_rows;
+        uint32_t q_pack = (uint32_t)slab * frame_rows;
         if (global_rows > q_pack) q_pack = global_rows;
-        uint32_t kv_frames = (uint32_t)dit->latent_t <
-            3u * (uint32_t)window ? (uint32_t)dit->latent_t :
-            3u * (uint32_t)window;
+        uint32_t span = (uint32_t)slab + 2u * (uint32_t)window;
+        uint32_t kv_frames = (uint32_t)dit->latent_t < span ?
+            (uint32_t)dit->latent_t : span;
         uint32_t kv_pack = kv_frames * frame_rows + global_rows;
         dit->attn_pack_q = h3_gpu_tensor_new_bf16(
             dit->gpu, (size_t)q_pack * INNER);
@@ -2343,7 +2393,15 @@ static int run_block(h3_dit *dit, unsigned index, int step,
          * rows in place at the end of the sequence, halving either the
          * per-frame rows (horizontal) or the frame count (time). */
         uint32_t window = dit->attn_window_frames;
+        uint32_t slab = dit->attn_slab_frames;
         uint32_t frames = 0, frame_rows = 0;
+        /* Dense pass requested for this step/block: skip the window. */
+        if (window &&
+            ((dit->attn_dense_steps && step >= 0 &&
+              (uint32_t)step < dit->attn_dense_steps) ||
+             (dit->attn_dense_layer_stride &&
+              index % dit->attn_dense_layer_stride == 0)))
+            window = 0;
         if (window && rows > dit->video_target_start) {
             uint32_t video_now = rows - dit->video_target_start;
             uint32_t full_frame_rows = dit->latent_t > 0 ?
@@ -2363,13 +2421,13 @@ static int run_block(h3_dit *dit, unsigned index, int step,
                 frame_rows = video_now / (uint32_t)dit->latent_t;
             }
         }
-        if (window && frames > 3 * window && frame_rows)
+        if (window && frame_rows && frames > slab + 2 * window)
             OP(h3_gpu_sdpa_windowed_bf16_head_major(
                 dit->gpu, dit->attention_heads, dit->query, dit->key,
                 dit->value, dit->attn_pack_q, dit->attn_pack_k,
                 dit->attn_pack_v, dit->attn_pack_o, rows, HEADS, HEAD_DIM,
                 1.0f / sqrtf((float)HEAD_DIM), dit->video_target_start,
-                frames, frame_rows, window),
+                frames, frame_rows, window, slab),
                "DiT windowed head-major attention");
         else
             OP(h3_gpu_sdpa_bf16_head_major_output(

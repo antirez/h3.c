@@ -51,6 +51,17 @@ int main(int argc, char **argv) {
                sizeof(emoji) / sizeof(emoji[0]));
     const uint32_t special[] = {151644};
     check_case(tokenizer, "<|im_start|>", special, 1);
+    /* The seven H3 control tokens live in tokenizer_config.json rather than in
+     * tokenizer.json, and the reference tokenizer appends them after the last
+     * declared added token. */
+    const uint32_t dialogue[] = {151669, 58, 22574, 60, 21927, 1052, 13, 151670};
+    check_case(tokenizer, "<d>[English] Hello there.</d>", dialogue,
+               sizeof(dialogue) / sizeof(dialogue[0]));
+    const uint32_t cutoff[] = {151671};
+    check_case(tokenizer, "<|cutoff|>", cutoff, 1);
+    const uint32_t caption[] = {151674, 151675};
+    check_case(tokenizer, "<|caption_start|><|caption_end|>", caption,
+               sizeof(caption) / sizeof(caption[0]));
     const uint32_t cinematic[] = {32, 64665, 3265, 5239, 315, 264, 8866,
                                   1778, 11958, 4633, 10971, 13};
     check_case(tokenizer,

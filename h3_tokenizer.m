@@ -29,6 +29,19 @@ typedef struct {
 @implementation H3Tokenizer
 @end
 
+/* MiniMax declares seven H3 control tokens in tokenizer_config.json under
+ * "additional_special_tokens" only. They are absent from tokenizer.json, so the
+ * reference tokenizer appends them after the last declared added token, giving
+ * <d> the identifier 151669 for the released vocabulary. Without them the BPE
+ * merges swallow the markup: "<d>[English] Hi.</d>" becomes nine ordinary
+ * pieces whose first token fuses the tag with the following bracket, so the
+ * dialogue, cutoff, lyric, and caption markers described in the official
+ * prompting guides never reach the DiT. */
+static NSString *const h3_extra_special_tokens[] = {
+    @"<d>", @"</d>", @"<|cutoff|>", @"<|lyrics_start|>", @"<|lyrics_end|>",
+    @"<|caption_start|>", @"<|caption_end|>",
+};
+
 static H3Tokenizer *TOK(const h3_tokenizer *tokenizer) {
     return (__bridge H3Tokenizer *)(void *)tokenizer;
 }
@@ -329,9 +342,20 @@ h3_tokenizer *h3_tokenizer_load(const char *path, char *error,
         }
         NSArray *added = config[@"added_tokens"];
         if (!added) added = @[];
+        NSMutableSet<NSString *> *declared = [NSMutableSet set];
         for (NSDictionary *token in added) {
             maximum_id = MAX(maximum_id, [token[@"id"] unsignedIntegerValue]);
+            NSString *content = token[@"content"];
+            if (content) [declared addObject:content];
         }
+        NSMutableArray<NSString *> *extra_tokens = [NSMutableArray array];
+        for (size_t index = 0; index < sizeof(h3_extra_special_tokens) /
+                                       sizeof(h3_extra_special_tokens[0]); index++) {
+            NSString *content = h3_extra_special_tokens[index];
+            if (![declared containsObject:content]) [extra_tokens addObject:content];
+        }
+        NSUInteger first_extra_id = maximum_id + 1;
+        maximum_id += extra_tokens.count;
         NSMutableArray *inverse_vocab = [NSMutableArray arrayWithCapacity:maximum_id + 1];
         NSMutableArray *inverse_added = [NSMutableArray arrayWithCapacity:maximum_id + 1];
         for (NSUInteger index = 0; index <= maximum_id; index++) {
@@ -377,6 +401,11 @@ h3_tokenizer *h3_tokenizer_load(const char *path, char *error,
             NSNumber *identifier = token[@"id"];
             added_tokens[content] = identifier;
             inverse_added[identifier.unsignedIntegerValue] = content;
+        }
+        for (NSUInteger index = 0; index < extra_tokens.count; index++) {
+            NSNumber *identifier = @(first_extra_id + index);
+            added_tokens[extra_tokens[index]] = identifier;
+            inverse_added[identifier.unsignedIntegerValue] = extra_tokens[index];
         }
         tokenizer.addedTokens = added_tokens;
         tokenizer.inverseAddedTokens = inverse_added;

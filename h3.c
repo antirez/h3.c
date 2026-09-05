@@ -571,6 +571,10 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "denoising preview requires a frame callback");
         return 0;
     }
+    if (params->disable_audio != 0 && params->disable_audio != 1) {
+        h3_set_error(ctx, "audio disable must be zero or one");
+        return 0;
+    }
     if (params->core_reuse > 1 && params->denoise_reuse > 1) {
         h3_set_error(ctx, "core reuse and denoiser reuse cannot be combined");
         return 0;
@@ -1591,12 +1595,15 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
     if (progress.cancelled) goto cleanup;
-    h3_progress_emit(&progress, "audio VAE", 0, 7);
-    if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
-                             temporal.audio_t, h3_audio_vae_progress_bridge,
-                             &progress, &waveform, detail, sizeof(detail))) {
-        h3_set_error(ctx, "%s", detail);
-        goto cleanup;
+    if (!params->disable_audio) {
+        h3_progress_emit(&progress, "audio VAE", 0, 7);
+        if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
+                                 temporal.audio_t, h3_audio_vae_progress_bridge,
+                                 &progress, &waveform, detail,
+                                 sizeof(detail))) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
     }
     free(audio);
     audio = NULL;
@@ -1667,11 +1674,16 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     }
     if (params->output_path && *params->output_path) {
         h3_progress_emit(&progress, "FFmpeg", 0, frames.frames);
-        if (!h3_ffmpeg_write_av_rgb24_f32(
+        int written = params->disable_audio ?
+            h3_ffmpeg_write_rgb24(params->output_path, rgb8, frames.frames,
+                                  output_width, output_height, H3_FPS,
+                                  detail, sizeof(detail)) :
+            h3_ffmpeg_write_av_rgb24_f32(
                 params->output_path, rgb8, frames.frames, output_width,
                 output_height, H3_FPS, waveform.pcm, waveform.samples,
                 waveform.channels, waveform.sample_rate,
-                detail, sizeof(detail))) {
+                detail, sizeof(detail));
+        if (!written) {
             h3_set_error(ctx, "%s", detail);
             goto cleanup;
         }

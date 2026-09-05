@@ -27,6 +27,11 @@ h3: $(CLI_OBJ) $(LIB_OBJ)
 libh3.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
+# One-time tool: quantizes QKV/attention-output to int8 and writes the cache
+# that H3_ATTENTION_CACHE points the runtime at. See h3_build_attention_cache.c.
+build_attention_cache: h3_build_attention_cache.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_tests: tests/test_h3.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 

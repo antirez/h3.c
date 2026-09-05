@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 struct h3_weight_store {
     h3_st_header *headers;
@@ -124,6 +125,33 @@ void h3_weight_store_free(h3_weight_store *store) {
 
 size_t h3_weight_store_shards(const h3_weight_store *store) {
     return store ? store->count : 0;
+}
+
+static uint64_t fingerprint_fnv1a64(uint64_t hash, const void *data,
+                                    size_t bytes) {
+    const unsigned char *p = data;
+    for (size_t i = 0; i < bytes; i++) {
+        hash ^= p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+void h3_weight_store_fingerprint(const h3_weight_store *store, uint8_t out[32]) {
+    memset(out, 0, 32);
+    if (!store) return;
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t index = 0; index < store->count; index++) {
+        const char *path = store->headers[index].path;
+        uint64_t size = store->headers[index].file_size;
+        int64_t mtime = 0;
+        struct stat status;
+        if (path && stat(path, &status) == 0) mtime = (int64_t)status.st_mtime;
+        hash = fingerprint_fnv1a64(hash, path, path ? strlen(path) : 0);
+        hash = fingerprint_fnv1a64(hash, &size, sizeof(size));
+        hash = fingerprint_fnv1a64(hash, &mtime, sizeof(mtime));
+    }
+    memcpy(out, &hash, sizeof(hash));
 }
 
 const h3_st_tensor *h3_weight_find(const h3_weight_store *store,

@@ -27,4 +27,7 @@ h3_semantic_dit_test
 h3_real_video_vae_test
 h3_semantic_vae_test
 libh3.a
+h3_baseline
+build_attention_cache
+*.cache
 .DS_Store

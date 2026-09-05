@@ -65,6 +65,20 @@ int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *tensor, const char *path,
 int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                    uint64_t file_offset, size_t elements,
                                    char *error, size_t error_size);
+/* I8/F32 counterparts of the two functions above, for a pre-quantized
+ * attention cache (int8 weights + f32 scales) rather than raw BF16 shards. */
+int h3_gpu_tensor_read_file_i8(h3_gpu_tensor *tensor, const char *path,
+                               uint64_t file_offset, size_t elements,
+                               char *error, size_t error_size);
+int h3_gpu_tensor_stream_file_i8(h3_gpu_tensor *tensor, const char *path,
+                                 uint64_t file_offset, size_t elements,
+                                 char *error, size_t error_size);
+int h3_gpu_tensor_read_file_f32(h3_gpu_tensor *tensor, const char *path,
+                                uint64_t file_offset, size_t elements,
+                                char *error, size_t error_size);
+int h3_gpu_tensor_stream_file_f32(h3_gpu_tensor *tensor, const char *path,
+                                  uint64_t file_offset, size_t elements,
+                                  char *error, size_t error_size);
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor);
 size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor);
 h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor);
@@ -75,6 +89,8 @@ int h3_gpu_tensor_read_f32_range(const h3_gpu_tensor *tensor,
                                  size_t elements);
 int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
                             size_t elements);
+int h3_gpu_tensor_read_i8(const h3_gpu_tensor *tensor, int8_t *values,
+                          size_t elements);
 int h3_gpu_tensor_write_f32(h3_gpu_tensor *tensor, const float *values,
                             size_t elements);
 int h3_gpu_tensor_write_f32_range(h3_gpu_tensor *tensor,

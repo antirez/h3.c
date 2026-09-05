@@ -554,6 +554,71 @@ interactive DiT is ready for its next denoiser evaluation. Measurements reached
 about 13--14.6 GiB/s from the internal SSD. `H3_PROFILE=1` reports total bytes,
 read throughput, and the part of the read wait that was not hidden by GPU work.
 
+### Streamed int8 attention cache
+
+`H3_ATTENTION_CACHE=path/to/cache` is a lighter-weight alternative to
+`--ssd-streaming`: QKV/attention-output stream per block from a cache
+pre-quantized to int8 (~147 MiB/layer, versus ~735 MiB for BF16 all four
+matrices) through two double-buffered slots, instead of being resident.
+The MLP (FC1/FC2) still stays int8-resident by default, same as the plain
+resident-int8 path. `H3_INT8_STREAM_MLP=1` streams FC1/FC2 from the same
+cache too, dropping DiT weight residency to just the two slots - the
+tradeoff a long (~15s/362-frame) run needs, and, on measurement, is
+consistently faster than `--ssd-streaming` even on short clips once set
+(a short 22-frame/512-square clip: 141s on `--ssd-streaming` versus ~78s
+on `H3_ATTENTION_CACHE`+`H3_INT8_STREAM_MLP=1`, both 20 denoising steps).
+Without `H3_INT8_STREAM_MLP`, the cache only avoids the resident path's
+one-time MLP quantization cost, which mostly shows up on longer runs -
+short clips can come out slower than `--ssd-streaming` in that
+configuration. Passing `--ssd-streaming` itself always wins over
+`H3_ATTENTION_CACHE` if both are set (see below), rather than erroring.
+
+Build one with `build_attention_cache <FL2VA/transformer dir> <output
+cache file>`. Both paths measured bit-for-bit identical output against
+plain resident-int8 at matched seed.
+
+The cache format's header (v3) tags which transformer directory it was
+quantized from - `model_kind` (FL2VA or Ref2VA) and `model_id` (a cheap,
+non-cryptographic fingerprint of the checkpoint's own shard paths/sizes/
+mtimes, not a hash of the ~18GB of weight bytes). `H3_ATTENTION_CACHE`
+refuses a cache whose `model_kind` does not match the generation actually
+running (e.g. an FL2VA cache used once `--ref-image`/`--ref-video`
+switches to Ref2VA) with a clear error, rather than silently streaming
+structurally-compatible-but-wrong weights - both models share the same
+DiT dimensions, so nothing else would have caught this:
+
+```
+h3: Ref2VA generation cannot use a FL2VA attention cache (dit_int8_v2.cache) - rebuild it against the matching transformer directory
+```
+
+A `model_id` mismatch (rewritten weights, a LoRA baked in after the cache
+was built, or a moved/copied checkpoint) is a warning, not a hard error,
+since the fingerprint can occasionally shift for benign reasons (e.g. a
+copy that resets mtimes) that `model_kind` never would.
+
+This is a breaking format change: v2 caches (from before this) fail the
+version check and must be rebuilt with the new `build_attention_cache`.
+
+For a model directory with both FL2VA and Ref2VA (most releases),
+`build_attention_cache <model root dir> <output cache directory>` builds
+both in one pass - detected by the presence of `<model root
+dir>/FL2VA/transformer/config.json` - writing `<dir>/fl2va.cache` and,
+if a Ref2VA transformer is present, `<dir>/ref2va.cache` too. Point
+`H3_ATTENTION_CACHE_DIR` at that directory instead of `H3_ATTENTION_CACHE`
+at a single file, and h3.c auto-selects the matching cache the same way
+it already selects between the two transformer directories (by whether
+`--ref-image`/`--ref-video`/etc. are present):
+
+```
+build_attention_cache MiniMax-H3 ./h3-cache
+H3_ATTENTION_CACHE_DIR=./h3-cache ./h3 -d MiniMax-H3 -p "..."
+```
+
+`H3_ATTENTION_CACHE_DIR` needs the standard `FL2VA/transformer`/
+`Ref2VA/transformer` layout to know which file to pick; use
+`H3_ATTENTION_CACHE` (a single file) for a non-standard directory
+instead - setting both at once is an error.
+
 ### Metal 4 and TensorOps paths
 
 M5 GPUs automatically use native BF16 Metal 4/TensorOps for the DiT QKV and

@@ -21,6 +21,7 @@ static void usage(const char *program) {
         "  -d, --model-dir PATH   MiniMax-H3 local directory\n"
         "  -p, --prompt TEXT      Raw H3 prompt\n"
         "  -o, --output PATH      Output MP4 (default: outputs/h3.mp4)\n"
+        "      --no-audio         Skip the audio VAE and write a video-only MP4\n"
         "      --width N          Output width (default: 864)\n"
         "      --height N         Output height (default: 480)\n"
         "      --render-width N   Lower internal model width (optional)\n"
@@ -250,12 +251,13 @@ int main(int argc, char **argv) {
            OPT_SEED,
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
-           OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
+            OPT_PROFILE, OPT_INFO, OPT_NO_AUDIO };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
         {"output", required_argument, NULL, 'o'},
+        {"no-audio", no_argument, NULL, OPT_NO_AUDIO},
         {"width", required_argument, NULL, OPT_WIDTH},
         {"height", required_argument, NULL, OPT_HEIGHT},
         {"render-width", required_argument, NULL, OPT_RENDER_WIDTH},
@@ -327,6 +329,7 @@ int main(int argc, char **argv) {
             case 'p': prompt = optarg; break;
             case 'o': output = optarg; break;
             case 'h': usage(argv[0]); return 0;
+            case OPT_NO_AUDIO: params.disable_audio = 1; break;
             case OPT_WIDTH: params.width = parse_int(optarg, "width"); break;
             case OPT_HEIGHT: params.height = parse_int(optarg, "height"); break;
             case OPT_RENDER_WIDTH:

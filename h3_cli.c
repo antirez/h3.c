@@ -160,6 +160,7 @@ static void print_help(void) {
     puts("  !layers [N]              Set or show active DiT blocks");
     puts("  !core-reuse [N]          Set or show core reuse");
     puts("  !token-reduction [on|off]  Toggle token reduction");
+    puts("  !audio [on|off]            Toggle generated audio");
     puts("  !ssd-streaming [on|off]   Toggle original-BF16 SSD streaming");
     puts("  !int8-row-fc2 [on|off]    Toggle faster one-scale FC2");
     puts("  !reference-rope [on|off]  Toggle released spatial RoPE");
@@ -198,6 +199,7 @@ static void print_status(const h3_cli_state *state) {
            state->params.use_int8_row_fc2 ? "int8 row" : "int8 grouped");
     printf("Spatial RoPE: %s\n", state->params.use_reference_rope ?
            "released reference" : "native 256 adapted");
+    printf("Audio: %s\n", state->params.disable_audio ? "off" : "on");
     if (state->random_seed) puts("Seed: random");
     else printf("Seed: %" PRIu64 "\n", state->params.seed);
     printf("First: %s\n", state->first_frame ? state->first_frame : "none");
@@ -584,6 +586,14 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
         else {
             state->params.token_reduction = value;
             printf("Token reduction: %s\n", value ? "on" : "off");
+        }
+    } else if (!strcasecmp(command, "audio")) {
+        int value;
+        if (!parse_toggle(argument, !state->params.disable_audio, &value))
+            fprintf(stderr, "h3: use on or off\n");
+        else {
+            state->params.disable_audio = !value;
+            printf("Audio: %s\n", value ? "on" : "off");
         }
     } else if (!strcasecmp(command, "ssd-streaming")) {
         int value;

@@ -1,6 +1,7 @@
 #include "h3_ffmpeg.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>

@@ -4003,6 +4003,10 @@ kernel void h3_gqa_causal_bf16(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     float maximum = reductions[0];
+    /* WAR hazard: reductions[] is reused for the sum reduction. Without
+     * this barrier one thread can overwrite reductions[0] before another
+     * has read the max (antirez/h3.c#52). */
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     float local_sum = 0.0f;
     for (uint key_row = tid; key_row < key_count; key_row += threads) {
         float probability = exp(scores[key_row] - maximum);

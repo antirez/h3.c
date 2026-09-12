@@ -229,6 +229,10 @@ static int cli_frame(const h3_frame *frame, void *opaque) {
 }
 
 int main(int argc, char **argv) {
+    /* Line-buffer stdout so Done/status lines flush immediately when
+     * stdout is a pipe (non-TTY). See antirez/h3.c#25. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     enum { OPT_WIDTH = 1000, OPT_HEIGHT, OPT_RENDER_WIDTH, OPT_RENDER_HEIGHT,
            OPT_FRAMES, OPT_SECONDS, OPT_STEPS, OPT_REUSE,
            OPT_LAYERS,

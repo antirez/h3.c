@@ -251,7 +251,8 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+           OPT_PROFILE, OPT_INFO,
+           OPT_SDPA_QUERY_BLOCK };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -268,6 +269,7 @@ int main(int argc, char **argv) {
         {"core-reuse", required_argument, NULL, OPT_CORE_REUSE},
         {"token-reduction", no_argument, NULL, OPT_TOKEN_REDUCTION},
         {"ssd-streaming", no_argument, NULL, OPT_SSD_STREAMING},
+        {"sdpa-query-block", required_argument, NULL, OPT_SDPA_QUERY_BLOCK},
         {"use-int8-row-fc2", no_argument, NULL, OPT_USE_INT8_ROW_FC2},
         {"use-reference-rope", no_argument, NULL, OPT_USE_REFERENCE_ROPE},
         {"use-slower-bf16-mlp", no_argument, NULL,
@@ -355,6 +357,15 @@ int main(int argc, char **argv) {
                 break;
             case OPT_TOKEN_REDUCTION: params.token_reduction = 1; break;
             case OPT_SSD_STREAMING: params.ssd_streaming = 1; break;
+            case OPT_SDPA_QUERY_BLOCK: {
+                /* Sets H3_SDPA_MAX_QUERY_ROWS for the Ultra SDPA workaround (#16). */
+                int rows = parse_int(optarg, "sdpa query block");
+                if (rows < 0) return 1;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d", rows);
+                setenv("H3_SDPA_MAX_QUERY_ROWS", buf, 1);
+                break;
+            }
             case OPT_USE_INT8_ROW_FC2:
                 params.use_int8_row_fc2 = 1;
                 break;

@@ -181,6 +181,12 @@ const h3_model_info *h3_model(const h3_ctx *ctx);
  * the original phase-by-phase memory lifetime. */
 void h3_cache_set_enabled(h3_ctx *ctx, int enabled);
 void h3_cache_clear(h3_ctx *ctx);
+/* Invalidate only the input-bound caches: drops the prompt/reference
+ * conditioning and the prepared DiT, while a Video VAE decoder with an
+ * unchanged model path and spatial latent shape stays resident. Use this after
+ * changing a first/last anchor or a reference; !cache clear and cache-disable
+ * still perform a full clear. */
+void h3_cache_invalidate_inputs(h3_ctx *ctx);
 void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info);
 
 /* Generate media, delivering decoded frames incrementally through on_frame. */

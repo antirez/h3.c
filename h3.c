@@ -63,6 +63,20 @@ void h3_cache_clear(h3_ctx *ctx) {
     ctx->video_decoder_key = NULL;
 }
 
+void h3_cache_invalidate_inputs(h3_ctx *ctx) {
+    if (!ctx) return;
+    h3_conditioning_cache_clear(ctx);
+    h3_dit_free(ctx->dit);
+    ctx->dit = NULL;
+    free(ctx->dit_key);
+    ctx->dit_key = NULL;
+    /* The Video VAE decoder is intentionally untouched: a decoder with the
+     * same vae_path|latent-shape key stays resident across first-frame and
+     * reference changes. A different key is released by the existing
+     * comparison in h3_generate(). Explicit !cache clear, cache-disable and
+     * context destruction still call h3_cache_clear(). */
+}
+
 void h3_cache_set_enabled(h3_ctx *ctx, int enabled) {
     if (!ctx) return;
     if (!enabled) h3_cache_clear(ctx);

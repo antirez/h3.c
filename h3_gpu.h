@@ -128,6 +128,11 @@ int h3_gpu_cast_f32_to_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                             const h3_gpu_tensor *input, uint32_t elements);
 int h3_gpu_cast_bf16_to_f32(h3_gpu *gpu, h3_gpu_tensor *output,
                             const h3_gpu_tensor *input, uint32_t elements);
+/* output[r,c] = F32(input[r,c]) + bias[c]; input BF16, bias/output F32. */
+int h3_gpu_bias_bf16_to_f32(h3_gpu *gpu, h3_gpu_tensor *output,
+                            const h3_gpu_tensor *input,
+                            const h3_gpu_tensor *bias, uint32_t rows,
+                            uint32_t width);
 int h3_gpu_copy_bf16(h3_gpu *gpu, h3_gpu_tensor *destination,
                      size_t destination_offset,
                      const h3_gpu_tensor *source, size_t source_offset,

@@ -530,6 +530,20 @@ requested canvas geometry, minimizing repeated overlap work while keeping peak
 storage bounded. `H3_VAE_TILE_PIXELS=256` restores the original conservative
 tile plan for close-reference diagnosis.
 
+The released video VAE weights are F32, and by default every block runs in
+F32. `H3_VAE_PRECISION=bf16` keeps the residual stream, norms and RoPE in F32
+but runs the QKV, attention-output and MLP projections and the attention itself
+on BF16 (TensorOps on M5). On M5 Max a 768x448, 124-frame decode drops from
+43.3 to 13.2 seconds at 75 dB PSNR against F32 (8-bit output differs by at
+most a few levels). `H3_VAE_PRECISION=int8` uses int8 projections: 10.5
+seconds at 51.6 dB, with faint 16-pixel patch structure in difference images.
+`H3_VAE_CACHE=<directory>` stores the BF16 projections (4.8 GiB, named by a
+weight fingerprint) so later runs skip reading and casting the F32 weights,
+and `H3_VAE_PREFETCH=1` loads the decoder on a second thread during the
+denoise; both leave the output bit-identical. `H3_DUMP_VIDEO_LATENT=<file>`
+saves the final latent, and `make vae_bench` builds a tool that replays just
+the VAE decode from it for timing and PSNR comparisons.
+
 ### Weight residency and streamed prompt encoding
 
 On M5-class GPUs, persistent transformer weights are mapped directly from their

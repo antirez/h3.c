@@ -192,6 +192,22 @@ kernel void h3_cast_f32_to_bf16(device const float *input [[buffer(0)]],
     if (gid < count) output[gid] = h3_f32_to_bf16(input[gid]);
 }
 
+struct bias_args {
+    uint rows;
+    uint width;
+};
+
+/* Low-precision VAE path: BF16 matmul result plus F32 bias, widened back into
+ * the F32 residual stream. */
+kernel void h3_bias_bf16_to_f32(device const ushort *input [[buffer(0)]],
+                                device const float *bias [[buffer(1)]],
+                                device float *output [[buffer(2)]],
+                                constant bias_args &args [[buffer(3)]],
+                                uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.rows * args.width) return;
+    output[gid] = h3_bf16_to_f32(input[gid]) + bias[gid % args.width];
+}
+
 kernel void h3_cast_bf16_to_f32(device const ushort *input [[buffer(0)]],
                                 device float *output [[buffer(1)]],
                                 constant uint &count [[buffer(2)]],

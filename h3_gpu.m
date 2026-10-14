@@ -103,7 +103,7 @@
 @property(nonatomic, strong) id<MTLLibrary> library;
 @property(nonatomic, strong) id<MTLCommandBuffer> command;
 @property(nonatomic, strong) NSMutableArray<id<MTLCommandBuffer>> *inflightCommands;
-@property(nonatomic, strong) NSDictionary<NSString *, id<MTLComputePipelineState>> *pipelines;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *pipelines;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, H3SDPA *> *sdpaCache;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, H3GQA *> *gqaCache;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, H3Linear *> *linearCache;
@@ -238,7 +238,17 @@ static int h3_gpu_require_elements(H3GPU *gpu, const h3_gpu_tensor *tensor,
 
 static id<MTLComputePipelineState> h3_gpu_pipeline(H3GPU *gpu, NSString *name) {
     id<MTLComputePipelineState> pipeline = gpu.pipelines[name];
-    if (!pipeline) h3_gpu_set_error(gpu, @"missing Metal pipeline %@", name);
+    if (pipeline) return pipeline;
+    id<MTLFunction> function = [gpu.library newFunctionWithName:name];
+    NSError *error = nil;
+    pipeline = function ?
+        [gpu.device newComputePipelineStateWithFunction:function error:&error] : nil;
+    if (!pipeline) {
+        h3_gpu_set_error(gpu, @"cannot build %@: %@", name,
+                         error.localizedDescription ?: @"function missing");
+        return nil;
+    }
+    gpu.pipelines[name] = pipeline;
     return pipeline;
 }
 
@@ -401,105 +411,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             }
             return NULL;
         }
-        NSMutableArray<NSString *> *names = [@[
-            @"h3_linear_f32", @"h3_linear_f32_tiled",
-            @"h3_linear_f32_tiled_bf16", @"h3_silu_f32",
-            @"h3_linear_f32_tiled_bf16_map",
-            @"h3_cast_f32_to_bf16",
-            @"h3_cast_bf16_to_f32",
-            @"h3_rms_norm_f32",
-            @"h3_scale_add_f32", @"h3_layer_norm_f32",
-            @"h3_video_qkv_rope_f32",
-            @"h3_adaln_f32", @"h3_gate_f32", @"h3_qkv_rope_f32",
-            @"h3_swiglu_f32", @"h3_linear_bf16", @"h3_silu_bf16",
-            @"h3_rms_norm_bf16", @"h3_adaln_bf16", @"h3_gate_bf16",
-            @"h3_rms_inverse_bf16", @"h3_adaln_linear_bf16",
-            @"h3_gate_adaln_bf16", @"h3_gate_adaln_bf16_exact_simd",
-            @"h3_qkv_rope_bf16", @"h3_qkv_rope_bf16_coop",
-            @"h3_qkv_rope_bf16_coop_uncached",
-            @"h3_swiglu_bf16",
-            @"h3_layer_norm_bf16", @"h3_gelu_bf16",
-            @"h3_vision_qkv_rope_bf16",
-            @"h3_embedding_bf16", @"h3_text_qk_rope_bf16",
-            @"h3_head_rms_norm_bf16", @"h3_rope_text_bf16",
-            @"h3_gqa_causal_bf16", @"h3_add_bf16", @"h3_sub_bf16",
-            @"h3_token_pool_bf16", @"h3_token_pool_adaln_bf16",
-            @"h3_token_expand_delta_bf16",
-            @"h3_token_expand_adaln_bf16",
-            @"h3_euler_bf16", @"h3_silu_mul_bf16",
-            @"h3_weight_norm_f32", @"h3_add_scaled_f32",
-            @"h3_alias_free_snake_f32", @"h3_snake1d_f32",
-            @"h3_audio_qkv_split_f32", @"h3_audio_attention_pool_f32",
-            @"h3_geglu_f32", @"h3_clip_f32",
-            @"h3_vae_encoder_pad_f32",
-            @"h3_vae_encoder_group_norm_silu_f32"
-        ] mutableCopy];
-        if (gpu.tensorOpsEnabled) {
-            [names addObject:@"h3_linear_bf16_nax_r128"];
-            [names addObject:@"h3_linear_bf16_nax_r128_morton"];
-            [names addObject:@"h3_linear_bf16_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_bf16_nax_r128_morton4"];
-            [names addObject:@"h3_qk_rope_bf16_nax_inplace"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128_morton"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128_morton4"];
-            [names addObject:@"h3_quantize_bf16_int8_rows"];
-            [names addObject:@"h3_quantize_bf16_int8_rows_scalar"];
-            [names addObject:
-                @"h3_quantize_bf16_int8_head_major_to_rows_cached"];
-            [names addObject:@"h3_quantize_bf16_int8_groups"];
-            [names addObject:@"h3_quantize_bf16_int8_groups_scalar"];
-            [names addObject:@"h3_quantize_bf16_int8_groups_scalar128"];
-            [names addObject:
-                @"h3_quantize_bf16_int8_groups_scalar128_cached"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_nax_r128_k5376_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_local_scales_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_local_scales_nax_r128_k5376_morton4"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128_k5376"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128_full_k5376"];
-            [names addObject:@"h3_fc1_swiglu_int8_local_nax_r128"];
-            [names addObject:@"h3_linear_int8_nax_r128"];
-            [names addObject:
-                @"h3_linear_int8_nax_r128_full_k14336"];
-            [names addObject:
-                @"h3_linear_int8_nax_r128x256_full_k14336"];
-            [names addObject:@"h3_linear_int8_local_scales_nax_r128"];
-            [names addObject:@"h3_linear_int8_local_scales_nax_r128_k7168"];
-            [names addObject:@"h3_gate_adaln_quantize_int8"];
-            [names addObject:@"h3_gate_adaln_quantize_int8_scalar"];
-            [names addObject:@"h3_linear_int8_grouped_nax_r128x64"];
-            [names addObject:
-                @"h3_linear_int8_grouped_local_nax_r128x64"];
-            [names addObject:
-                @"h3_linear_int8_grouped_local_nax_r128x128"];
-        }
-        NSMutableDictionary *pipelines = [NSMutableDictionary dictionary];
-        for (NSString *name in names) {
-            id<MTLFunction> function = [gpu.library newFunctionWithName:name];
-            NSError *pipelineError = nil;
-            id<MTLComputePipelineState> pipeline =
-                function ? [gpu.device newComputePipelineStateWithFunction:function
-                                                                       error:&pipelineError] : nil;
-            if (!pipeline) {
-                if (error && error_size) {
-                    const char *description = pipelineError.localizedDescription.UTF8String;
-                    snprintf(error, error_size, "cannot build %s: %s", name.UTF8String,
-                             description ? description : "function missing");
-                }
-                return NULL;
-            }
-            pipelines[name] = pipeline;
-        }
-        gpu.pipelines = pipelines;
+        gpu.pipelines = [NSMutableDictionary dictionary];
         return (__bridge_retained h3_gpu *)gpu;
     }
 }

@@ -530,6 +530,61 @@ requested canvas geometry, minimizing repeated overlap work while keeping peak
 storage bounded. `H3_VAE_TILE_PIXELS=256` restores the original conservative
 tile plan for close-reference diagnosis.
 
+### On-demand Metal pipelines
+
+Direct Metal compute pipelines are compiled on first use and cached within
+their `H3GPU` context. Context creation still compiles the shader library,
+but no longer builds every direct pipeline, including unused kernels.
+Missing functions and pipeline compilation failures now surface when the
+operation first needs that pipeline, through the existing operation error
+path; failed pipelines are not cached. Shaders and arithmetic are unchanged.
+
+A fixed M5 Ultra study used fresh processes, 864x480 video, 56 frames at
+24 fps, 8 Euler steps, 50 layers, requested BF16 precision, seed 17,
+`--reuse 1`, and generated stereo 32 kHz audio. These measurements compare
+a private installed baseline and candidate, both retaining the same parser
+and compact-QKV changes. The only enrolled native source delta was
+`h3_gpu.m`. They are not measurements of this upstream branch, which adds
+only on-demand pipelines and does not import those independent changes.
+
+Each cohort ran one baseline warmup, then baseline, candidate, and unchanged
+baseline control in that fixed order. Warmups are separate from the medians:
+
+| Native root host time (s) | Baseline warmup | Baseline | On-demand | Unchanged control |
+| --- | ---: | ---: | ---: | ---: |
+| Cohort 1 | 56.841 | 56.645 | 49.123 | 56.907 |
+| Cohort 2 | 56.853 | 58.429 | 57.443 | 57.909 |
+| Cohort 3 | 57.921 | 58.079 | 49.951 | 57.821 |
+| Measured median | excluded | 58.079 | 49.951 | 57.821 |
+
+The candidate median was 13.99% lower than baseline and 13.61% lower than
+control, with candidate times spanning 49.123--57.443 seconds. The timing
+boundary includes codecs but excludes terminal cleanup, subsequent full-media
+inspection and service restoration; it is not serving API latency. All twelve
+clips, including warmups, had identical full decoded RGB and PCM hashes.
+
+These three fixed-order triplets are descriptive, not a universal or
+statistically established speedup. Cache policy was unspecified, oMLX was
+unmanaged/unverified, and neither whole-host exclusivity nor whole-model
+payload identity was established. Requested BF16 precision is not independent
+attestation of backend compute precision. Earlier failed studies were retained
+and excluded. The study's explicitly approved 1 GiB filesystem-growth budget
+did not change its other guards. No serving deployment is established by
+these measurements.
+
+Source/result provenance for the 2026-10-14 study (SHA-256):
+
+- Baseline `h3_gpu.m`: `4a41d398bd169a651cce8ab7cba85497811d4adaf9ee6a8428e50924302941e8`
+- Measured candidate `h3_gpu.m`: `f0edc230f99cfdd0865808bfbc9f8bd13bcef21b976d0b725a63008f3a91ff70`
+- Retained report `h3-lazy-pipeline-approved-disk-2026-10-14T044542870Z/reviewed/comparison-result.json`: `5d73a241a396cc48a2b096e41304a3ade0635d3883476e346996ac29176533c2`
+
+The [public sanitized samples and identity bindings](https://github.com/jerryfane/local-llm-performance-lab/blob/21fa3c0a51688b4441f1e79b50e4cf14e37d61d0/runs/20261014T-h3-lazy-pipelines/evidence.json)
+retain all twelve original rows. A [separate local-serving proof](https://github.com/jerryfane/local-llm-performance-lab/blob/21fa3c0a51688b4441f1e79b50e4cf14e37d61d0/runs/20261014T-h3-lazy-pipelines/deployment-proof.json)
+records an actual Studio API job, complete video/audio decoding and advancing
+browser playback after deploying the measured GPU source with the existing local
+parser and compact-QKV fixes. It is not a benchmark of this upstream branch or
+evidence of API acceleration.
+
 ### Weight residency and streamed prompt encoding
 
 On M5-class GPUs, persistent transformer weights are mapped directly from their

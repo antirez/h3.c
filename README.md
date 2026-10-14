@@ -429,6 +429,18 @@ uncompressed media file is created.
 The remainder documents the implementation behind the tutorial presets and the
 environment variables retained for exact A/B diagnosis.
 
+### Safetensors header string allocation
+
+JSON strings are allocated from their encoded length rather than the remaining
+header length; decoding and malformed-input validation are unchanged. In a
+29-shard, 3,240-tensor component measurement, retained tensor-name buffer capacity
+(summed `malloc_size` with all headers held) fell from 106,441,680 to 163,504 bytes.
+Median header parsing times over
+three runs per variant were 3.144 ms baseline, 1.305 ms candidate, and 3.112 ms
+reverted control. These are component results, not an inference speedup: one
+warmed native baseline/candidate/control comparison took 57.308/58.861/57.456 s
+of root-host wall time, with matching full RGB and PCM hashes for all four clips.
+
 ### Sampler and DiT controls
 
 The default sampler uses the released shifted video/audio schedule. `--steps`

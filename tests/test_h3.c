@@ -294,6 +294,66 @@ static void test_safetensors(void) {
     CHECK(unlink(path) == 0);
 }
 
+static void test_safetensors_strings(void) {
+    static const struct {
+        const char *json_name;
+        const char *name;
+    } cases[] = {
+        {"\"\"", ""},
+        {"\"quote\\\"after\"", "quote\"after"},
+        {"\"backslash\\\\\"", "backslash\\"},
+        {"\"pair\\\\\\\"after\"", "pair\\\"after"},
+        {"\"\\u0041\\u00e9\\u20ac\\u0022\\u005c\"", "A\xc3\xa9\xe2\x82\xac\"\\"},
+        {"\"\\/\\b\\f\\n\\r\\t\"", "/\b\f\n\r\t"},
+        {"\"unterminated", NULL},
+        {"\"trailing\\", NULL},
+        {"\"escaped\\\"", NULL},
+        {"\"pair\\\\", NULL},
+        {"\"\\u\"", NULL},
+        {"\"\\u12\"more", NULL},
+        {"\"\\u123", NULL},
+        {"\"\\u12x4\"", NULL},
+        {"\"\\q\"", NULL},
+        {"\"raw\ncontrol\"", NULL},
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        char json[512];
+        int size = snprintf(json, sizeof(json), "{%s%s", cases[index].json_name,
+            cases[index].name ?
+                ":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[0,0]},"
+                "\"tail\":{\"dtype\":\"F32\",\"shape\":[0],\"data_offsets\":[0,0]}}" :
+                "");
+        CHECK(size >= 0 && (size_t)size < sizeof(json));
+        char path[] = "/tmp/h3_safetensors_strings_XXXXXX";
+        int descriptor = mkstemp(path);
+        CHECK(descriptor >= 0);
+        uint64_t length = (uint64_t)size;
+        unsigned char prefix[8];
+        for (unsigned byte = 0; byte < 8; byte++) {
+            prefix[byte] = (unsigned char)(length >> (8 * byte));
+        }
+        write_all(descriptor, prefix, sizeof(prefix));
+        write_all(descriptor, json, (size_t)length);
+        CHECK(close(descriptor) == 0);
+
+        h3_st_header header;
+        char error[256];
+        int ok = h3_st_read_header(path, &header, error, sizeof(error));
+        if (cases[index].name) {
+            CHECK(ok);
+            CHECK(header.tensor_count == 2);
+            const h3_st_tensor *tensor = h3_st_find(&header, cases[index].name);
+            CHECK(tensor && tensor->dtype == H3_DTYPE_F32 && tensor->ndim == 1);
+            CHECK(tensor->shape[0] == 0 && tensor->data_begin == 0 && tensor->data_end == 0);
+            CHECK(h3_st_find(&header, "tail") != NULL);
+            h3_st_free_header(&header);
+        } else {
+            CHECK(!ok);
+        }
+        CHECK(unlink(path) == 0);
+    }
+}
+
 static void test_rng_and_solver(void) {
     h3_rng a, b;
     h3_rng_seed(&a, 42);
@@ -404,6 +464,7 @@ int main(void) {
     test_layout_fl2va();
     test_layout_ref2va();
     test_safetensors();
+    test_safetensors_strings();
     test_rng_and_solver();
     test_rgb_resize();
     test_dit_row_conversions();

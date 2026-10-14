@@ -55,7 +55,12 @@ static char *h3_json_string(h3_json_cursor *cursor) {
         return NULL;
     }
     cursor->at++;
-    size_t maximum = (size_t)(cursor->end - cursor->at);
+    /* Encoded bytes bound decoded size; leave validation and cursor updates below. */
+    const char *string_end = cursor->at;
+    while (string_end < cursor->end && *string_end != '"') {
+        if (*string_end++ == '\\' && string_end < cursor->end) string_end++;
+    }
+    size_t maximum = (size_t)(string_end - cursor->at);
     char *result = malloc(maximum + 1);
     if (!result) {
         h3_json_fail(cursor, "out of memory parsing safetensors header");

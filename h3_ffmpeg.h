@@ -26,6 +26,14 @@ int h3_ffmpeg_read_video_f32(const char *path, int width, int height,
                              int max_frames, float **pixels, int *frames,
                              char *error, size_t error_size);
 
+/* The last tail_frames decoded frames of a video, same canvas and layout as
+ * h3_ffmpeg_read_video_f32; fewer when the video is shorter. total_frames,
+ * when given, receives the length of the whole stream in frames. */
+int h3_ffmpeg_read_video_tail_f32(const char *path, int width, int height,
+                                  int tail_frames, float **pixels, int *frames,
+                                  int *total_frames,
+                                  char *error, size_t error_size);
+
 /* Decode the first audio stream as channel-major stereo F32 at 32 kHz.
  * max_samples bounds allocation. truncate_at_limit is used for a video's
  * soundtrack; standalone clips report an error instead of silently trimming. */

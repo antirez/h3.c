@@ -48,6 +48,9 @@ static void usage(const char *program) {
         "      --seed N           Random seed (default: 42)\n"
         "      --first-frame PATH First-frame conditioning image\n"
         "      --last-frame PATH  Last-frame conditioning image\n"
+        "      --motion-context PATH  Continue PATH (a --save-context file or a video):\n"
+        "                         its last 22 frames and 0.9 s of sound are pinned, then trimmed\n"
+        "      --save-context PATH  Write this take's final latents for a later --motion-context\n"
         "      --ref-image PATH    Append an ordered Ref2VA image\n"
         "      --ref-image-size S  Image sizing: match (default) or max\n"
         "      --ref-video PATH    Append video, including embedded audio\n"
@@ -248,7 +251,8 @@ int main(int argc, char **argv) {
            OPT_USE_SLOWER_DYNAMIC_FC1_K,
            OPT_USE_SLOWER_GROUPED_QUANTIZER,
            OPT_SEED,
-           OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
+           OPT_FIRST, OPT_LAST, OPT_MOTION_CONTEXT, OPT_SAVE_CONTEXT,
+           OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
            OPT_PROFILE, OPT_INFO };
@@ -293,6 +297,8 @@ int main(int argc, char **argv) {
         {"seed", required_argument, NULL, OPT_SEED},
         {"first-frame", required_argument, NULL, OPT_FIRST},
         {"last-frame", required_argument, NULL, OPT_LAST},
+        {"motion-context", required_argument, NULL, OPT_MOTION_CONTEXT},
+        {"save-context", required_argument, NULL, OPT_SAVE_CONTEXT},
         {"ref-image", required_argument, NULL, OPT_REF_IMAGE},
         {"ref-image-size", required_argument, NULL, OPT_REF_IMAGE_SIZE},
         {"ref-video", required_argument, NULL, OPT_REF_VIDEO},
@@ -397,6 +403,8 @@ int main(int argc, char **argv) {
                 break;
             case OPT_FIRST: params.first_frame = optarg; break;
             case OPT_LAST: params.last_frame = optarg; break;
+            case OPT_MOTION_CONTEXT: params.motion_context = optarg; break;
+            case OPT_SAVE_CONTEXT: params.save_context = optarg; break;
             case OPT_REF_IMAGE: {
                 h3_reference *reference = append_reference(
                     references, &reference_count);

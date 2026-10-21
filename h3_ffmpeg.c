@@ -386,6 +386,123 @@ int h3_ffmpeg_read_video_f32(const char *path, int width, int height,
     return 1;
 }
 
+int h3_ffmpeg_read_video_tail_f32(const char *path, int width, int height,
+                                  int tail_frames, float **pixels, int *frames,
+                                  int *total_frames,
+                                  char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (pixels) *pixels = NULL;
+    if (frames) *frames = 0;
+    if (total_frames) *total_frames = 0;
+    if (!path || !*path || !pixels || !frames || width < 1 || height < 1 ||
+        tail_frames < 1 || (size_t)width > SIZE_MAX / (size_t)height) {
+        fail(error, error_size, "invalid FFmpeg video tail arguments");
+        return 0;
+    }
+    size_t area = (size_t)width * (size_t)height;
+    if (area > SIZE_MAX / 3 || (size_t)tail_frames > SIZE_MAX / (area * 3)) {
+        fail(error, error_size, "decoded video frame size overflows");
+        return 0;
+    }
+    size_t frame_bytes = area * 3;
+    /* A ring of the last tail_frames decoded frames; the whole stream is
+     * read once, nothing longer than the ring is ever held. */
+    uint8_t *ring = malloc((size_t)tail_frames * frame_bytes);
+    if (!ring) {
+        fail(error, error_size, "out of memory decoding input video");
+        return 0;
+    }
+    char filter[256];
+    snprintf(filter, sizeof(filter),
+             "fps=24,scale=%d:%d:flags=lanczos,setsar=1", width, height);
+    int stream[2];
+    if (pipe(stream) != 0) {
+        free(ring);
+        fail(error, error_size, "cannot create FFmpeg video pipe: %s",
+             strerror(errno));
+        return 0;
+    }
+    char *arguments[] = {
+        "ffmpeg", "-v", "error", "-i", (char *)path,
+        "-map", "0:v:0", "-an", "-vf", filter,
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1", NULL
+    };
+    posix_spawn_file_actions_t actions;
+    int code = posix_spawn_file_actions_init(&actions);
+    if (!code) code = posix_spawn_file_actions_adddup2(
+        &actions, stream[1], STDOUT_FILENO);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[0]);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[1]);
+    pid_t child = -1;
+    if (!code) code = posix_spawnp(&child, ffmpeg_program(), &actions, NULL,
+                                    arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(stream[1]);
+    if (code) {
+        close(stream[0]);
+        free(ring);
+        fail(error, error_size, "cannot start FFmpeg: %s", strerror(code));
+        return 0;
+    }
+    size_t total = 0, filled = 0;
+    int truncated = 0;
+    for (;;) {
+        uint8_t *slot = ring + (total % (size_t)tail_frames) * frame_bytes;
+        ssize_t amount = read(stream[0], slot + filled, frame_bytes - filled);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount <= 0) break;
+        filled += (size_t)amount;
+        if (filled == frame_bytes) {
+            filled = 0;
+            total++;
+        }
+    }
+    if (filled) truncated = 1;
+    close(stream[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        free(ring);
+        fail(error, error_size, "cannot wait for FFmpeg: %s", strerror(errno));
+        return 0;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || truncated ||
+        total == 0) {
+        free(ring);
+        fail(error, error_size, "FFmpeg could not decode video %s", path);
+        return 0;
+    }
+    size_t count = total < (size_t)tail_frames ? total : (size_t)tail_frames;
+    size_t values = count * 3 * area;
+    if (values > SIZE_MAX / sizeof(float)) {
+        free(ring);
+        fail(error, error_size, "converted video size overflows");
+        return 0;
+    }
+    float *channel_major = malloc(values * sizeof(*channel_major));
+    if (!channel_major) {
+        free(ring);
+        fail(error, error_size, "out of memory converting input video");
+        return 0;
+    }
+    const float scale = 1.0f / 255.0f;
+    for (size_t time = 0; time < count; time++) {
+        const uint8_t *frame = ring + ((total - count + time) %
+                                       (size_t)tail_frames) * frame_bytes;
+        for (size_t pixel = 0; pixel < area; pixel++)
+            for (size_t channel = 0; channel < 3; channel++) {
+                size_t destination = (channel * count + time) * area + pixel;
+                channel_major[destination] =
+                    (float)frame[pixel * 3 + channel] * scale;
+            }
+    }
+    free(ring);
+    *pixels = channel_major;
+    *frames = (int)count;
+    if (total_frames) *total_frames = (int)total;
+    return 1;
+}
+
 int h3_ffmpeg_read_audio_f32(const char *path, int max_samples,
                              int truncate_at_limit,
                              float **pcm, int *samples,

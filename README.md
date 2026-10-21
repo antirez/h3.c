@@ -356,7 +356,10 @@ For example:
 
 ### 8. Add image, video, and audio references
 
-First/last-frame anchors select the FL2VA path:
+First/last-frame anchors select the FL2VA path (with ordered references they
+ride along on the Ref2VA path instead, timed from the target origin; only
+the FL2VA weights presented as Ref2VA have been run that way, see the motion
+context section):
 
 ```sh
 ./h3 -d ./MiniMax-H3 -p "The fox keeps walking through the snow." \
@@ -402,6 +405,47 @@ Reference flags may be repeated and their command-line order is preserved.
 Standalone audio must accompany an image or video reference. Audio references
 must be 2–15 seconds; at most three audio inputs are accepted and their total
 decoded duration is capped at 15 seconds.
+
+### 9. Continue a take: motion context
+
+```sh
+./h3 -d ./MiniMax-H3 -p "$(cat beat1.txt)" --seconds 5 --seed 11 \
+  --save-context beat1.h3ctx -o beat1.mp4
+./h3 -d ./MiniMax-H3 -p "$(cat beat2.txt)" --seconds 5 --seed 12 \
+  --motion-context beat1.h3ctx -o beat2.mp4
+```
+
+`--save-context` writes the take's final video and audio latents. A later
+`--motion-context` slices that file's last 22 frames (7 latent steps on the
+1,4,4,4,4 grid) and pins them as visual condition rows on the new take's own
+first step times, with its last 0.917 s of sound pinned as audio condition
+rows that end at the join, so the model continues the motion and the sound
+instead of restaging them. The pinned head is then trimmed from the delivered
+clip: a `--seconds 5` continuation delivers 22 frames (0.917 s) less than
+requested, and the clips concatenate. `--motion-context` also accepts a
+finished video; its last 22 frames are decoded and re-encoded with the
+released VAEs (17 + 5 frame clips, the grid the decoder uses) and the sound
+window is the last 37 audio steps of the clip's own grid, not of its
+soundtrack, whose AAC padding runs past the picture. Both takes must share
+the canvas. The head replaces `--first-frame`; `--last-frame` and ordered
+references (`--ref-image`, `--ref-video`, `--ref-audio`) ride along, timed
+from the target origin after the reference blocks as ComfyUI's layout does.
+The head adds its rows to every attention step, about a third more denoise
+on a 124-frame take. Keep links at 8 to 10 seconds: in ComfyUI the same
+22-frame pin held a 10 s join and lost a 15 s one. `--profile` prints the
+pinned run, the audio window and the delivered length.
+
+Measured on an M5 Pro at 544x960, 124 frames, 8 steps, with the join scored
+as the frame-to-frame mean absolute difference inside the clips (sd about
+1.5 levels) and the correlation of the last and first frames: from the
+context file the join sits at +0.5 sd with r 0.994 (adjacent frames inside a
+clip: 0.999), the denoise 358 s for the first take and 483 s for the
+continuation; from the take's MP4 at -0.1 sd, r 0.994; a Ref2VA take with an
+identity image chained onto its predecessor at +3.2 sd, r 0.969, with a
+waving arm and a camera push in the shot. A video reference of the previous
+take (`--ref-video`) restages the same beat at r 0.84, a visible cut. The
+design follows NikoDemon80's
+[ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context).
 
 ## Tests and runtime requirements
 

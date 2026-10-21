@@ -3,6 +3,8 @@
 #include "h3_metal.h"
 #include "h3_safetensors.h"
 #include "h3_terminal.h"
+#include "h3_ffmpeg.h"
+#include "h3_motion_context.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -168,7 +170,7 @@ static void position_checksums(const h3_layout *layout, double sums[3],
 }
 
 static void test_layout_tiny(void) {
-    h3_layout_spec spec = {12, 2, 2, 2, 8, 5, NULL, 0, NULL, 0};
+    h3_layout_spec spec = {12, 2, 2, 2, 8, 5, NULL, 0, NULL, 0, 0, 0, 0.0};
     h3_layout layout;
     char error[256];
     CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
@@ -188,7 +190,7 @@ static void test_layout_tiny(void) {
 static void test_layout_fl2va(void) {
     int keyframes[] = {0, 55};
     h3_layout_spec spec = {128, 17, 30, 54, 93, 56,
-                           keyframes, 2, NULL, 0};
+                           keyframes, 2, NULL, 0, 0, 0, 0.0};
     h3_layout layout;
     char error[256];
     CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
@@ -211,6 +213,170 @@ static void test_layout_fl2va(void) {
     h3_layout_free(&layout);
 }
 
+static void test_layout_motion_context(void) {
+    /* 22 pinned frames = 7 latent steps; 37 audio steps ending at the join. */
+    h3_layout_spec spec = {128, 17, 30, 54, 93, 56, NULL, 0, NULL, 0, 7, 37, 0.0};
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.seq_len == 10108);
+    const size_t bounds[][2] = {
+        {0, 128}, {128, 2963}, {2963, 3037}, {3037, 3223}, {3223, 10108}
+    };
+    const h3_segment_kind kinds[] = {
+        H3_SEG_TEXT, H3_SEG_COND, H3_SEG_REF_AUDIO, H3_SEG_AUDIO, H3_SEG_VIDEO
+    };
+    check_segments(&layout, bounds, kinds, 5);
+    CHECK(layout.img_cond_rows == 2835 && layout.audio_cond_rows == 74);
+    CHECK(layout.img_target_rows == 6885 && layout.audio_target_rows == 186);
+    /* Every pinned row shares its (t, h, w) with the target row it stands
+     * in for: the head occupies the target's own first seven steps. */
+    int same = 1;
+    for (size_t row = 0; row < 2835; row++) {
+        const h3_position *pinned = &layout.positions[128 + row];
+        const h3_position *target = &layout.positions[3223 + row];
+        if (pinned->t != target->t || pinned->h != target->h ||
+            pinned->w != target->w) same = 0;
+    }
+    CHECK(same);
+    CHECK(layout.positions[128].t == 128.0);
+    CHECK(close_enough(layout.positions[128 + 6 * 405].t, 158.0, 1e-12));
+    /* The audio window: 37 steps from the origin, stereo rows on the target
+     * audio w positions, identical to the first 37 target audio steps. */
+    same = 1;
+    for (size_t step = 0; step < 37; step++) {
+        for (int stereo = 0; stereo < 2; stereo++) {
+            const h3_position *pinned =
+                &layout.positions[2963 + (size_t)stereo * 37 + step];
+            const h3_position *target =
+                &layout.positions[3037 + (size_t)stereo * 93 + step];
+            if (pinned->t != target->t || pinned->w != target->w) same = 0;
+        }
+    }
+    CHECK(same);
+    h3_layout_free(&layout);
+    /* A negative offset (a previous clip whose audio grid stopped short of
+     * its last frame) starts one step before the origin. */
+    spec.head_audio_offset = -1.0;
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.positions[2963].t == 127.0);
+    CHECK(layout.positions[2963 + 36].t == 163.0);
+    h3_layout_free(&layout);
+    /* The pinned run must leave room to generate, and it replaces the
+     * first-frame keyframe rather than stacking on it. */
+    spec.head_audio_offset = 0.0;
+    spec.head_steps = 17;
+    CHECK(!h3_layout_build(&spec, &layout, error, sizeof(error)));
+    spec.head_steps = 7;
+    int first = 0;
+    spec.keyframes = &first;
+    spec.keyframe_count = 1;
+    CHECK(!h3_layout_build(&spec, &layout, error, sizeof(error)));
+    int last = 55;
+    spec.keyframes = &last;
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.img_cond_rows == 2835 + 405);
+    h3_layout_free(&layout);
+}
+
+static void test_motion_context_file(void) {
+    CHECK(h3_video_head_steps(22) == 7 && h3_video_head_steps(5) == 2 &&
+          h3_video_head_steps(39) == 12 && h3_video_head_steps(56) == 17 &&
+          h3_video_head_steps(1) == 1 && h3_video_head_steps(4) == 0 &&
+          h3_video_head_steps(0) == 0);
+    /* A 39-frame clip: 12 latent steps on a 4x6 canvas, 65 audio steps. */
+    const int video_t = 12, lh = 4, lw = 6, audio_t = 65, frame_count = 39;
+    size_t video_count = (size_t)24 * video_t * lh * lw;
+    size_t audio_count = (size_t)32 * 2 * audio_t;
+    float *video = malloc(video_count * sizeof(*video));
+    float *audio = malloc(audio_count * sizeof(*audio));
+    for (size_t index = 0; index < video_count; index++)
+        video[index] = (float)(index % 977) * 0.01f;
+    for (size_t index = 0; index < audio_count; index++)
+        audio[index] = (float)(index % 311) * -0.02f;
+    char path[] = "/tmp/h3-motion-context-test.h3ctx";
+    char error[256];
+    CHECK(h3_motion_context_save(path, video, video_t, lh, lw, audio, audio_t,
+                                 frame_count, error, sizeof(error)));
+    h3_motion_context context;
+    CHECK(h3_motion_context_plan(path, lh, lw, &context, error, sizeof(error)));
+    CHECK(context.from_latents && context.frames == 22 && context.steps == 7);
+    CHECK(context.audio_t == 37 && context.audio_offset == 0.0);
+    CHECK(h3_motion_context_encode(&context, path, lw * 16, lh * 16, NULL,
+                                   NULL, NULL, NULL, NULL, NULL, NULL,
+                                   error, sizeof(error)));
+    /* The rows are the patchified last 7 steps and the packed last 37 audio
+     * steps, element for element. */
+    size_t plane = (size_t)lh * lw;
+    float *tail = malloc((size_t)24 * 7 * plane * sizeof(*tail));
+    for (int channel = 0; channel < 24; channel++)
+        memcpy(tail + (size_t)channel * 7 * plane,
+               video + ((size_t)channel * video_t + 5) * plane,
+               7 * plane * sizeof(*tail));
+    size_t row_elements = 7 * plane / 4 * 96;
+    float *rows = malloc(row_elements * sizeof(*rows));
+    CHECK(h3_dit_patchify_video(tail, 24, 7, lh, lw, rows, row_elements));
+    CHECK(context.video_elements == row_elements &&
+          memcmp(context.video_rows, rows, row_elements * sizeof(*rows)) == 0);
+    float *audio_tail = malloc((size_t)32 * 2 * 37 * sizeof(*audio_tail));
+    for (int channel = 0; channel < 32; channel++)
+        for (int stereo = 0; stereo < 2; stereo++)
+            memcpy(audio_tail + ((size_t)channel * 2 + stereo) * 37,
+                   audio + ((size_t)channel * 2 + stereo) * audio_t + 28,
+                   37 * sizeof(*audio_tail));
+    float *audio_rows = malloc((size_t)32 * 2 * 37 * sizeof(*audio_rows));
+    CHECK(h3_dit_pack_audio(audio_tail, 32, 37, audio_rows, (size_t)32 * 2 * 37));
+    CHECK(context.audio_elements == (size_t)32 * 2 * 37 &&
+          memcmp(context.audio_rows, audio_rows,
+                 context.audio_elements * sizeof(*audio_rows)) == 0);
+    h3_motion_context_free(&context);
+    /* A 107-frame clip allocates 178 audio steps for 178.33 frames' worth:
+     * the window ends a third of a step early, so it starts one step before
+     * the origin (round(36.33) - 37). */
+    CHECK(h3_motion_context_save(path, video, video_t, lh, lw, audio, 178,
+                                 107, error, sizeof(error)));
+    CHECK(h3_motion_context_plan(path, lh, lw, &context, error, sizeof(error)));
+    CHECK(context.audio_offset == -1.0);
+    /* A 124-frame clip overshoots by a third: round(37.0) - 37 = 0. */
+    CHECK(h3_motion_context_save(path, video, video_t, lh, lw, audio, 207,
+                                 124, error, sizeof(error)));
+    CHECK(h3_motion_context_plan(path, lh, lw, &context, error, sizeof(error)));
+    CHECK(context.audio_offset == 0.0);
+    /* Another canvas is refused; a tail off the cycle is refused. */
+    CHECK(!h3_motion_context_plan(path, lh, lw + 2, &context, error, sizeof(error)));
+    CHECK(h3_motion_context_save(path, video, 11, lh, lw, audio, audio_t,
+                                 frame_count, error, sizeof(error)));
+    CHECK(!h3_motion_context_plan(path, lh, lw, &context, error, sizeof(error)));
+    remove(path);
+    /* A video file plans a 37-step window from the origin without reading it. */
+    CHECK(!h3_motion_context_plan("/nonexistent/clip.mp4", lh, lw, &context,
+                                  error, sizeof(error)));
+    FILE *stub = fopen("/tmp/h3-motion-context-test.mp4", "wb");
+    CHECK(stub && fputs("not a context file", stub) >= 0 && fclose(stub) == 0);
+    CHECK(h3_motion_context_plan("/tmp/h3-motion-context-test.mp4", lh, lw,
+                                 &context, error, sizeof(error)));
+    CHECK(!context.from_latents && context.audio_t == 37 &&
+          context.audio_offset == 0.0);
+    remove("/tmp/h3-motion-context-test.mp4");
+    /* Trim: 22 of 107 frames at 32 kHz cuts 29333 samples and sizes the rest
+     * to 85 frames (113333 samples), zero-padding a short audio grid. */
+    int samples = 178 * 800;
+    float *pcm = malloc((size_t)2 * samples * sizeof(*pcm));
+    for (int index = 0; index < 2 * samples; index++) pcm[index] = 1.0f;
+    float *trimmed = NULL;
+    int trimmed_samples = 0;
+    CHECK(h3_motion_context_trim_pcm(pcm, 2, samples, 32000, 107, 22,
+                                     &trimmed, &trimmed_samples));
+    CHECK(trimmed_samples == 113333);
+    CHECK(trimmed[0] == 1.0f && trimmed[113066] == 1.0f &&
+          trimmed[113067] == 0.0f && trimmed[113333] == 1.0f &&
+          trimmed[2 * 113333 - 1] == 0.0f);
+    CHECK(!h3_motion_context_trim_pcm(pcm, 2, samples, 32000, 22, 22,
+                                      &trimmed, &trimmed_samples));
+    free(trimmed); free(pcm); free(audio_rows); free(audio_tail); free(rows);
+    free(tail); free(video); free(audio);
+}
+
 static void test_layout_ref2va(void) {
     h3_layout_ref references[] = {
         {H3_LAYOUT_REF_IMAGE, 0, 16, 24, 0},
@@ -218,7 +384,7 @@ static void test_layout_ref2va(void) {
         {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 80}
     };
     h3_layout_spec spec = {192, 17, 30, 54, 93, 56,
-                           NULL, 0, references, 3};
+                           NULL, 0, references, 3, 0, 0, 0.0};
     h3_layout layout;
     char error[256];
     CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
@@ -240,6 +406,107 @@ static void test_layout_ref2va(void) {
     CHECK(close_enough(weighted[0], 12788836714.0, 1e-3));
     CHECK(close_enough(sums[1], 115719.96684277552, 1e-7));
     CHECK(close_enough(sums[2], 122360.11344760543, 1e-7));
+    h3_layout_free(&layout);
+}
+
+static void test_layout_motion_context_refs(void) {
+    /* The pinned head and its audio window sit on the target timeline, which
+     * starts after the reference spans (1 + 48 + 80 steps here), while the
+     * references themselves keep their slots right after the text. */
+    h3_layout_ref references[] = {
+        {H3_LAYOUT_REF_IMAGE, 0, 16, 24, 0},
+        {H3_LAYOUT_REF_VIDEO, 7, 16, 24, 48},
+        {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 80}
+    };
+    h3_layout_spec spec = {192, 17, 30, 54, 93, 56,
+                           NULL, 0, references, 3, 7, 37, 0.0};
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.seq_len == 11196);
+    const size_t bounds[][2] = {
+        {0, 192}, {192, 3027}, {3027, 3101}, {3101, 3197}, {3197, 3293},
+        {3293, 3965}, {3965, 4125}, {4125, 4311}, {4311, 11196}
+    };
+    const h3_segment_kind kinds[] = {
+        H3_SEG_TEXT, H3_SEG_COND, H3_SEG_REF_AUDIO, H3_SEG_REF_IMAGE,
+        H3_SEG_REF_AUDIO, H3_SEG_REF_IMAGE, H3_SEG_REF_AUDIO, H3_SEG_AUDIO,
+        H3_SEG_VIDEO
+    };
+    check_segments(&layout, bounds, kinds, 9);
+    CHECK(layout.img_cond_rows == 2835 + 768);
+    CHECK(layout.audio_cond_rows == 74 + 256);
+    CHECK(layout.img_target_rows == 6885 && layout.audio_target_rows == 186);
+    CHECK(layout.positions[192].t == 321.0);
+    CHECK(layout.positions[3101].t == 192.0);
+    CHECK(layout.positions[4125].t == 321.0);
+    int same = 1;
+    for (size_t row = 0; row < 2835; row++) {
+        const h3_position *pinned = &layout.positions[192 + row];
+        const h3_position *target = &layout.positions[4311 + row];
+        if (pinned->t != target->t || pinned->h != target->h ||
+            pinned->w != target->w) same = 0;
+    }
+    CHECK(same);
+    same = 1;
+    for (size_t step = 0; step < 37; step++) {
+        for (int stereo = 0; stereo < 2; stereo++) {
+            const h3_position *pinned =
+                &layout.positions[3027 + (size_t)stereo * 37 + step];
+            const h3_position *target =
+                &layout.positions[4125 + (size_t)stereo * 93 + step];
+            if (pinned->t != target->t || pinned->w != target->w) same = 0;
+        }
+    }
+    CHECK(same);
+    h3_layout_free(&layout);
+}
+
+static void test_layout_hybrid(void) {
+    /* Frame anchors with references: the anchors lead the sequence as in
+     * the FL2VA layout but are timed from the target origin, after the
+     * reference spans, where the target rows they stand in for sit. */
+    int keyframes[] = {0, 55};
+    h3_layout_ref references[] = {
+        {H3_LAYOUT_REF_IMAGE, 0, 16, 24, 0},
+        {H3_LAYOUT_REF_VIDEO, 7, 16, 24, 48},
+        {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 80}
+    };
+    h3_layout_spec spec = {192, 17, 30, 54, 93, 56,
+                           keyframes, 2, references, 3, 0, 0, 0.0};
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.seq_len == 9097);
+    const size_t bounds[][2] = {
+        {0, 192}, {192, 597}, {597, 1002}, {1002, 1098}, {1098, 1194},
+        {1194, 1866}, {1866, 2026}, {2026, 2212}, {2212, 9097}
+    };
+    const h3_segment_kind kinds[] = {
+        H3_SEG_TEXT, H3_SEG_COND, H3_SEG_COND, H3_SEG_REF_IMAGE,
+        H3_SEG_REF_AUDIO, H3_SEG_REF_IMAGE, H3_SEG_REF_AUDIO, H3_SEG_AUDIO,
+        H3_SEG_VIDEO
+    };
+    check_segments(&layout, bounds, kinds, 9);
+    CHECK(layout.img_cond_rows == 810 + 768);
+    CHECK(layout.audio_cond_rows == 256);
+    CHECK(layout.positions[192].t == layout.positions[2212].t);
+    CHECK(layout.positions[192].t == 321.0);
+    CHECK(close_enough(layout.positions[597].t, 321.0 + 55.0 * 5.0 / 3.0, 1e-9));
+    CHECK(layout.positions[1002].t == 192.0);
+    h3_layout_free(&layout);
+    /* A pinned head still replaces the first-frame anchor. */
+    spec.head_steps = 7;
+    spec.head_audio_t = 37;
+    CHECK(!h3_layout_build(&spec, &layout, error, sizeof(error)));
+    spec.keyframes = &keyframes[1];
+    spec.keyframe_count = 1;
+    CHECK(h3_layout_build(&spec, &layout, error, sizeof(error)));
+    CHECK(layout.img_cond_rows == 2835 + 405 + 768);
+    CHECK(layout.segments[1].kind == H3_SEG_COND &&
+          layout.segments[2].kind == H3_SEG_REF_AUDIO &&
+          layout.segments[3].kind == H3_SEG_COND &&
+          layout.segments[4].kind == H3_SEG_REF_IMAGE);
     h3_layout_free(&layout);
 }
 
@@ -396,19 +663,72 @@ static void test_terminal_zoom(void) {
     CHECK(!h3_terminal_display_dimensions(INT32_MAX, 1, &width, &height));
 }
 
+/* The tail reader keeps the last N decoded frames of a stream it reads
+ * once; checked against the bounded reader on a synthetic 30-frame clip. */
+static void test_ffmpeg_video_tail(void) {
+    const char *ffmpeg = getenv("H3_FFMPEG");
+    if (!ffmpeg || !*ffmpeg) {
+        printf("skip: FFmpeg video tail test (set H3_FFMPEG)\n");
+        return;
+    }
+    enum { FRAMES = 30, W = 64, H = 48, RATE = 32000, SAMPLES = RATE };
+    size_t frame_bytes = (size_t)W * H * 3;
+    uint8_t *frames = malloc(FRAMES * frame_bytes);
+    float *pcm = calloc(2 * SAMPLES, sizeof(*pcm));
+    CHECK(frames && pcm);
+    /* Each frame a flat shade so lossy encoding keeps them apart. */
+    for (int frame = 0; frame < FRAMES; frame++)
+        memset(frames + (size_t)frame * frame_bytes, 16 + frame * 7, frame_bytes);
+    char path[] = "/tmp/h3-ffmpeg-tail-test.mp4";
+    char error[256];
+    CHECK(h3_ffmpeg_write_av_rgb24_f32(path, frames, FRAMES, W, H, 24, pcm,
+                                       SAMPLES, 2, RATE, error, sizeof(error)));
+    float *whole = NULL, *tail = NULL;
+    int whole_frames = 0, tail_frames = 0, total_frames = 0;
+    CHECK(h3_ffmpeg_read_video_f32(path, W, H, FRAMES, &whole, &whole_frames,
+                                   error, sizeof(error)));
+    CHECK(h3_ffmpeg_read_video_tail_f32(path, W, H, 22, &tail, &tail_frames,
+                                        &total_frames, error, sizeof(error)));
+    /* The bounded reader snaps 30 frames down to 22 (frames 0..21); the
+     * tail is frames 8..29, so the 14 shared frames must match exactly. */
+    CHECK(tail_frames == 22 && whole_frames == 22 && total_frames == FRAMES);
+    size_t area = (size_t)W * H;
+    int same = whole && tail;
+    for (int channel = 0; same && channel < 3; channel++)
+        for (int t = 0; same && t < 14; t++)
+            if (memcmp(tail + ((size_t)channel * 22 + t) * area,
+                       whole + ((size_t)channel * 22 + 8 + t) * area,
+                       area * sizeof(float)) != 0) same = 0;
+    CHECK(same);
+    /* Shades rise 7 levels a frame: the last tail frame is the brightest. */
+    CHECK(tail[21 * area] > tail[0] + 100.0f / 255.0f);
+    float *more = NULL;
+    int more_frames = 0;
+    CHECK(h3_ffmpeg_read_video_tail_f32(path, W, H, 40, &more, &more_frames,
+                                        NULL, error, sizeof(error)));
+    CHECK(more_frames == FRAMES);
+    unlink(path);
+    free(whole); free(tail); free(more); free(frames); free(pcm);
+}
+
 int main(void) {
     test_temporal_and_canvas();
     test_schedule();
     test_dit_reuse_schedule();
     test_layout_tiny();
     test_layout_fl2va();
+    test_layout_motion_context();
+    test_motion_context_file();
     test_layout_ref2va();
+    test_layout_motion_context_refs();
+    test_layout_hybrid();
     test_safetensors();
     test_rng_and_solver();
     test_rgb_resize();
     test_dit_row_conversions();
     test_metal_probe();
     test_terminal_zoom();
+    test_ffmpeg_video_tail();
     printf("ok: %d checks\n", tests_run);
     return 0;
 }

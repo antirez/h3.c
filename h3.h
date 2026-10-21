@@ -126,12 +126,21 @@ typedef struct {
     h3_frame_callback on_frame;
     h3_progress_callback on_progress;
     void *callback_opaque;
+    /* Motion context: continue a previous generation. Its last 22 frames and
+     * 0.917 s of sound are pinned at the head of this one and trimmed from
+     * the delivered output. Either the file a run wrote with save_context
+     * (final latents, bit-exact) or a finished video. It replaces
+     * first_frame; last_frame and ordered references ride along. */
+    const char *motion_context;
+    /* Write this generation's final latents for a later motion_context. */
+    const char *save_context;
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, \
+    NULL, NULL \
 }
 
 typedef struct {

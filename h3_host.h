@@ -8,6 +8,8 @@
 #define H3_MAX_PIXELS (768 * 1344)
 #define H3_FPS 24
 #define H3_AUDIO_LATENT_FPS 40
+/* Rotary time per pixel frame on the shared video/audio timeline. */
+#define H3_FRAME_RESCALE (5.0 / 3.0)
 #define H3_VAE_SPATIAL_RATIO 16
 #define H3_VIDEO_SIGMA_SHIFT 12.0
 #define H3_AUDIO_SIGMA_SHIFT 3.0
@@ -65,6 +67,14 @@ typedef struct {
     size_t keyframe_count;
     const h3_layout_ref *references;
     size_t reference_count;
+    /* Motion context: the previous clip's tail pinned at the head of the
+     * target timeline. head_steps latent steps of visual condition rows sit
+     * on the target's own first step times; head_audio_t audio condition
+     * steps start head_audio_offset steps (may be negative) after the
+     * target origin so that the window ends at the join. */
+    int head_steps;
+    int head_audio_t;
+    double head_audio_offset;
 } h3_layout_spec;
 
 typedef struct {
@@ -95,6 +105,9 @@ typedef struct {
 int h3_align_frame_count(int requested);
 int h3_video_latent_t(int frame_count);
 int h3_video_encoder_latent_t(int frame_count);
+/* Latent steps that cover exactly frame_count pixel frames from the start of
+ * the 1,4,4,4,4 cycle, or zero when no whole number of steps does. */
+int h3_video_head_steps(int frame_count);
 h3_temporal_shape h3_temporal(int requested_frames);
 void h3_latent_canvas(int width, int height, int *latent_w, int *latent_h);
 int h3_adapt_canvas(int width, int height, int *adapted_w, int *adapted_h);

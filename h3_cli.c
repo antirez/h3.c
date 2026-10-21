@@ -309,10 +309,6 @@ static void add_reference_image(h3_cli_state *state, char *argument) {
         fprintf(stderr, "Usage: !ref-image PATH\n");
         return;
     }
-    if (state->first_frame || state->last_frame) {
-        fprintf(stderr, "h3: Ref2VA references cannot be combined with frame anchors\n");
-        return;
-    }
     if (!h3_model(state->ctx)->ref2va_transformer.files) {
         fprintf(stderr, "h3: !ref-image requires the Ref2VA checkpoint\n");
         return;
@@ -373,10 +369,6 @@ static void set_anchor(h3_cli_state *state, int first, char *argument) {
         *slot = NULL;
         h3_cache_clear(state->ctx);
         printf("%s: none\n", name);
-        return;
-    }
-    if (state->params.reference_count) {
-        fprintf(stderr, "h3: frame anchors cannot be combined with Ref2VA references\n");
         return;
     }
     if (!validate_anchor(argument)) return;

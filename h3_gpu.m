@@ -1445,17 +1445,32 @@ int h3_gpu_qkv_rope_f32(h3_gpu *opaque, h3_gpu_tensor *query,
         });
 }
 
+static uint32_t h3_sdpa_env_rows(const char *name, uint32_t fallback) {
+    const char *value = getenv(name);
+    if (!value || !*value) return fallback;
+    for (const char *p = value; *p; p++)
+        if (*p < '0' || *p > '9') return fallback;
+    char *end;
+    errno = 0;
+    unsigned long rows = strtoul(value, &end, 10);
+    return errno || *end || rows > UINT32_MAX ? fallback : (uint32_t)rows;
+}
+
 static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
                                  uint32_t sequence,
                                  uint32_t heads, uint32_t head_dim, float scale,
                                  MPSDataType dataType, int causal,
                                  int headMajor, int outputHeadMajor) {
     @autoreleasepool {
+        uint32_t query_block = h3_sdpa_env_rows("H3_SDPA_MAX_QUERY_ROWS", 0);
+        uint32_t split_min = h3_sdpa_env_rows("H3_SDPA_SPLIT_MIN_ROWS", 8192);
+        if (causal || sequence <= split_min || query_block >= sequence)
+            query_block = 0;
         NSString *cacheKey = [NSString stringWithFormat:
-                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d",
+                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d:%u",
                               (unsigned)dataType, batch, sequence, heads,
                               head_dim, scale, causal, headMajor,
-                              outputHeadMajor];
+                              outputHeadMajor, query_block];
         H3SDPA *cached = gpu.sdpaCache[cacheKey];
         if (cached) return cached;
         MPSGraph *graph = [[MPSGraph alloc] init];
@@ -1501,8 +1516,27 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
                 scaledDotProductAttentionWithQueryTensor:qt keyTensor:kt
                 valueTensor:vt maskTensor:mask scale:scale name:nil];
         } else {
-            attention = [graph scaledDotProductAttentionWithQueryTensor:qt
-                keyTensor:kt valueTensor:vt scale:scale name:nil];
+            /* Opt-in workaround for MPSGraph silently corrupting large SDPA
+             * inputs on macOS 15. Each query block still attends to all keys.
+             * Related upstream discussion: issue #16 and PR #64. */
+            if (getenv("H3_PROFILE"))
+                fprintf(stderr, "h3: SDPA rows=%u heads=%u query-block=%u\n",
+                    sequence, heads, query_block);
+            if (query_block) {
+                NSMutableArray<MPSGraphTensor *> *parts = [NSMutableArray array];
+                for (uint32_t start = 0; start < sequence;) {
+                    uint32_t rows = MIN(query_block, sequence - start);
+                    MPSGraphTensor *queries = [graph sliceTensor:qt dimension:2
+                        start:start length:rows name:nil];
+                    [parts addObject:[graph scaledDotProductAttentionWithQueryTensor:queries
+                        keyTensor:kt valueTensor:vt scale:scale name:nil]];
+                    start += rows;
+                }
+                attention = [graph concatTensors:parts dimension:2 name:nil];
+            } else {
+                attention = [graph scaledDotProductAttentionWithQueryTensor:qt
+                    keyTensor:kt valueTensor:vt scale:scale name:nil];
+            }
         }
         H3SDPA *result = [[H3SDPA alloc] init];
         result.graph = graph;

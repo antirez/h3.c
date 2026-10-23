@@ -809,3 +809,45 @@ at every size for A/B comparison.
 The native baseline targets the original `FL2VA/` and `Ref2VA/` checkpoint
 trees. Model phases are loaded and released separately so the 33B transformer,
 Qwen encoder, and decoders never have to coexist in unified memory.
+
+### Diagnosing large-sequence SDPA corruption
+
+On an M4 Max running macOS 15.7.7, native MPSGraph non-causal attention
+silently returned incorrect results at 12,256 sequence rows. A
+1344x768, 39-frame render produced full-frame colored noise while the same
+prompt at 512x512, 39 frames rendered normally. This is related to the
+large-attention failures reported in [issue #16](https://github.com/antirez/h3.c/issues/16)
+and the query-splitting workaround in [PR #64](https://github.com/antirez/h3.c/pull/64),
+but occurs below that PR's default 12,288-row gate.
+
+An opt-in workaround splits queries into blocks, keeping all keys and values
+visible to each query. It does not reduce model layers or resolution:
+
+```sh
+H3_SDPA_MAX_QUERY_ROWS=2048 ./h3 -d /path/to/MiniMax-H3 --ssd-streaming \
+  --width 1344 --height 768 --frames 39 --steps 20 --layers 50 --reuse 1 \
+  -p "A red fox walks slowly through fresh snow in a pine forest." -o fox.mp4
+```
+
+`H3_SDPA_MAX_QUERY_ROWS` defaults to 0 (disabled). When enabled, splitting
+only applies above `H3_SDPA_SPLIT_MIN_ROWS` (default 8192); causal attention
+is unchanged. Set the minimum to 0 to force splitting of any sequence larger
+than the query block. These are diagnostic controls, not universal safe
+hardware thresholds. Invalid values fall back to the defaults. Splitting can
+increase intermediate memory and execution time; SSD streaming is advisable.
+`--profile` reports the effective query block when creating an SDPA graph.
+
+The standalone probe requires no weights and is excluded from `make test`
+because of its GPU memory requirements. Run it from the repository directory:
+
+```sh
+make h3_sdpa_large_test
+H3_SDPA_MAX_QUERY_ROWS=0 ./h3_sdpa_large_test 12256
+H3_SDPA_MAX_QUERY_ROWS=2048 ./h3_sdpa_large_test 12256
+```
+
+The probe compares all 128 channels at the first/middle/last rows and heads
+against a double-precision CPU reference using the same BF16-rounded inputs.
+On the affected machine, sampled relative RMS error fell from 1.0 to about
+0.00258 with splitting. Other hardware may pass both cases. This sampled
+kernel check does not replace visual validation of generated clips.

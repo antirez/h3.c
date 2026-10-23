@@ -17,6 +17,7 @@ h3_dit_bench_864
 h3_tests
 h3_metal_tests
 h3_bf16_tests
+h3_sdpa_large_test
 h3_tokenizer_tests
 h3_text_tests
 h3_real_prompt_test

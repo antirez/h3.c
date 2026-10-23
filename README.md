@@ -525,10 +525,16 @@ aggressive point. The latter produced a coherent walking fox and repeated at
 8.02 seconds of DiT versus about 15.82 seconds natively. Native 256 uses the
 same-cost spatial-RoPE adaptation described above; it remains a fast composition
 preview rather than a substitute for a 512- or 768-class final render.
-The video VAE automatically chooses a 256-320 pixel spatial tile from the
-requested canvas geometry, minimizing repeated overlap work while keeping peak
-storage bounded. `H3_VAE_TILE_PIXELS=256` restores the original conservative
-tile plan for close-reference diagnosis.
+The video VAE automatically chooses its spatial tile pixels inside a 256-304
+flicker-stable band, selected per canvas geometry to minimize repeated overlap
+work while keeping peak storage bounded. The tile is a temporal-stability gain
+stage: decoding one fixed latent set, tile shapes of 240 or 320+ px amplify the
+latent per-frame flicker of fine-textured content 2-3x compared to 256-304 shapes
+(1344x768 wall-region flicker with identical latents: t256 0.51, t304 0.65,
+t320 1.09, t384 2.90), which is why the top-resolution canvases used to show
+shimmering walls and skin while small canvases were clean. `H3_VAE_TILE_PIXELS`
+still selects any shape explicitly; the previous 320px headline shape trades
+about 8 percent of video-VAE decode score for the flicker.
 
 ### Weight residency and streamed prompt encoding
 

@@ -673,8 +673,14 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
     }
     int best = TILE_PIXELS;
     uint64_t best_score = UINT64_MAX;
-    for (int pixels = TILE_PIXELS; pixels <= 320;
-         pixels += SPATIAL_RATIO) {
+    /* Tile decode behaves as a temporal-stability gain stage: sizes 256-304
+     * decode the same latents with the lowest measured frame-to-frame
+     * flicker, while 240 and 320+ amplify flicker 2-3x at 768-class canvases
+     * (t 240:1.06 256:0.51 272:0.53 288:0.56 304:0.65 320:1.09 352:2.30
+     * 384:2.90 wall-flicker, identical DiT latents). Keep the score-based
+     * search inside that empirically stable band; H3_VAE_TILE_PIXELS still
+     * overrides for speed. */
+    for (int pixels = TILE_PIXELS; pixels <= 304; pixels += SPATIAL_RATIO) {
         uint64_t tiles = (uint64_t)tile_count_for_extent(pixel_height, pixels) *
             (uint64_t)tile_count_for_extent(pixel_width, pixels);
         /* The resident VAE is dominated by linears and activation traffic;

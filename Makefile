@@ -106,7 +106,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
 	         test -f misc/fixtures/h3_dit_bf16.safetensors; then \
-		./h3_metal_tests misc/fixtures/h3_dit.safetensors; \
+		./h3_metal_tests misc/fixtures/h3_dit.safetensors && \
 		./h3_bf16_tests misc/fixtures/h3_dit_bf16.safetensors; \
 	else \
 		echo "skip: MLX toy-block fixtures are not installed"; \

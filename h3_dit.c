@@ -101,6 +101,7 @@ struct h3_dit {
     float spatial_rope_scale;
     int bf16_final;
     unsigned core_reuse_interval;
+    int audio_locked;   /* see h3_dit_set_audio_locked */
     unsigned core_forward_count;
     int core_residual_ready;
     unsigned active_block_count;
@@ -2577,6 +2578,7 @@ static int parse_reuse_steps(int steps, uint8_t *selected) {
 }
 
 static int gpu_sampler_requested(const h3_dit *dit) {
+    if (dit->audio_locked) return 0;   /* validated on the host sampler */
     const char *cpu = getenv("H3_CPU_SAMPLER");
     if (cpu && *cpu && strcmp(cpu, "0")) return 0;
     const char *value = getenv("H3_GPU_SAMPLER");
@@ -2858,6 +2860,10 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
+void h3_dit_set_audio_locked(h3_dit *dit, int locked) {
+    if (dit) dit->audio_locked = locked;
+}
+
 int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
@@ -2957,9 +2963,9 @@ int h3_dit_denoise_euler_preview(
             ok = h3_euler_velocity_step(
                      video_latent, video_velocity, video_count,
                      dit->sigmas.video[step], dit->sigmas.video[step + 1]) &&
-                 h3_euler_velocity_step(
+                 (dit->audio_locked || h3_euler_velocity_step(
                      audio_latent, audio_velocity, audio_count,
-                     dit->sigmas.audio[step], dit->sigmas.audio[step + 1]);
+                     dit->sigmas.audio[step], dit->sigmas.audio[step + 1]));
             if (!ok) fail(error, error_size,
                           "Euler solver rejected step %d", step);
         }

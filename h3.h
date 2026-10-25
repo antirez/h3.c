@@ -93,6 +93,11 @@ typedef struct {
     /* Restore the released spatial RoPE grid at 256x256. The default applies
      * a visually validated half-scale grid only at that native canvas. */
     int use_reference_rope;
+    /* Make the first standalone reference audio clip the exact soundtrack of
+     * the take: it is held clean at the condition timestep for the whole
+     * denoise, so only the video is generated and the picture follows it
+     * (lip sync to a given vocal). The clip must cover the whole take. */
+    int lock_audio;
     /* Keep only two original BF16 DiT blocks in memory and overlap reading the
      * next block from the checkpoint with execution of the current block. */
     int ssd_streaming;
@@ -131,7 +136,7 @@ typedef struct {
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
 }
 
 typedef struct {

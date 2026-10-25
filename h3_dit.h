@@ -111,6 +111,10 @@ int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
 /* Preview variant. The callback runs after every Euler transition with the
  * current channel-major F32 video latent. It is deliberately opt-in because it
  * introduces a synchronization point after each step. */
+/* Locked soundtrack: the audio latent passed in is final and never stepped
+ * (its sigmas must be zero). Forces the host Euler sampler. */
+void h3_dit_set_audio_locked(h3_dit *dit, int locked);
+
 int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,

@@ -168,12 +168,13 @@ static char *h3_prepared_key(const char *conditioning,
     if (!h3_key_append(
             &key,
             "%s|shape=%dx%dx%d|steps=%d|layers=%d|reuse-core=%d|reduce=%d"
-            "|row-fc2=%d|reference-rope=%d|ssd-streaming=%d"
+            "|row-fc2=%d|reference-rope=%d|lock-audio=%d|ssd-streaming=%d"
             "|slow=%d%d%d%d%d%d%d%d%d%d",
             conditioning, render_width, render_height, params->frames,
             params->steps, params->dit_layers, params->core_reuse,
             params->token_reduction, params->use_int8_row_fc2,
             params->use_reference_rope,
+            params->lock_audio,
             params->ssd_streaming,
             params->use_slower_bf16_mlp,
             params->use_slower_bf16_qkv,
@@ -896,6 +897,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     size_t condition_video_elements = 0;
     float *condition_audio_rows = NULL;
     size_t condition_audio_elements = 0;
+    float *audio_lock = NULL;   /* --lock-audio: the clip's clean [32,2,T] latent */
     h3_text_embedding text;
     memset(&text, 0, sizeof(text));
     h3_layout layout;
@@ -1217,6 +1219,29 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             total_audio_samples += (size_t)samples;
             layout_references[index].audio_t = latent.length;
             presentations[index].has_audio = 1;
+            if (params->lock_audio && !audio_lock) {
+                if (latent.length < temporal.audio_t) {
+                    h3_set_error(ctx, "--lock-audio: the clip covers %d audio "
+                                 "latents, the take needs %d (%.3f s)",
+                                 latent.length, temporal.audio_t,
+                                 (double)temporal.audio_t / H3_AUDIO_LATENT_FPS);
+                    h3_audio_latent_free(&latent);
+                    goto cleanup;
+                }
+                /* the encoder's [32,2,T] order is the target audio order; a
+                   longer clip is cut to the take */
+                size_t keep = (size_t)64 * (size_t)temporal.audio_t;
+                audio_lock = malloc(keep * sizeof(*audio_lock));
+                if (!audio_lock) {
+                    h3_audio_latent_free(&latent);
+                    h3_set_error(ctx, "out of memory keeping the locked audio");
+                    goto cleanup;
+                }
+                for (size_t row = 0; row < 64; row++)
+                    memcpy(audio_lock + row * (size_t)temporal.audio_t,
+                           latent.values + row * (size_t)latent.length,
+                           (size_t)temporal.audio_t * sizeof(*audio_lock));
+            }
             h3_audio_latent_free(&latent);
             if (progress.cancelled) goto cleanup;
         }
@@ -1460,6 +1485,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "cannot construct the requested sigma schedule");
         goto cleanup;
     }
+    /* a locked soundtrack is finished at every step (1 - sigma = 1) */
+    if (params->lock_audio) memset(sigmas.audio, 0, sizeof(sigmas.audio));
     float spatial_rope_scale = !params->use_reference_rope &&
         render_width == 256 && render_height == 256 ? 0.5f : 1.0f;
     if (ctx->cache_enabled && ctx->dit && ctx->dit_key &&
@@ -1573,6 +1600,19 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_rng_seed(&audio_rng, params->seed);
     h3_rng_fill_normal(&video_rng, video, video_count);
     h3_rng_fill_normal(&audio_rng, audio, audio_count);
+    if (params->lock_audio) {
+        if (!audio_lock) {
+            h3_set_error(ctx, "--lock-audio needs a --ref-audio clip encoded "
+                              "in this run");
+            goto cleanup;
+        }
+        if (audio_count != (size_t)64 * (size_t)temporal.audio_t) {
+            h3_set_error(ctx, "--lock-audio: target audio geometry mismatch");
+            goto cleanup;
+        }
+        memcpy(audio, audio_lock, audio_count * sizeof(*audio));
+    }
+    h3_dit_set_audio_locked(dit, params->lock_audio);
     if (!h3_dit_denoise_euler_preview(
             dit, video, audio, params->denoise_reuse,
             h3_dit_progress_bridge, &progress,
@@ -1588,6 +1628,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         goto cleanup;
     }
+    h3_dit_set_audio_locked(dit, 0);
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
     if (progress.cancelled) goto cleanup;
@@ -1715,6 +1756,7 @@ cleanup:
     free(presentation_timestamps);
     free(layout_references);
     free(condition_video_rows);
+    free(audio_lock);
     free(condition_audio_rows);
     h3_text_embedding_free(&text);
     h3_layout_free(&layout);

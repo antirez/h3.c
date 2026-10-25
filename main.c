@@ -54,6 +54,8 @@ static void usage(const char *program) {
         "      --ref-silent-video PATH  Append video without its audio\n"
         "      --ref-video-audio VIDEO AUDIO  Append video + soundtrack\n"
         "      --ref-audio PATH    Append an ordered standalone audio clip\n"
+        "      --lock-audio        Use the first --ref-audio clip as the exact\n"
+        "                          soundtrack (lip sync); a longer clip is cut\n"
         "      --frames-dir PATH  Write generated frames as PPM files\n"
         "      --show             Display a frame after every denoising step (M5)\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
@@ -237,6 +239,7 @@ int main(int argc, char **argv) {
            OPT_SSD_STREAMING,
            OPT_USE_INT8_ROW_FC2,
            OPT_USE_REFERENCE_ROPE,
+           OPT_LOCK_AUDIO,
            OPT_USE_SLOWER_BF16_MLP,
            OPT_USE_SLOWER_BF16_QKV,
            OPT_USE_SLOWER_BF16_ATTENTION_OUTPUT,
@@ -270,6 +273,7 @@ int main(int argc, char **argv) {
         {"ssd-streaming", no_argument, NULL, OPT_SSD_STREAMING},
         {"use-int8-row-fc2", no_argument, NULL, OPT_USE_INT8_ROW_FC2},
         {"use-reference-rope", no_argument, NULL, OPT_USE_REFERENCE_ROPE},
+        {"lock-audio", no_argument, NULL, OPT_LOCK_AUDIO},
         {"use-slower-bf16-mlp", no_argument, NULL,
          OPT_USE_SLOWER_BF16_MLP},
         {"use-slower-bf16-qkv", no_argument, NULL,
@@ -360,6 +364,9 @@ int main(int argc, char **argv) {
                 break;
             case OPT_USE_REFERENCE_ROPE:
                 params.use_reference_rope = 1;
+                break;
+            case OPT_LOCK_AUDIO:
+                params.lock_audio = 1;
                 break;
             case OPT_USE_SLOWER_BF16_MLP:
                 params.use_slower_bf16_mlp = 1;

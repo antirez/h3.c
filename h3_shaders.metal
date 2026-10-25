@@ -256,6 +256,21 @@ kernel void h3_scale_add_f32(device const float *residual [[buffer(0)]],
     output[index] = residual[index] + branch[index] * scale[column];
 }
 
+kernel void h3_scale_add_bf16(device const ushort *residual [[buffer(0)]],
+                               device const ushort *branch [[buffer(1)]],
+                               device const ushort *scale [[buffer(2)]],
+                               device ushort *output [[buffer(3)]],
+                               constant scale_add_args &args [[buffer(4)]],
+                               uint2 gid [[thread_position_in_grid]]) {
+    uint column = gid.x;
+    uint row = gid.y;
+    if (row >= args.rows || column >= args.width) return;
+    uint index = row * args.width + column;
+    float value = h3_bf16_to_f32(residual[index]) +
+                  h3_bf16_to_f32(branch[index]) * h3_bf16_to_f32(scale[column]);
+    output[index] = h3_f32_to_bf16(value);
+}
+
 kernel void h3_layer_norm_f32(device const float *input [[buffer(0)]],
                               device const float *weight [[buffer(1)]],
                               device const float *bias [[buffer(2)]],
@@ -342,6 +357,54 @@ kernel void h3_video_qkv_rope_f32(
     uint output_index = (row * args.heads + head) * args.head_dim + dimension;
     query[output_index] = q0;
     key[output_index] = k0;
+    value[output_index] = qkv[base + args.head_dim * 2 + dimension];
+}
+
+kernel void h3_video_qkv_rope_bf16(
+                            device const ushort *qkv [[buffer(0)]],
+                            device const ushort *rope_cos [[buffer(1)]],
+                            device const ushort *rope_sin [[buffer(2)]],
+                            device ushort *query [[buffer(3)]],
+                            device ushort *key [[buffer(4)]],
+                            device ushort *value [[buffer(5)]],
+                            constant qkv_args &args [[buffer(6)]],
+                            uint3 gid [[thread_position_in_grid]]) {
+    uint dimension = gid.x;
+    uint head = gid.y;
+    uint row = gid.z;
+    if (dimension >= args.head_dim || head >= args.heads || row >= args.sequence) return;
+    uint base = (row * args.heads + head) * args.head_dim * 3;
+    float q_sum = 0.0f, k_sum = 0.0f;
+    for (uint d = 0; d < args.head_dim; d++) {
+        float q = h3_bf16_to_f32(qkv[base + d]);
+        float k = h3_bf16_to_f32(qkv[base + args.head_dim + d]);
+        q_sum = fma(q, q, q_sum);
+        k_sum = fma(k, k, k_sum);
+    }
+    float qi = rsqrt(q_sum / float(args.head_dim) + args.epsilon);
+    float ki = rsqrt(k_sum / float(args.head_dim) + args.epsilon);
+    float q0 = h3_bf16_to_f32(qkv[base + dimension]) * qi;
+    float k0 = h3_bf16_to_f32(qkv[base + args.head_dim + dimension]) * ki;
+    if (dimension < args.rope_half) {
+        uint pair = dimension + args.rope_half;
+        float q1 = h3_bf16_to_f32(qkv[base + pair]) * qi;
+        float k1 = h3_bf16_to_f32(qkv[base + args.head_dim + pair]) * ki;
+        float c = h3_bf16_to_f32(rope_cos[row * args.rope_half + dimension]);
+        float s = h3_bf16_to_f32(rope_sin[row * args.rope_half + dimension]);
+        q0 = q0 * c - q1 * s;
+        k0 = k0 * c - k1 * s;
+    } else if (dimension < args.rope_half * 2) {
+        uint pair = dimension - args.rope_half;
+        float q1 = h3_bf16_to_f32(qkv[base + pair]) * qi;
+        float k1 = h3_bf16_to_f32(qkv[base + args.head_dim + pair]) * ki;
+        float c = h3_bf16_to_f32(rope_cos[row * args.rope_half + pair]);
+        float s = h3_bf16_to_f32(rope_sin[row * args.rope_half + pair]);
+        q0 = q0 * c + q1 * s;
+        k0 = k0 * c + k1 * s;
+    }
+    uint output_index = (row * args.heads + head) * args.head_dim + dimension;
+    query[output_index] = h3_f32_to_bf16(q0);
+    key[output_index] = h3_f32_to_bf16(k0);
     value[output_index] = qkv[base + args.head_dim * 2 + dimension];
 }
 

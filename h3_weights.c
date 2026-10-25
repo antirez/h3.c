@@ -200,3 +200,77 @@ h3_gpu_tensor *h3_weight_load_f32(const h3_weight_store *store, h3_gpu *gpu,
     return load_tensor(store, gpu, name, ndim, shape, H3_DTYPE_F32,
                        error, error_size);
 }
+
+h3_gpu_tensor *h3_weight_load_f32_as_bf16(const h3_weight_store *store,
+                                           h3_gpu *gpu, const char *name,
+                                           int ndim, const uint64_t *shape,
+                                           char *error, size_t error_size) {
+    const h3_st_header *header = NULL;
+    const h3_st_tensor *tensor = h3_weight_find(store, name, &header);
+    if (!tensor) {
+        fail(error, error_size, "required weight is absent: %s", name);
+        return NULL;
+    }
+    if (tensor->ndim != ndim) {
+        fail(error, error_size, "weight %s has rank %d, expected %d",
+             name, tensor->ndim, ndim);
+        return NULL;
+    }
+    if (tensor->dtype != H3_DTYPE_F32 && tensor->dtype != H3_DTYPE_BF16) {
+        fail(error, error_size, "weight %s has dtype %s, expected F32 or BF16",
+             name, h3_dtype_name(tensor->dtype));
+        return NULL;
+    }
+    uint64_t elements = 1;
+    for (int dimension = 0; dimension < ndim; dimension++) {
+        if (tensor->shape[dimension] != shape[dimension]) {
+            fail(error, error_size, "weight %s shape mismatch at dimension %d",
+                 name, dimension);
+            return NULL;
+        }
+        if (shape[dimension] && elements > UINT64_MAX / shape[dimension]) {
+            fail(error, error_size, "weight %s shape overflows", name);
+            return NULL;
+        }
+        elements *= shape[dimension];
+    }
+    if (elements > SIZE_MAX) {
+        fail(error, error_size, "weight %s is too large for this process", name);
+        return NULL;
+    }
+    size_t count = (size_t)elements;
+    if (tensor->dtype == H3_DTYPE_BF16) {
+        h3_gpu_tensor *result = h3_gpu_tensor_load_bf16(gpu, header->path,
+                                                         tensor->file_offset,
+                                                         count);
+        if (!result)
+            fail(error, error_size, "cannot load %s: %s", name,
+                 h3_gpu_error(gpu));
+        return result;
+    }
+    if (count > SIZE_MAX / sizeof(float) || count > SIZE_MAX / sizeof(uint16_t)) {
+        fail(error, error_size, "weight %s is too large for this process", name);
+        return NULL;
+    }
+    float *values = malloc(count * sizeof(*values));
+    uint16_t *packed = malloc(count * sizeof(*packed));
+    if (!values || !packed) {
+        free(values); free(packed);
+        fail(error, error_size, "out of memory converting %s to BF16", name);
+        return NULL;
+    }
+    if (!h3_st_read_data(header, tensor, values, count * sizeof(*values),
+                         error, error_size)) {
+        free(values); free(packed);
+        return NULL;
+    }
+    for (size_t index = 0; index < count; index++)
+        packed[index] = h3_float_to_bf16(values[index]);
+    free(values);
+    h3_gpu_tensor *result = h3_gpu_tensor_from_bf16(gpu, packed, count);
+    free(packed);
+    if (!result)
+        fail(error, error_size, "cannot upload %s as BF16: %s", name,
+             h3_gpu_error(gpu));
+    return result;
+}

@@ -663,7 +663,23 @@ static int tile_count_for_extent(int extent, int tile_pixels) {
     return count;
 }
 
+/* The released checkpoint trains the decoder on 256-pixel spatial tiles
+ * (vae_tile_size in FL2VA/video_vae/config.json), and the RoPE table is
+ * derived from the tile's own latent size (see prepare_rope()), so a
+ * different tile size decodes a slightly different function than the one
+ * the model was trained on.
+ *
+ * Measured cost of pinning the default to 256 on 960x544: the auto-tuned
+ * 304-pixel layout uses 8 tiles against 15, so it decodes about 26% less
+ * in FP32 and about 64% less in BF16, where the fixed per-tile dispatch
+ * cost stops being negligible.  The decoded frames differ by 41.6 dB PSNR
+ * / 0.986 SSIM, i.e. they are not perceptibly different.
+ *
+ * This therefore trades decode time for strict checkpoint fidelity.
+ * H3_VAE_TILE_PIXELS overrides it. */
 static int configured_tile_pixels(int pixel_height, int pixel_width) {
+    (void)pixel_height;
+    (void)pixel_width;
     const char *value = getenv("H3_VAE_TILE_PIXELS");
     if (value && *value) {
         char *end = NULL;
@@ -671,22 +687,7 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
         if (end && !*end && pixels >= TILE_PIXELS && pixels <= 512 &&
             pixels % SPATIAL_RATIO == 0) return (int)pixels;
     }
-    int best = TILE_PIXELS;
-    uint64_t best_score = UINT64_MAX;
-    for (int pixels = TILE_PIXELS; pixels <= 320;
-         pixels += SPATIAL_RATIO) {
-        uint64_t tiles = (uint64_t)tile_count_for_extent(pixel_height, pixels) *
-            (uint64_t)tile_count_for_extent(pixel_width, pixels);
-        /* The resident VAE is dominated by linears and activation traffic;
-         * measured tile cost follows area more closely than cubic sequence
-         * growth at these shapes. Attention is still included in each tile. */
-        uint64_t score = tiles * (uint64_t)pixels * (uint64_t)pixels;
-        if (score < best_score) {
-            best = pixels;
-            best_score = score;
-        }
-    }
-    return best;
+    return TILE_PIXELS;
 }
 
 static int tile_axis_build(int extent, int tile_pixels, tile_axis *axis,

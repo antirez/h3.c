@@ -499,9 +499,42 @@ most 36864 rows. The sequence limit is unverified above 33069 rows, the
 largest sequence measured. Every weight mode works; the models run one at a
 time (VAE encoder, Qwen vision and text encoder, transformer, VAE decoder),
 and a reference adds the 1.2 GB vision tower and the 0.6 GB VAE encoder to the
-phases, not to the resident transformer. Edit timings have not been measured
-yet. The noise of each reference derives from `--seed`, so the same command
-writes the same PNG.
+phases, not to the resident transformer. Measured on the development Mac
+(M5, resident BF16): a 512x512 edit with one 256x256 reference takes 32.3 s in
+total, of which the "reference text" phase (vision tower and text encoder) is
+5.0 s; a 1024x768 edit with a 1024x768 reference takes 61.5 s. The noise of
+each reference derives from `--seed`, so the same command writes the same PNG.
+
+#### Text embedding cache
+
+The text encoder reads about 49 GB of weights per prompt, and the vision tower
+runs once per reference. Their output, the text embedding, depends only on the
+prompt, the pixels of the references and the checkpoint, so an image run
+(text-to-image or edit) keeps it in a file and reuses it: a run with the same
+prompt and references, whatever its `--seed`, `--size` or weight mode, skips
+the "reference text" phase (5.0 s of the 32.3 s above; more for bigger
+references). The stderr line says what happened: `h3: edit text cache hit
+FILE`, `h3: edit text cache miss; stored FILE`, or `h3: edit text cache
+disabled` (`h3: text cache ...` without references). The reference VAE
+encoder still runs: its output depends on `--seed`.
+
+The cache is on by default and is a directory of one file per entry, named by
+a SHA-256 of the key. The key holds the model directory, the text encoder file
+inventory, the SHA-256 of `tokenizer.json` and of `h3_shaders.metal`, the
+prompt, and for every reference its decoded pixels (a SHA-256, so a renamed or
+touched file still hits, a changed pixel does not) and sizes. The file stores
+the whole key and the loader compares it byte for byte, so a stale hit is not
+possible; a truncated, corrupt or other-format file is a miss with a warning
+line. Entries are never changed, only replaced and deleted.
+
+- `--no-cache` turns it off for the run (image models only).
+- `H3_CACHE_DIR` sets the directory (default `$HOME/.h3_cache/edit`).
+- `H3_CACHE_BYTES` caps the directory (default 2147483648). After each store
+  the entries with the oldest modification time go first; a hit refreshes its
+  file's time.
+- A library caller enables it with `h3_cache_set_directory(ctx, dir)`
+  (`NULL` disables, the default); it does not touch `h3_cache_set_enabled`,
+  which is the interactive video session's in-memory cache.
 
 ## Tests and runtime requirements
 

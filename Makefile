@@ -179,7 +179,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		echo "skip: released tokenizer is not installed"; \
 	fi
 	./h3_edit_presentation_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
-	./h3_image_cache_tests
+	./h3_image_cache_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
 	@if test -f misc/fixtures/h3_text_bf16.safetensors; then \
 		./h3_text_tests misc/fixtures/h3_text_bf16.safetensors; \
 	else \

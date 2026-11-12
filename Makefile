@@ -42,6 +42,9 @@ h3_bf16_tests: tests/test_bf16.o $(LIB_OBJ)
 h3_tokenizer_tests: tests/test_tokenizer.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_edit_presentation_tests: tests/test_edit_presentation.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_text_tests: tests/test_text_metal.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -130,7 +133,8 @@ h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
-test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
+test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
+	h3_edit_presentation_tests h3_text_tests \
 	h3_audio_gpu_tests h3_image_gpu_tests h3_real_audio_vae_test \
 	h3_real_audio_encoder_test h3_av_mux_test h3_png_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
@@ -152,6 +156,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: released tokenizer is not installed"; \
 	fi
+	./h3_edit_presentation_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
 	@if test -f misc/fixtures/h3_text_bf16.safetensors; then \
 		./h3_text_tests misc/fixtures/h3_text_bf16.safetensors; \
 	else \
@@ -334,6 +339,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 
 clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
+		h3_edit_presentation_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
 		h3_audio_gpu_tests h3_image_gpu_tests h3_real_audio_vae_test \
 		h3_real_audio_encoder_test h3_av_mux_test h3_png_test \

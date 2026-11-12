@@ -58,17 +58,25 @@ static int ids_push(h3_ids *ids, uint32_t value) {
     return ids_append(ids, &value, 1);
 }
 
-static int tokenize_append(const h3_tokenizer *tokenizer, const char *text,
-                           h3_ids *ids, char *error, size_t error_size) {
+static int tokenize_append_limited(const h3_tokenizer *tokenizer,
+                                   const char *text, size_t limit,
+                                   h3_ids *ids, char *error,
+                                   size_t error_size) {
     uint32_t *values = NULL;
     size_t count = 0;
     if (!h3_tokenizer_encode(tokenizer, text, 0, &values, &count,
                              error, error_size)) return 0;
-    int ok = ids_append(ids, values, count);
+    int ok = ids_append(ids, values, count < limit ? count : limit);
     h3_tokenizer_ids_free(values);
     if (!ok) fail(error, error_size,
                   "out of memory constructing multimodal token sequence");
     return ok;
+}
+
+static int tokenize_append(const h3_tokenizer *tokenizer, const char *text,
+                           h3_ids *ids, char *error, size_t error_size) {
+    return tokenize_append_limited(tokenizer, text, SIZE_MAX, ids,
+                                   error, error_size);
 }
 
 static int build_positions(const h3_vision_output *const *images,
@@ -126,6 +134,18 @@ static int build_positions(const h3_vision_output *const *images,
     return 1;
 }
 
+static int append_pad_span(h3_ids *ids, h3_text_vision_span *span,
+                           size_t tokens, uint32_t pad) {
+    if (!ids_push(ids, H3_VISION_START)) return 0;
+    span->start = ids->count;
+    span->tokens = tokens;
+    if (!ids_reserve(ids, tokens + 1)) return 0;
+    for (size_t token = 0; token < tokens; token++)
+        ids->values[ids->count++] = pad;
+    ids->values[ids->count++] = H3_VISION_END;
+    return 1;
+}
+
 static int append_vision(h3_ids *ids, h3_text_vision_span *span,
                          const h3_vision_output *vision, uint32_t pad,
                          char *error, size_t error_size) {
@@ -135,17 +155,33 @@ static int append_vision(h3_ids *ids, h3_text_vision_span *span,
         fail(error, error_size, "invalid Qwen vision output");
         return 0;
     }
-    if (!ids_push(ids, H3_VISION_START)) return 0;
-    span->start = ids->count;
-    span->tokens = vision->tokens;
+    if (!append_pad_span(ids, span, vision->tokens, pad)) return 0;
     span->embeddings = vision->merged;
     for (size_t layer = 0; layer < H3_VISION_DEEPSTACKS; layer++)
         span->deepstack[layer] = vision->deepstack[layer];
-    if (!ids_reserve(ids, vision->tokens + 1)) return 0;
-    for (size_t token = 0; token < vision->tokens; token++)
-        ids->values[ids->count++] = pad;
-    ids->values[ids->count++] = H3_VISION_END;
     return 1;
+}
+
+/* Modality tags (0 on every vision span including its boundary tokens) and
+ * axis-major [3, count] mRoPE positions of a finished id list. */
+static int describe_presentation(const h3_ids *ids,
+                                 const h3_text_vision_span *spans,
+                                 const h3_vision_output *const *visions,
+                                 size_t span_count, uint32_t *positions,
+                                 uint8_t *tags, char *error,
+                                 size_t error_size) {
+    memset(tags, 1, ids->count);
+    for (size_t image = 0; image < span_count; image++) {
+        size_t first = spans[image].start - 1;
+        size_t count = spans[image].tokens + 2;
+        if (first > ids->count || count > ids->count - first) {
+            fail(error, error_size, "multimodal tag span overflow");
+            return 0;
+        }
+        memset(tags + first, 0, count);
+    }
+    return build_positions(visions, spans, span_count, ids->count, positions,
+                           error, error_size);
 }
 
 static int encode_presentation(const char *weight_directory,
@@ -170,19 +206,8 @@ static int encode_presentation(const char *weight_directory,
              "out of memory finalizing multimodal presentation");
         return 0;
     }
-    memset(tags, 1, ids->count);
-    for (size_t image = 0; image < span_count; image++) {
-        size_t first = spans[image].start - 1;
-        size_t count = spans[image].tokens + 2;
-        if (first > ids->count || count > ids->count - first) {
-            free(positions); free(tags);
-            fail(error, error_size, "multimodal tag span overflow");
-            return 0;
-        }
-        memset(tags + first, 0, count);
-    }
-    if (!build_positions(visions, spans, span_count, ids->count, positions,
-                         error, error_size)) {
+    if (!describe_presentation(ids, spans, visions, span_count, positions,
+                               tags, error, error_size)) {
         free(positions); free(tags);
         return 0;
     }
@@ -357,4 +382,139 @@ oom:
     fail(error, error_size, "out of memory constructing Ref2VA presentation");
     free(spans); free(visions);
     return 0;
+}
+
+static int build_edit_ids(const h3_tokenizer *tokenizer, const char *prompt,
+                          const h3_vision_output *const *visions,
+                          size_t count, int attach, h3_ids *ids,
+                          h3_text_vision_span *spans,
+                          char *error, size_t error_size) {
+    for (size_t image = 0; image < count; image++) {
+        char label[48];
+        int length = snprintf(label, sizeof(label), "Picture %zu: ", image + 1);
+        if (length < 0 || (size_t)length >= sizeof(label) ||
+            !tokenize_append_limited(tokenizer, label, H3_EDIT_PIECE_TOKENS,
+                                     ids, error, error_size)) return 0;
+        int ok = attach ?
+            append_vision(ids, &spans[image], visions[image], H3_IMAGE_PAD,
+                          error, error_size) :
+            append_pad_span(ids, &spans[image], visions[image]->tokens,
+                            H3_IMAGE_PAD);
+        if (!ok) {
+            if (!attach) fail(error, error_size,
+                              "out of memory constructing edit presentation");
+            return 0;
+        }
+    }
+    return tokenize_append_limited(tokenizer, prompt, H3_EDIT_PIECE_TOKENS,
+                                   ids, error, error_size);
+}
+
+int h3_multimodal_edit_presentation(const h3_tokenizer *tokenizer,
+                                    const char *prompt, const int *grid_h,
+                                    const int *grid_w, size_t image_count,
+                                    h3_edit_presentation *presentation,
+                                    char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (presentation) memset(presentation, 0, sizeof(*presentation));
+    if (!tokenizer || !prompt || !*prompt || !grid_h || !grid_w ||
+        !image_count || !presentation) {
+        fail(error, error_size, "invalid edit presentation arguments");
+        return 0;
+    }
+    h3_ids ids = {0};
+    h3_vision_output *stubs = calloc(image_count, sizeof(*stubs));
+    const h3_vision_output **visions = calloc(image_count, sizeof(*visions));
+    h3_text_vision_span *spans = calloc(image_count, sizeof(*spans));
+    uint32_t *positions = NULL;
+    uint8_t *tags = NULL, *types = NULL;
+    int ok = 0;
+    if (!stubs || !visions || !spans) goto oom;
+    for (size_t image = 0; image < image_count; image++) {
+        if (grid_h[image] < 2 || grid_w[image] < 2 || grid_h[image] % 2 ||
+            grid_w[image] % 2 ||
+            (int64_t)grid_h[image] * grid_w[image] / 4 > INT32_MAX) {
+            fail(error, error_size, "invalid Qwen vision grid for reference %zu",
+                 image + 1);
+            goto cleanup;
+        }
+        stubs[image].grid_h = grid_h[image];
+        stubs[image].grid_w = grid_w[image];
+        stubs[image].tokens = (size_t)grid_h[image] * (size_t)grid_w[image] / 4;
+        visions[image] = &stubs[image];
+    }
+    if (!build_edit_ids(tokenizer, prompt, visions, image_count, 0, &ids,
+                        spans, error, error_size)) goto cleanup;
+    if (ids.count > INT_MAX) {
+        fail(error, error_size, "edit presentation is too large");
+        goto cleanup;
+    }
+    positions = calloc(3 * ids.count, sizeof(*positions));
+    tags = malloc(ids.count);
+    types = calloc(ids.count, 1);
+    if (!positions || !tags || !types) goto oom;
+    if (!describe_presentation(&ids, spans, visions, image_count, positions,
+                               tags, error, error_size)) goto cleanup;
+    for (size_t image = 0; image < image_count; image++)
+        memset(types + spans[image].start, 1, spans[image].tokens);
+    presentation->ids = ids.values;
+    presentation->count = ids.count;
+    presentation->tags = tags;
+    presentation->mm_token_type_ids = types;
+    presentation->positions = positions;
+    ids.values = NULL; tags = NULL; types = NULL; positions = NULL;
+    ok = 1;
+    goto cleanup;
+
+oom:
+    fail(error, error_size, "out of memory constructing edit presentation");
+cleanup:
+    free(ids.values); free(stubs); free(visions); free(spans);
+    free(positions); free(tags); free(types);
+    return ok;
+}
+
+void h3_edit_presentation_free(h3_edit_presentation *presentation) {
+    if (!presentation) return;
+    free(presentation->ids);
+    free(presentation->tags);
+    free(presentation->mm_token_type_ids);
+    free(presentation->positions);
+    memset(presentation, 0, sizeof(*presentation));
+}
+
+int h3_multimodal_encode_edit_bf16(
+                        const h3_tokenizer *tokenizer,
+                        const char *weight_directory,
+                        const char *shader_source_path,
+                        const char *prompt,
+                        const h3_vision_output *images, size_t image_count,
+                        h3_text_progress progress, void *progress_opaque,
+                        h3_text_embedding *output,
+                        char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (output) memset(output, 0, sizeof(*output));
+    if (!tokenizer || !weight_directory || !shader_source_path || !prompt ||
+        !*prompt || !images || !image_count || !output) {
+        fail(error, error_size, "invalid edit presentation arguments");
+        return 0;
+    }
+    h3_ids ids = {0};
+    h3_text_vision_span *spans = calloc(image_count, sizeof(*spans));
+    const h3_vision_output **visions = calloc(image_count, sizeof(*visions));
+    int ok = 0;
+    if (!spans || !visions) {
+        fail(error, error_size, "out of memory constructing edit presentation");
+        goto cleanup;
+    }
+    for (size_t image = 0; image < image_count; image++)
+        visions[image] = &images[image];
+    if (!build_edit_ids(tokenizer, prompt, visions, image_count, 1, &ids,
+                        spans, error, error_size)) goto cleanup;
+    ok = encode_presentation(weight_directory, shader_source_path, &ids,
+                             spans, visions, image_count, progress,
+                             progress_opaque, output, error, error_size);
+cleanup:
+    free(ids.values); free(spans); free(visions);
+    return ok;
 }

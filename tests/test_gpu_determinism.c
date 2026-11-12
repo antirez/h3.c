@@ -154,6 +154,55 @@ static void test_gqa(uint32_t sequence, uint32_t reference_stride) {
     free(again);
 }
 
+static void test_group_norm(void) {
+    enum { DEPTH = 64, HEIGHT = 16, WIDTH = 32, CHANNELS = 128, GROUPS = 32 };
+    size_t count = (size_t)DEPTH * HEIGHT * WIDTH * CHANNELS;
+    float *input = malloc(count * sizeof(*input));
+    float weight[CHANNELS], bias[CHANNELS];
+    float *first = malloc(count * sizeof(*first));
+    float *again = malloc(count * sizeof(*again));
+    if (!input || !first || !again) die("out of memory");
+    h3_rng rng;
+    h3_rng_seed(&rng, 7u);
+    h3_rng_fill_normal(&rng, input, count);
+    for (size_t index = 0; index < count; index++)
+        input[index] = input[index] * 3.0f + 5.0f;
+    for (int channel = 0; channel < CHANNELS; channel++) {
+        weight[channel] = 1.0f + 0.01f * (float)channel;
+        bias[channel] = 0.1f * (float)(channel % 7);
+    }
+    h3_gpu_tensor *tin = h3_gpu_tensor_from_f32(gpu, input, count);
+    h3_gpu_tensor *tw = h3_gpu_tensor_from_f32(gpu, weight, CHANNELS);
+    h3_gpu_tensor *tb = h3_gpu_tensor_from_f32(gpu, bias, CHANNELS);
+    h3_gpu_tensor *tout = h3_gpu_tensor_new_f32(gpu, count);
+    if (!tin || !tw || !tb || !tout) die("tensor allocation failed");
+    int diverged = 0;
+    for (int run = 0; run < RUNS; run++) {
+        gpu_ok(h3_gpu_begin(gpu), "begin");
+        gpu_ok(h3_gpu_vae_encoder_group_norm_silu_f32(
+                   gpu, tout, tin, tw, tb, 1, DEPTH, HEIGHT, WIDTH, CHANNELS,
+                   GROUPS, 1e-6f), "group norm");
+        gpu_ok(h3_gpu_submit(gpu), "submit");
+        float *destination = run == 0 ? first : again;
+        if (!h3_gpu_tensor_read_f32(tout, destination, count))
+            die("cannot read result");
+        if (run && memcmp(first, again, count * sizeof(*first))) diverged++;
+    }
+    printf("encoder group norm: %d of %d repeat runs differ from run 0\n",
+           diverged, RUNS - 1);
+    if (diverged) {
+        fprintf(stderr, "FAIL: encoder group norm changes between runs\n");
+        failures++;
+    }
+    h3_gpu_tensor_free(tin);
+    h3_gpu_tensor_free(tw);
+    h3_gpu_tensor_free(tb);
+    h3_gpu_tensor_free(tout);
+    free(input);
+    free(first);
+    free(again);
+}
+
 int main(int argc, char **argv) {
     char error[512];
     gpu = h3_gpu_create(argc > 1 ? argv[1] : "h3_shaders.metal", error,
@@ -161,6 +210,7 @@ int main(int argc, char **argv) {
     if (!gpu) die(error);
     test_gqa(1024, 8);
     test_gqa(2048, 16);
+    test_group_norm();
     h3_gpu_free(gpu);
     if (failures) return 1;
     puts("ok: GPU kernels are deterministic across repeated dispatches");

@@ -23,35 +23,33 @@ enum {
     REFERENCE_TIME_ROW = 6, LATENT_CHANNELS = 24
 };
 
-/* Every bound below is a placeholder copied from the text-to-image test
- * (global rel-L2 and median over rows, about 1.4x the achieved values there)
- * and marked for the gated window, which measures the edit values. The
- * exact checks (the AdaLN index mapping, the condition rows, head binding,
- * bf16 = stream) have no bounds. */
-#define REFINED_TEXT_BOUND 1e-2        /* measured in the gated window */
-#define REFINED_TRUTH_BOUND 7e-3       /* measured in the gated window */
-#define TIME_EMBEDDING_BOUND 1e-4      /* measured in the gated window */
-#define BLOCK_MEDIAN_BOUND 2e-2        /* measured in the gated window */
-#define ROW_Q99_BOUND 0.15             /* measured in the gated window */
+/* Bounds are 1.4x the values measured on the fixture (global rel-L2 and
+ * median over rows). The exact checks (the AdaLN index mapping, the condition
+ * rows, head binding, bf16 = stream) have no bounds. */
+#define REFINED_TEXT_BOUND 7.34e-3
+#define REFINED_TRUTH_BOUND 9.18e-3
+#define TIME_EMBEDDING_BOUND 4.38e-7
+#define BLOCK_MEDIAN_BOUND 6.08e-3
+#define ROW_Q99_BOUND 0.387
 #define HEAD_MATCH_BOUND 1e-5
 #define HEAD_MISMATCH_BOUND 1e-3
 #define CONDITION_MOVE_MIN 1e-2
 static const double BF16_VELOCITY_BOUND[FIXTURE_STEPS] = {
-    4e-2, 6.2e-2, 6.2e-2, 2.5e-2, 3e-2, 3.7e-2};   /* measured in the gated window */
+    0.0368, 0.0744, 0.0767, 0.0491, 0.0426, 0.0475};
 static const double BF16_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {
-    3.5e-2, 4.5e-2, 4.7e-2, 1.8e-2, 1.9e-2, 1.7e-2};   /* measured in the gated window */
+    0.0318, 0.0509, 0.0484, 0.039, 0.0265, 0.023};
 static const double INT8_VELOCITY_BOUND[FIXTURE_STEPS] = {
-    6.2e-2, 6.1e-2, 1.22e-1, 4.9e-2, 4.1e-2, 6.1e-2};   /* measured in the gated window */
+    0.0449, 0.115, 0.143, 0.0776, 0.0719, 0.0778};
 static const double INT8_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {
-    5.9e-2, 4.8e-2, 7.5e-2, 3.5e-2, 3.4e-2, 5.2e-2};   /* measured in the gated window */
+    0.0379, 0.0838, 0.107, 0.0614, 0.0554, 0.0624};
 static const double BF16_TRUTH_BOUND[FIXTURE_STEPS] = {
-    2.9e-2, 4.9e-2, 4e-2, 1.9e-2, 2e-2, 2.8e-2};   /* measured in the gated window */
+    0.0278, 0.051, 0.049, 0.0392, 0.0322, 0.0364};
 static const double BF16_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {
-    2.2e-2, 4e-2, 2.6e-2, 1.3e-2, 1.3e-2, 1.5e-2};   /* measured in the gated window */
+    0.0247, 0.0334, 0.033, 0.0286, 0.0238, 0.0209};
 static const double INT8_TRUTH_BOUND[FIXTURE_STEPS] = {
-    5.6e-2, 6.8e-2, 1.12e-1, 4.8e-2, 3.8e-2, 5.9e-2};   /* measured in the gated window */
+    0.044, 0.144, 0.127, 0.0792, 0.0674, 0.075};
 static const double INT8_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {
-    5.3e-2, 5.4e-2, 7e-2, 3.5e-2, 3.2e-2, 5.2e-2};   /* measured in the gated window */
+    0.0368, 0.0952, 0.0964, 0.0631, 0.0521, 0.0618};
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_edit_dit.c: %s\n", message);

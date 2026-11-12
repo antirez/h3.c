@@ -13,13 +13,15 @@
 
 enum { TEXT_DIM = 5120 };
 
-/* Bounds are generous placeholders until the gated window measures them; the
- * presentation (a) is exact. */
-#define VISION_REL_L2_BOUND 0.15      /* measured in the gated window */
-#define VISION_REL_MAX_BOUND 0.25     /* measured in the gated window */
-#define LANGUAGE_ROWS_BOUND 5e-2      /* measured in the gated window */
-#define VISION_ROWS_BOUND 0.15        /* measured in the gated window */
-#define DRIFT_EMBEDDING_BOUND 0.2     /* measured in the gated window */
+/* Bounds are 1.4x the values measured on the fixtures; the presentation (a)
+ * is exact. The drift case (d) runs only when the Lanczos pixels differ from
+ * the fixture's, which did not happen when measuring, so its bound is 1.4x
+ * the largest vision-row error of case (c). */
+#define VISION_REL_L2_BOUND 0.0477
+#define VISION_REL_MAX_BOUND 0.110
+#define LANGUAGE_ROWS_BOUND 0.0102
+#define VISION_ROWS_BOUND 0.0981
+#define DRIFT_EMBEDDING_BOUND 0.0981
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_edit_text.c: %s\n", message);

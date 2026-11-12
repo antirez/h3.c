@@ -6,13 +6,19 @@ safetensors fixture per stage into misc/fixtures/. Every fixture also holds the
 scalar settings it was produced with, as small int32 tensors, so a C test needs
 nothing else.
 
-Stages: text, block0, step, denoise, vae, e2e (or all).
+Stages: text, block0, step, f32truth, denoise, vae, e2e (or all).
 `all` loads the text encoder once and the transformer once: one six-step run
 records block 0, steps 0 and 3 and the final latents.
 
 Fixture tensor names that differ from spec 5.3: the step fixture holds
 latents_in_step0, latents_in_step3, noise_pred_step0 and noise_pred_step3
 (plus step0 and step3 scalars) instead of one latents_in / noise_pred.
+The f32truth stage is not part of `all`: it reads the step and text fixtures and
+writes h3_image_dit_step_f32.safetensors, the velocities of steps 0 and 3 and
+the refined text computed in float32 from the same inputs, one transformer
+block at a time from memory-mapped weights (about 2 GB of float32 weights at a
+time, CPU), so the bf16 reference noise can be told from an implementation
+error.
 Run from the repository root in an environment that has diffusers (with the
 MiniMax-H3-Image classes), transformers, torch and safetensors.
 """
@@ -26,12 +32,20 @@ import sys
 
 import torch
 from diffusers import AutoencoderKLMiniMaxH3Image, MiniMaxH3ImageTransformer2DModel, MiniMaxH3Scheduler
+from diffusers.models.embeddings import TimestepEmbedding, Timesteps
+from diffusers.models.transformers.transformer_minimax_h3_image import (
+    MiniMaxH3ImageAdaLayerNormOut,
+    MiniMaxH3ImageRotaryPosEmbed,
+    MiniMaxH3ImageTokenRefiner,
+    MiniMaxH3ImageTransformerBlock,
+)
 from diffusers.modular_pipelines.minimax_h3_image.before_denoise import (
     build_image_packed_sequence,
     get_image_canvas_size,
     patchify_video_latents,
 )
 from diffusers.utils.torch_utils import maybe_adjust_dtype_for_device, randn_tensor
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import Qwen2TokenizerFast, Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
@@ -53,6 +67,7 @@ FIXTURE_NAMES = {
     "text": "h3_image_text_256.safetensors",
     "block0": "h3_image_dit_block0.safetensors",
     "step": "h3_image_dit_step.safetensors",
+    "f32truth": "h3_image_dit_step_f32.safetensors",
     "denoise": "h3_image_denoise.safetensors",
     "vae": "h3_image_vae_decode.safetensors",
     "e2e": "h3_image_e2e_512.safetensors",
@@ -313,6 +328,104 @@ def save_step(args, recorded):
     save_fixture(args, "step", tensors)
 
 
+class WeightMap:
+    """Float32 tensors of the transformer checkpoint, read one at a time from memory-mapped shards."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        with open(os.path.join(directory, "diffusion_pytorch_model.safetensors.index.json")) as handle:
+            self.shards = json.load(handle)["weight_map"]
+        self.open_files = {}
+
+    def tensor(self, name):
+        shard = self.shards[name]
+        if shard not in self.open_files:
+            self.open_files[shard] = safe_open(os.path.join(self.directory, shard), "pt")
+        return self.open_files[shard].get_tensor(name).float()
+
+    def prefixed(self, prefix):
+        return {name[len(prefix) :]: self.tensor(name) for name in self.shards if name.startswith(prefix)}
+
+
+def f32_refined_text(weights, prompt_embeds):
+    refiner = MiniMaxH3ImageTokenRefiner(
+        hidden_size=5376,
+        num_attention_heads=56,
+        attention_head_dim=128,
+        ffn_dim=14336,
+        num_layers=2,
+        norm_eps=1e-5,
+        qk_norm_eps=1e-5,
+        final_norm_eps=1e-5,
+    )
+    refiner.load_state_dict(weights.prefixed("token_refiner."))
+    projected = torch.nn.functional.linear(
+        prompt_embeds.float(), weights.tensor("context_embedder.weight"), weights.tensor("context_embedder.bias")
+    )
+    return refiner(projected[None])[0]
+
+
+def f32_velocities(weights, prompt_embeds, step_fixture):
+    """Float32 velocity of every step in STEP_FIXTURE_STEPS, plus the refined text."""
+    latent_height = int(step_fixture["latent_height"])
+    latent_width = int(step_fixture["latent_width"])
+    cpu = torch.device("cpu")
+    text_tokens = prompt_embeds.shape[0]
+    position_ids, token_tags, _, _ = packed_layout(text_tokens, latent_height, latent_width, cpu)
+    sequence_length = position_ids.shape[0]
+    cos, sin = MiniMaxH3ImageRotaryPosEmbed(16, 10000.0)(position_ids.float())
+    with torch.no_grad():
+        refined = f32_refined_text(weights, prompt_embeds)
+        proj_in = torch.nn.Linear(96, 5376)
+        proj_in.load_state_dict(weights.prefixed("proj_in."))
+        embedder = TimestepEmbedding(256, 5376, out_dim=2688)
+        embedder.load_state_dict(weights.prefixed("time_embedder."))
+        time_proj = Timesteps(256, flip_sin_to_cos=True, downscale_freq_shift=0)
+        hidden, temb = {}, {}
+        for step in STEP_FIXTURE_STEPS:
+            hidden[step] = torch.cat([refined, proj_in(step_fixture[f"latents_in_step{step}"])], 0)
+            timestep = torch.tensor([1.0 - SAMPLE_SIGMAS[step]], dtype=torch.float32)
+            temb[step] = embedder(time_proj(timestep))
+        block = MiniMaxH3ImageTransformerBlock(
+            hidden_size=5376,
+            num_attention_heads=56,
+            attention_head_dim=128,
+            ffn_dim=14336,
+            time_embed_dim=2688,
+            norm_eps=1e-5,
+            qk_norm_eps=1e-5,
+        )
+        for index in range(50):
+            block.load_state_dict(weights.prefixed(f"transformer_blocks.{index}."))
+            for step in STEP_FIXTURE_STEPS:
+                hidden[step] = block(hidden[step][None], temb[step], token_tags, (cos, sin))[0]
+        norm_out = MiniMaxH3ImageAdaLayerNormOut(5376, 2688, 1e-5)
+        norm_out.load_state_dict(weights.prefixed("norm_out."))
+        velocity = {}
+        for step in STEP_FIXTURE_STEPS:
+            normed = norm_out(hidden[step][None], temb[step], torch.zeros(sequence_length, dtype=torch.long))[0]
+            head = torch.nn.Linear(5376, 96)
+            head.load_state_dict(weights.prefixed(f"pdd_proj_out.{step}."))
+            velocity[step] = head(normed)[text_tokens:]
+    return refined, velocity
+
+
+def stage_f32truth(args, _device):
+    step_fixture = load_fixture(args, "step")
+    prompt_embeds = load_fixture(args, "text")["prompt_embeds"]
+    weights = WeightMap(os.path.join(args.checkpoint, "transformer_diffusers"))
+    refined, velocity = f32_velocities(weights, prompt_embeds, step_fixture)
+    tensors = {"refined_text_f32": refined}
+    for step in STEP_FIXTURE_STEPS:
+        tensors[f"noise_pred_f32_step{step}"] = velocity[step]
+        tensors[f"step{step}"] = scalar(step)
+        reference = step_fixture[f"noise_pred_step{step}"]
+        error = (torch.linalg.norm(reference - velocity[step]) / torch.linalg.norm(velocity[step])).item()
+        print(f"step {step}: bf16 reference vs f32 truth rel-L2 {error:.4g}")
+    height, width = canvas(args)
+    save_fixture(args, "f32truth", {**tensors, **settings(args, height, width)})
+
+
 def final_latents(args, recorded):
     """Noise and denoised latents, both (24, Hl, Wl)."""
     canvas_height, canvas_width = canvas(args)
@@ -461,6 +574,7 @@ STAGES = {
     "text": stage_text,
     "block0": stage_block0,
     "step": stage_step,
+    "f32truth": stage_f32truth,
     "denoise": stage_denoise,
     "vae": stage_vae,
     "e2e": stage_e2e,

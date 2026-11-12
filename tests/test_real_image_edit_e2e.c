@@ -287,13 +287,33 @@ static scores score(const h3_image_hooks *hooks, const uint8_t *want,
     return result;
 }
 
+/* H3_MEASURE=1: every score bound only reports and the run continues, so one
+ * gated pass measures all of them. Exact checks always fail the run. */
+static int measure;
+static int over_count;
+
+static void bound(const char *what, double value, double limit, int greater) {
+    int ok = greater ? value >= limit : value < limit;
+    if (!ok) over_count++;
+    if (measure) {
+        printf("  [%s] %s: %.6g, bound %s %.6g\n", ok ? "PASS" : "OVER", what,
+               value, greater ? ">=" : "<", limit);
+        return;
+    }
+    if (!ok) {
+        fprintf(stderr, "FAIL tests/test_real_image_edit_e2e.c: %s is %.6g, "
+                "bound %s %.6g\n", what, value, greater ? ">=" : "<", limit);
+        exit(1);
+    }
+}
+
 static void check_scores(const scores *got, const bounds *limit,
                          int latent_checked) {
-    if (!(got->psnr >= limit->psnr)) die("image PSNR is under the bound");
-    if (!(got->within16 >= limit->within16))
-        die("too few bytes within +-16 of the reference");
-    if (latent_checked && !(got->latent < limit->latent))
-        die("final latent is over the bound");
+    bound("image PSNR", got->psnr, limit->psnr, 1);
+    bound("bytes within +-16 of the reference", got->within16,
+          limit->within16, 1);
+    if (latent_checked) bound("final latent rel-L2", got->latent,
+                              limit->latent, 0);
 }
 
 int main(int argc, char **argv) {
@@ -305,6 +325,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *mode = argv[3];
+    measure = getenv("H3_MEASURE") && *getenv("H3_MEASURE") &&
+              strcmp(getenv("H3_MEASURE"), "0");
     int refs_only = !strcmp(mode, "refs");
     int stream = !strcmp(mode, "stream");
     int int8 = !strcmp(mode, "int8");
@@ -490,6 +512,10 @@ int main(int argc, char **argv) {
     free(vae_pixels);
     free(vision_pixels);
     free(prompt);
+    if (over_count) {
+        printf("measure mode: %d bound(s) OVER\n", over_count);
+        return 0;
+    }
     printf("ok: image edit end to end %s matches the diffusers reference\n",
            mode);
     return 0;

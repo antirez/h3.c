@@ -1815,17 +1815,29 @@ static int h3_valid_image_params(h3_ctx *ctx, const h3_image_params *params) {
         h3_set_error(ctx, "int8 row FC2 must be zero or one");
         return 0;
     }
+    if (params->use_int8 != 0 && params->use_int8 != 1) {
+        h3_set_error(ctx, "int8 must be zero or one");
+        return 0;
+    }
+    if (params->use_int8 && params->ssd_streaming) {
+        h3_set_error(ctx, "SSD streaming uses original BF16 weights and cannot "
+                         "be combined with int8");
+        return 0;
+    }
     if (params->ssd_streaming && params->use_int8_row_fc2) {
         h3_set_error(ctx, "SSD streaming uses original BF16 weights and cannot "
                          "be combined with int8 row FC2");
         return 0;
     }
-    if (params->use_int8_row_fc2 && params->use_slower_bf16_mlp) {
-        h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
+    if ((params->use_int8 || params->use_int8_row_fc2) &&
+        (params->use_slower_bf16_mlp || params->use_slower_bf16_qkv ||
+         params->use_slower_bf16_attention_output)) {
+        h3_set_error(ctx, "int8 cannot be combined with the BF16 projections");
         return 0;
     }
-    if (params->use_int8_row_fc2 && !h3_device(ctx)->metal4) {
-        h3_set_error(ctx, "int8 row FC2 requires an M5-class Metal 4 GPU");
+    if ((params->use_int8 || params->use_int8_row_fc2) &&
+        !h3_device(ctx)->metal4) {
+        h3_set_error(ctx, "int8 requires an M5-class Metal 4 GPU");
         return 0;
     }
     return 1;
@@ -1916,11 +1928,14 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     }
     if (profile) h3_report_peak("text encoder", &text.gpu_stats);
     if (progress.cancelled) goto cleanup;
+    int resident_bf16 = !params->use_int8 && !params->use_int8_row_fc2 &&
+                        !params->ssd_streaming;
     dit = h3_dit_load_image(
         dit_path, "h3_shaders.metal", &text, latent_height, latent_width,
         (unsigned)params->dit_layers, params->ssd_streaming,
-        params->use_slower_bf16_mlp, params->use_slower_bf16_qkv,
-        params->use_slower_bf16_attention_output,
+        resident_bf16 || params->use_slower_bf16_mlp,
+        resident_bf16 || params->use_slower_bf16_qkv,
+        resident_bf16 || params->use_slower_bf16_attention_output,
         params->use_slower_row_major_attention_output,
         params->use_slower_unfused_int8_inputs,
         params->use_slower_unfused_qkv_rope,
@@ -1934,6 +1949,8 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
         goto cleanup;
     }
+    fprintf(stderr, "h3: image DiT weights: %s\n", h3_dit_weight_mode(dit));
+    if (hooks) hooks->weight_mode = h3_dit_weight_mode(dit);
     if (progress.cancelled) goto cleanup;
     size_t latent_elements = (size_t)H3_IMAGE_LATENT_CHANNELS *
                              (size_t)latent_height * (size_t)latent_width;

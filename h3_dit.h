@@ -168,6 +168,11 @@ int h3_dit_reuse_schedule(int steps, int reuse_interval, uint8_t *selected,
 
 int h3_dit_get_gpu_stats(const h3_dit *dit, h3_gpu_stats *stats);
 
+/* The weight path this transformer runs: "stream" (SSD streaming, BF16),
+ * "int8" (int8 MLP, QKV and attention output), "bf16" (all resident BF16) or
+ * "mixed". */
+const char *h3_dit_weight_mode(const h3_dit *dit);
+
 /* Exact row-order conversions, public internally so they can be pinned by
  * cheap tests independently of the 62 GiB checkpoint. */
 int h3_dit_patchify_video(const float *latent, int channels, int time,

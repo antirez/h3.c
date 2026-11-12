@@ -13,10 +13,10 @@ enum { LATENT_CHANNELS = 24 };
 
 /* Measured against the diffusers BF16 CPU run with the same noise (512x512,
  * "a red fox in snow", seed 42):
- *   stream (BF16 weights): PSNR 29.2 dB, 63.5% of bytes within +-2, 97.3%
- *     within +-16, final latent rel-L2 0.076
- *   int8 (default):        PSNR 19.1 dB, 30.2% within +-2, 81.8% within +-16,
- *     final latent rel-L2 0.27
+ *   stream and bf16 (final latents bit-identical, checked): PSNR 29.2 dB,
+ *     63.5% of bytes within +-2, 97.3% within +-16, final latent rel-L2 0.076
+ *   int8: PSNR 19.1 dB, 30.2% within +-2, 81.8% within +-16, final latent
+ *     rel-L2 0.27
  * The spec's guess (35 dB, 99% within +-2) was made before the noise floor was
  * known: the reference itself is ~2e-2 per step from an F32 truth, the six
  * steps compound, and a few-step flow sampler amplifies early differences into
@@ -28,7 +28,7 @@ enum { LATENT_CHANNELS = 24 };
 typedef struct {
     double psnr, within16, latent;
 } bounds;
-static const bounds STREAM_BOUNDS = {26.0, 0.96, 0.107};
+static const bounds BF16_BOUNDS = {26.0, 0.96, 0.107};
 static const bounds INT8_BOUNDS = {16.0, 0.74, 0.385};
 
 static void die(const char *message) {
@@ -74,15 +74,72 @@ static int progress(const char *phase, int completed, int total,
     return 0;
 }
 
+typedef struct {
+    uint32_t magic;
+    uint32_t stream;
+    uint64_t hash;
+    uint64_t elements;
+} exchange_header;
+
+static uint64_t hash_floats(const float *values, size_t count) {
+    uint64_t hash = 1469598103934665603ull;
+    const unsigned char *bytes = (const unsigned char *)values;
+    for (size_t index = 0; index < count * sizeof(float); index++) {
+        hash ^= bytes[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/* The final latents of `stream` and `bf16` must match bit for bit. The first
+ * of the two to run stores its latent, its mode and a hash of the noise; the
+ * second compares. A file of the same mode or of other noise is stale. */
+static void check_exchange(const char *path, int stream, const float *noise,
+                           const float *latent, size_t elements) {
+    exchange_header header = {0x4c335845u, stream ? 1u : 0u,
+                              hash_floats(noise, elements), elements};
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        file = fopen(path, "wb");
+        if (!file || fwrite(&header, sizeof(header), 1, file) != 1 ||
+            fwrite(latent, sizeof(float), elements, file) != elements ||
+            fclose(file) != 0) die("cannot write the latent exchange file");
+        printf("final latent stored for the stream/bf16 comparison\n");
+        return;
+    }
+    exchange_header stored;
+    if (fread(&stored, sizeof(stored), 1, file) != 1 ||
+        stored.magic != header.magic) die("latent exchange file is invalid");
+    if (stored.stream == header.stream)
+        die("latent exchange file was written by this same mode: remove it");
+    if (stored.hash != header.hash || stored.elements != header.elements)
+        die("latent exchange file was written for other noise");
+    float *other = malloc(elements * sizeof(*other));
+    if (!other || fread(other, sizeof(float), elements, file) != elements)
+        die("latent exchange file is short");
+    fclose(file);
+    size_t different = 0;
+    for (size_t index = 0; index < elements; index++)
+        if (memcmp(&other[index], &latent[index], sizeof(float))) different++;
+    printf("final latent stream vs bf16 bit-identical: %s (%zu of %zu "
+           "elements differ)\n", different ? "NO" : "yes", different, elements);
+    free(other);
+    if (different) die("stream and bf16 final latents are not bit-identical");
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s MODEL_DIR E2E_FIXTURE [stream|int8 "
-                "[DENOISE_FIXTURE]]\n", argv[0]);
+        fprintf(stderr, "usage: %s MODEL_DIR E2E_FIXTURE [stream|bf16|int8 "
+                "[DENOISE_FIXTURE|- [EXCHANGE_FILE]]]\n", argv[0]);
         return 2;
     }
-    const char *mode = argc > 3 ? argv[3] : "int8";
+    const char *mode = argc > 3 ? argv[3] : "bf16";
     int stream = !strcmp(mode, "stream");
-    if (!stream && strcmp(mode, "int8")) die("mode must be stream or int8");
+    int int8 = !strcmp(mode, "int8");
+    if (!stream && !int8 && strcmp(mode, "bf16"))
+        die("mode must be stream, bf16 or int8");
+    const char *denoise_path = argc > 4 && strcmp(argv[4], "-") ? argv[4] : NULL;
+    const char *exchange_path = argc > 5 ? argv[5] : NULL;
     char error[512];
     h3_st_header fixture;
     if (!h3_st_read_header(argv[2], &fixture, error, sizeof(error)))
@@ -110,9 +167,9 @@ int main(int argc, char **argv) {
     uint8_t *want = read_fixture(&fixture, "image_u8", H3_DTYPE_U8,
                                  3 * pixels);
     float *want_latent = NULL;
-    if (argc > 4) {
+    if (denoise_path) {
         h3_st_header denoise;
-        if (!h3_st_read_header(argv[4], &denoise, error, sizeof(error)))
+        if (!h3_st_read_header(denoise_path, &denoise, error, sizeof(error)))
             die(error);
         float *denoise_noise = read_fixture(&denoise, "noise", H3_DTYPE_F32,
                                             latent_elements);
@@ -134,8 +191,9 @@ int main(int argc, char **argv) {
     params.min_generation_area = min_area;
     params.seed = (uint64_t)seed;
     params.ssd_streaming = stream;
+    params.use_int8 = int8;
     params.on_progress = progress;
-    h3_image_hooks hooks = {noise, NULL, NULL};
+    h3_image_hooks hooks = {noise, NULL, NULL, NULL};
     printf("mode %s: \"%s\" at %dx%d, min area %d, seed %d\n", mode, prompt,
            width, height, min_area, seed);
     double started = seconds_now();
@@ -143,6 +201,8 @@ int main(int argc, char **argv) {
                                                      &hooks);
     if (!result) die(h3_last_error(ctx));
     printf("generation: %.1f s\n", seconds_now() - started);
+    printf("weights that ran: %s%s\n", hooks.weight_mode,
+           strcmp(hooks.weight_mode, mode) ? " (NOT the requested mode)" : "");
     if (result->width != width || result->height != height ||
         !hooks.rgb || !hooks.latent) die("result has the wrong shape");
 
@@ -183,12 +243,16 @@ int main(int argc, char **argv) {
         latent_error = sqrt(square_difference / square_value);
         printf("final latent vs reference: rel-L2 %.6g\n", latent_error);
     }
-    const bounds *limit = stream ? &STREAM_BOUNDS : &INT8_BOUNDS;
+    const bounds *limit = !strcmp(hooks.weight_mode, "int8") ? &INT8_BOUNDS :
+                                                               &BF16_BOUNDS;
     if (!(psnr >= limit->psnr)) die("image PSNR is under the bound");
     if (!((double)within16 / bytes >= limit->within16))
         die("too few bytes within +-16 of the reference");
     if (want_latent && !(latent_error < limit->latent))
         die("final latent is over the bound");
+    if (exchange_path && (stream || !strcmp(hooks.weight_mode, "bf16")))
+        check_exchange(exchange_path, stream, noise, hooks.latent,
+                       latent_elements);
     free(hooks.rgb);
     free(hooks.latent);
     h3_result_free(result);

@@ -216,12 +216,16 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	@if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
 	         test -f $(H3_IMAGE_DIR)/text_encoder/model-00014-of-00014.safetensors && \
 	         test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
-	         test -f misc/fixtures/h3_image_e2e_512.safetensors; then \
-		for mode in stream int8; do \
+	         test -f misc/fixtures/h3_image_e2e_512.safetensors && \
+	         test -f misc/fixtures/h3_image_denoise.safetensors; then \
+		rm -f h3_image_e2e_latent.bin; \
+		for mode in stream bf16 int8; do \
 			./h3_real_image_e2e_test $(H3_IMAGE_DIR) \
 				misc/fixtures/h3_image_e2e_512.safetensors $$mode \
-				misc/fixtures/h3_image_denoise.safetensors || exit 1; \
+				misc/fixtures/h3_image_denoise.safetensors \
+				h3_image_e2e_latent.bin || exit 1; \
 		done; \
+		rm -f h3_image_e2e_latent.bin; \
 	else \
 		echo "skip: image end-to-end weights/fixture are not installed"; \
 	fi

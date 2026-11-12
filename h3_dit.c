@@ -2756,6 +2756,13 @@ int h3_dit_get_gpu_stats(const h3_dit *dit, h3_gpu_stats *stats) {
     return dit && h3_gpu_get_stats(dit->gpu, stats);
 }
 
+const char *h3_dit_weight_mode(const h3_dit *dit) {
+    if (!dit) return "";
+    if (dit->ssd_streaming) return "stream";
+    int int8 = dit->int8_mlp + dit->int8_qkv + dit->int8_attention_out;
+    return int8 == 3 ? "int8" : int8 == 0 ? "bf16" : "mixed";
+}
+
 static float extrapolation_ratio(float current_sigma, float last_sigma,
                                  float previous_sigma, int have_previous) {
     if (!have_previous) return 0.0f;

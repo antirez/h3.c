@@ -25,7 +25,11 @@ static void usage(const char *program) {
         "The interactive session and the video-only options below (--steps, --reuse,\n"
         "--core-reuse, --token-reduction, --frames, --seconds, --first-frame,\n"
         "--last-frame, --ref-*, --render-*, --layers other than 50) do not apply to\n"
-        "image directories.\n\n"
+        "image directories.\n"
+        "Image weight modes: resident BF16 by default (about 36 GiB of GPU buffers,\n"
+        "fast); --int8 (about 18.6 GiB, a little faster, less exact); --ssd-streaming\n"
+        "(exact BF16, about 1.5 GiB, slower). --int8 and --ssd-streaming exclude\n"
+        "each other.\n\n"
         "Options:\n"
         "  -d, --model-dir PATH   MiniMax-H3 or MiniMax-H3-Image local directory\n"
         "  -p, --prompt TEXT      Raw H3 prompt\n"
@@ -47,6 +51,8 @@ static void usage(const char *program) {
         "      --core-reuse N     Core refresh: 1 exact, 4 fast, 6 aggressive\n"
         "      --token-reduction  Pair video tokens in middle DiT blocks\n"
         "      --ssd-streaming    Stream original BF16 DiT layers from SSD\n"
+        "      --int8             Images: resident int8 DiT (about 18.6 GiB GPU buffers,\n"
+        "                         about twice the per-step error of BF16)\n"
         "      --use-int8-row-fc2 Faster one-scale int8 FC2 (M5)\n"
         "      --use-reference-rope  Disable native 256 RoPE adaptation\n"
         "      --use-slower-bf16-mlp  Force close-reference BF16/MPS MLP\n"
@@ -307,7 +313,7 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO, OPT_IMAGE, OPT_SIZE, OPT_MIN_AREA };
+           OPT_PROFILE, OPT_INFO, OPT_IMAGE, OPT_SIZE, OPT_MIN_AREA, OPT_INT8 };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -361,6 +367,7 @@ int main(int argc, char **argv) {
         {"profile", no_argument, NULL, OPT_PROFILE},
         {"info", no_argument, NULL, OPT_INFO},
         {"image", no_argument, NULL, OPT_IMAGE},
+        {"int8", no_argument, NULL, OPT_INT8},
         {"size", required_argument, NULL, OPT_SIZE},
         {"min-generation-area", required_argument, NULL, OPT_MIN_AREA},
         {"help", no_argument, NULL, 'h'},
@@ -371,6 +378,7 @@ int main(int argc, char **argv) {
     const char *output = NULL;
     const char *video_only = NULL;
     int image_flag = 0;
+    int int8_flag = 0;
     int width_given = 0, height_given = 0;
     int min_area = H3_IMAGE_DEFAULT_MIN_AREA;
     int min_area_given = 0;
@@ -408,6 +416,7 @@ int main(int argc, char **argv) {
                 width_given = height_given = 1;
                 break;
             case OPT_IMAGE: image_flag = 1; break;
+            case OPT_INT8: int8_flag = 1; break;
             case OPT_MIN_AREA:
                 min_area = parse_int(optarg, "min generation area");
                 min_area_given = 1;
@@ -584,6 +593,10 @@ int main(int argc, char **argv) {
         image_error = "--image requires a MiniMax-H3-Image model directory";
     else if (!image && min_area_given)
         image_error = "--min-generation-area applies to image models only";
+    else if (!image && int8_flag)
+        image_error = "--int8 applies to image models only";
+    else if (image && int8_flag && params.ssd_streaming)
+        image_error = "--int8 and --ssd-streaming exclude each other";
     else if (image && video_only) {
         snprintf(image_error_text, sizeof(image_error_text),
                  "%s does not apply to image models", video_only);
@@ -619,6 +632,7 @@ int main(int argc, char **argv) {
         image_params.seed = params.seed;
         image_params.output_path = output ? output : "outputs/h3.png";
         image_params.dit_layers = params.dit_layers;
+        image_params.use_int8 = int8_flag;
         image_params.use_int8_row_fc2 = params.use_int8_row_fc2;
         image_params.ssd_streaming = params.ssd_streaming;
         image_params.use_slower_bf16_mlp = params.use_slower_bf16_mlp;

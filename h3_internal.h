@@ -44,6 +44,8 @@ typedef struct {
      * image, interleaved [height][width][3]. */
     float *latent;
     uint8_t *rgb;
+    /* The weight path that ran: "stream", "bf16", "int8" or "mixed". */
+    const char *weight_mode;
 } h3_image_hooks;
 
 h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,

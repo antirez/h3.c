@@ -149,6 +149,13 @@ typedef struct {
     const char *output_path;
     /* Must be 50: the image transformer has no thinned variants. */
     int dit_layers;
+    /* Weight path. The default is resident BF16 (about 36 GiB of GPU buffers,
+     * fast forwards). use_int8 keeps the MLP, QKV and attention output
+     * resident as int8 on a Metal 4 GPU (about 18.6 GiB, about twice the
+     * per-step error). ssd_streaming runs exact BF16 from the checkpoint with
+     * about 1.5 GiB of GPU buffers and is slower. use_int8 and ssd_streaming
+     * exclude each other. */
+    int use_int8;
     int use_int8_row_fc2;
     int ssd_streaming;
     int use_slower_bf16_mlp;
@@ -167,9 +174,9 @@ typedef struct {
 } h3_image_params;
 
 #define H3_IMAGE_PARAMS_DEFAULT { \
-    H3_IMAGE_DEFAULT_SIZE, H3_IMAGE_DEFAULT_SIZE, H3_IMAGE_DEFAULT_MIN_AREA, \
-    UINT64_C(42), NULL, H3_DEFAULT_DIT_LAYERS, 0, 0, \
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    .width = H3_IMAGE_DEFAULT_SIZE, .height = H3_IMAGE_DEFAULT_SIZE, \
+    .min_generation_area = H3_IMAGE_DEFAULT_MIN_AREA, .seed = UINT64_C(42), \
+    .dit_layers = H3_DEFAULT_DIT_LAYERS \
 }
 
 typedef struct {

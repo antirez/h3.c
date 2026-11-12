@@ -487,6 +487,12 @@ static void test_image_layout(void) {
     CHECK(layout.img_cond_rows == 3 && layout.img_target_rows == 4);
     CHECK(layout.positions[2].t == 2.0 && layout.positions[4].t == 3.0);
     CHECK(layout.positions[5].t == 4.0);
+    CHECK(close_enough(layout.positions[2].h, 4.6862915, 1e-6));
+    CHECK(close_enough(layout.positions[2].w, -6.627417, 1e-6));
+    CHECK(close_enough(layout.positions[3].h, 4.6862915, 1e-6));
+    CHECK(close_enough(layout.positions[3].w, 16.0, 1e-6));
+    CHECK(close_enough(layout.positions[4].h, 0.0, 1e-6));
+    CHECK(close_enough(layout.positions[4].w, 0.0, 1e-6));
     h3_layout_free(&layout);
 
     const h3_layout_ref audio = {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 4};
@@ -576,6 +582,8 @@ static void test_image_qkv_interleave(void) {
     CHECK(projection == 1 && source == 0);
     CHECK(h3_image_qkv_source(384 + 2 * 128 + 5, 56, 128, &projection, &source));
     CHECK(projection == 2 && source == 128 + 5);
+    CHECK(h3_image_qkv_source(192 + 64 + 5, 16, 64, &projection, &source));
+    CHECK(projection == 1 && source == 64 + 5);
     CHECK(!h3_image_qkv_source(0, 0, 128, &projection, &source));
 }
 

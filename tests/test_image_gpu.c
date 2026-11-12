@@ -1,7 +1,9 @@
+#include "h3_dit.h"
 #include "h3_gpu.h"
 #include "h3_host.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -297,6 +299,209 @@ static void test_int8_mlp_row_guard(void) {
     h3_gpu_tensor_free(tensor);
 }
 
+enum { PATCH_IN = 96, PATCH_OUT = 5376, SENTINEL = 0xABCD };
+#define PROJECTION_BOUND 5e-3
+
+static double bf16_double(uint16_t value) {
+    uint32_t bits = (uint32_t)value << 16;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return (double)result;
+}
+
+static void require(int condition, const char *message) {
+    if (!condition) die(message);
+}
+
+/* The default fused_patch_pack path of an image with references projects all
+ * R + P video rows through h3_gpu_patch_linear_bf16_map and the map of
+ * h3_dit_video_source_rows. Plain linear, the per-segment offset kernel and a
+ * double-precision reference must agree with it, text rows must stay
+ * untouched, and the generated rows written at R * 96 after the condition
+ * rows (as h3_dit_forward_image does) must land at rows text_len + R and on. */
+static void test_mapped_projection(const char *name, int text_len,
+                                   int latent_h, int latent_w,
+                                   const h3_layout_ref *references,
+                                   size_t reference_count) {
+    char error[256];
+    h3_layout layout;
+    h3_layout_summary summary;
+    require(h3_layout_build_image(text_len, latent_h, latent_w, references,
+                                  reference_count, &layout, error,
+                                  sizeof(error)), error);
+    require(h3_layout_validate(&layout, (size_t)text_len, &summary, error,
+                               sizeof(error)), error);
+    size_t condition = summary.video_condition;
+    size_t total = condition + summary.video_target;
+    size_t sequence = layout.seq_len;
+    size_t generated_start = (size_t)text_len + condition;
+    require(sequence == (size_t)text_len + total &&
+            summary.video_target_start == generated_start &&
+            summary.video_target ==
+                (size_t)(latent_h / 2) * (size_t)(latent_w / 2),
+            "layout counts are not [text | references | generated]");
+
+    uint32_t *source = malloc(total * sizeof(*source));
+    require(source != NULL, "oom");
+    require(h3_dit_video_source_rows(&layout, source, total) == total,
+            "video source row count differs from R + P");
+    for (size_t index = 0; index < total; index++)
+        require(source[index] == (uint32_t)(text_len + (int)index),
+                "video source rows are not the rows after the text");
+
+    h3_rng rng;
+    h3_rng_seed(&rng, 20261112u + (uint64_t)condition);
+    size_t generated = total - condition;
+    float *weight = malloc((size_t)PATCH_OUT * PATCH_IN * sizeof(*weight));
+    float *bias = malloc(PATCH_OUT * sizeof(*bias));
+    float *condition_rows = malloc(condition * PATCH_IN * sizeof(float));
+    float *generated_rows = malloc(generated * PATCH_IN * sizeof(float));
+    float *input = calloc(total * PATCH_IN, sizeof(float));
+    require(weight && bias && condition_rows && generated_rows && input,
+            "oom");
+    fill(&rng, weight, (size_t)PATCH_OUT * PATCH_IN, 0.2f, 0.0f);
+    fill(&rng, bias, PATCH_OUT, 0.1f, 0.0f);
+    fill(&rng, condition_rows, condition * PATCH_IN, 1.0f, 0.0f);
+    fill(&rng, generated_rows, generated * PATCH_IN, 1.0f, 0.5f);
+    memcpy(input, condition_rows, condition * PATCH_IN * sizeof(float));
+    memcpy(input + condition * PATCH_IN, generated_rows,
+           generated * PATCH_IN * sizeof(float));
+
+    float *zeros = calloc(total * PATCH_IN, sizeof(*zeros));
+    require(zeros != NULL, "oom");
+    h3_gpu_tensor *video_input = upload(zeros, total * PATCH_IN);
+    free(zeros);
+    h3_gpu_tensor *gpu_weight = upload(weight, (size_t)PATCH_OUT * PATCH_IN);
+    h3_gpu_tensor *gpu_bias = upload(bias, PATCH_OUT);
+    h3_gpu_tensor *map = h3_gpu_tensor_from_u32(gpu, source, total);
+    require(map != NULL, "map allocation failed");
+    uint16_t *sentinel = malloc(sequence * PATCH_OUT * sizeof(*sentinel));
+    require(sentinel != NULL, "oom");
+    for (size_t index = 0; index < sequence * PATCH_OUT; index++)
+        sentinel[index] = SENTINEL;
+    h3_gpu_tensor *mapped = h3_gpu_tensor_from_bf16(gpu, sentinel,
+                                                    sequence * PATCH_OUT);
+    h3_gpu_tensor *segmented = h3_gpu_tensor_from_bf16(gpu, sentinel,
+                                                       sequence * PATCH_OUT);
+    h3_gpu_tensor *plain = h3_gpu_tensor_new_bf16(gpu, total * PATCH_OUT);
+    require(mapped && segmented && plain, "tensor allocation failed");
+
+    uint16_t *before = malloc(sequence * PATCH_OUT * sizeof(*before));
+    uint16_t *after = malloc(sequence * PATCH_OUT * sizeof(*after));
+    uint16_t *by_segments = malloc(sequence * PATCH_OUT * sizeof(*by_segments));
+    uint16_t *plain_rows = malloc(total * PATCH_OUT * sizeof(*plain_rows));
+    require(before && after && by_segments && plain_rows, "oom");
+
+    /* Load time: the condition rows only; the generated rows are still zero. */
+    gpu_ok(h3_gpu_tensor_write_f32_range(video_input, 0, condition_rows,
+                                         condition * PATCH_IN),
+           "write condition rows");
+    gpu_ok(h3_gpu_begin(gpu), "begin");
+    gpu_ok(h3_gpu_patch_linear_bf16_map(
+        gpu, mapped, video_input, gpu_weight, gpu_bias, map,
+        (uint32_t)sequence, (uint32_t)total, PATCH_IN, PATCH_OUT),
+           "mapped projection of the condition rows");
+    gpu_ok(h3_gpu_submit(gpu), "submit");
+    gpu_ok(h3_gpu_tensor_read_bf16(mapped, before, sequence * PATCH_OUT),
+           "read before");
+
+    /* A forward: the generated rows are written after the condition rows. */
+    gpu_ok(h3_gpu_tensor_write_f32_range(video_input, condition * PATCH_IN,
+                                         generated_rows,
+                                         generated * PATCH_IN),
+           "write generated rows");
+    gpu_ok(h3_gpu_begin(gpu), "begin");
+    gpu_ok(h3_gpu_patch_linear_bf16_map(
+        gpu, mapped, video_input, gpu_weight, gpu_bias, map,
+        (uint32_t)sequence, (uint32_t)total, PATCH_IN, PATCH_OUT),
+           "mapped projection");
+    gpu_ok(h3_gpu_patch_linear_bf16(
+        gpu, plain, video_input, gpu_weight, gpu_bias, (uint32_t)total,
+        PATCH_IN, PATCH_OUT), "plain projection");
+    size_t video_offset = 0;
+    for (size_t index = 0; index < layout.segment_count; index++) {
+        const h3_segment *segment = &layout.segments[index];
+        if (segment->kind == H3_SEG_TEXT) continue;
+        size_t rows = segment->stop - segment->start;
+        gpu_ok(h3_gpu_patch_linear_bf16_offset(
+            gpu, segmented, segment->start * PATCH_OUT, video_input,
+            video_offset * PATCH_IN, gpu_weight, gpu_bias, (uint32_t)rows,
+            PATCH_IN, PATCH_OUT), "per-segment projection");
+        video_offset += rows;
+    }
+    gpu_ok(h3_gpu_submit(gpu), "submit");
+    require(video_offset == total, "segments do not cover the video rows");
+    gpu_ok(h3_gpu_tensor_read_bf16(mapped, after, sequence * PATCH_OUT),
+           "read mapped");
+    gpu_ok(h3_gpu_tensor_read_bf16(segmented, by_segments,
+                                   sequence * PATCH_OUT), "read segmented");
+    gpu_ok(h3_gpu_tensor_read_bf16(plain, plain_rows, total * PATCH_OUT),
+           "read plain");
+
+    for (size_t index = 0; index < (size_t)text_len * PATCH_OUT; index++)
+        require(after[index] == SENTINEL && before[index] == SENTINEL,
+                "the mapped projection wrote a text row");
+    require(memcmp(before + (size_t)text_len * PATCH_OUT,
+                   after + (size_t)text_len * PATCH_OUT,
+                   condition * PATCH_OUT * sizeof(*after)) == 0,
+            "writing the generated rows changed a condition row");
+    int moved = 0;
+    for (size_t row = generated_start; row < sequence && !moved; row++)
+        moved = memcmp(before + row * PATCH_OUT, after + row * PATCH_OUT,
+                       PATCH_OUT * sizeof(*after)) != 0;
+    require(moved, "the generated rows did not reach the generated positions");
+    require(memcmp(after, by_segments,
+                   sequence * PATCH_OUT * sizeof(*after)) == 0,
+            "mapped projection differs from the per-segment projection");
+    for (size_t index = 0; index < total; index++)
+        require(memcmp(plain_rows + index * PATCH_OUT,
+                       after + (size_t)source[index] * PATCH_OUT,
+                       PATCH_OUT * sizeof(*after)) == 0,
+                "mapped row differs from the plain projection of its source");
+
+    double worst_row = 0.0, square_error = 0.0, square_value = 0.0;
+    for (size_t index = 0; index < total; index++) {
+        double row_error = 0.0, row_value = 0.0;
+        for (size_t column = 0; column < PATCH_OUT; column++) {
+            double sum = bias[column];
+            for (size_t k = 0; k < PATCH_IN; k++)
+                sum += (double)weight[column * PATCH_IN + k] *
+                       (double)input[index * PATCH_IN + k];
+            double delta = bf16_double(
+                after[(size_t)source[index] * PATCH_OUT + column]) - sum;
+            row_error += delta * delta;
+            row_value += sum * sum;
+        }
+        square_error += row_error;
+        square_value += row_value;
+        double row_relative = sqrt(row_error / row_value);
+        if (row_relative > worst_row) worst_row = row_relative;
+    }
+    double relative = sqrt(square_error / square_value);
+    printf("%s: R=%zu P=%zu rows, mapped vs double rel-L2 %.3g, worst row "
+           "%.3g, bit-identical to the plain and per-segment projections\n",
+           name, condition, generated, relative, worst_row);
+    require(relative < PROJECTION_BOUND && worst_row < 2 * PROJECTION_BOUND,
+            "mapped projection differs from the double-precision reference");
+
+    free(source); free(weight); free(bias); free(condition_rows);
+    free(generated_rows); free(input); free(sentinel); free(before);
+    free(after); free(by_segments); free(plain_rows);
+    h3_gpu_tensor_free(video_input); h3_gpu_tensor_free(gpu_weight);
+    h3_gpu_tensor_free(gpu_bias); h3_gpu_tensor_free(map);
+    h3_gpu_tensor_free(mapped); h3_gpu_tensor_free(segmented);
+    h3_gpu_tensor_free(plain);
+    h3_layout_free(&layout);
+}
+
+static void test_image_edit_projection(void) {
+    const h3_layout_ref one[] = {{H3_LAYOUT_REF_IMAGE, 1, 6, 4, 0}};
+    test_mapped_projection("one reference", 3, 8, 8, one, 1);
+    const h3_layout_ref two[] = {{H3_LAYOUT_REF_IMAGE, 1, 6, 4, 0},
+                                 {H3_LAYOUT_REF_IMAGE, 1, 4, 8, 0}};
+    test_mapped_projection("two references", 5, 8, 6, two, 2);
+}
+
 int main(void) {
     char error[512];
     gpu = h3_gpu_create("h3_shaders.metal", error, sizeof(error));
@@ -304,7 +509,8 @@ int main(void) {
     test_block();
     test_swiglu_half_order();
     test_int8_mlp_row_guard();
+    test_image_edit_projection();
     h3_gpu_free(gpu);
-    puts("ok: image decoder Metal ops match double-precision references");
+    puts("ok: image Metal ops match double-precision references");
     return 0;
 }

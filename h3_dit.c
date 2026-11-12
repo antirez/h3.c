@@ -1131,6 +1131,20 @@ static int prepare_maps(h3_dit *dit, const h3_text_embedding *text,
     return 1;
 }
 
+size_t h3_dit_video_source_rows(const h3_layout *layout, uint32_t *rows,
+                                size_t capacity) {
+    size_t count = 0;
+    for (size_t index = 0; layout && index < layout->segment_count; index++) {
+        const h3_segment *segment = &layout->segments[index];
+        if (segment->kind != H3_SEG_COND &&
+            segment->kind != H3_SEG_REF_IMAGE &&
+            segment->kind != H3_SEG_VIDEO) continue;
+        for (size_t row = segment->start; row < segment->stop; row++, count++)
+            if (rows && count < capacity) rows[count] = (uint32_t)row;
+    }
+    return count;
+}
+
 static int prepare_projection_maps(h3_dit *dit, char *error,
                                    size_t error_size) {
     unsigned video_segments = 0, audio_segments = 0;
@@ -1158,8 +1172,6 @@ static int prepare_projection_maps(h3_dit *dit, char *error,
         if (segment->kind == H3_SEG_COND ||
             segment->kind == H3_SEG_REF_IMAGE ||
             segment->kind == H3_SEG_VIDEO) {
-            for (size_t row = 0; video && row < rows; row++)
-                video[video_offset + row] = (uint32_t)(segment->start + row);
             video_offset += rows;
         } else if (segment->kind != H3_SEG_TEXT) {
             for (size_t row = 0; audio && row < rows; row++)
@@ -1167,8 +1179,11 @@ static int prepare_projection_maps(h3_dit *dit, char *error,
             audio_offset += rows;
         }
     }
+    size_t video_sources = video ? h3_dit_video_source_rows(
+        &dit->layout, video, dit->video_total_rows) : dit->video_total_rows;
     if (video_offset != dit->video_total_rows ||
-        audio_offset != dit->audio_total_rows) {
+        audio_offset != dit->audio_total_rows ||
+        video_sources != dit->video_total_rows) {
         free(video); free(audio);
         fail(error, error_size, "projection map rows are inconsistent");
         return 0;
@@ -2742,6 +2757,17 @@ int h3_dit_forward(h3_dit *dit, int step,
 
 size_t h3_dit_image_rows(const h3_dit *dit) {
     return dit && dit->image ? dit->video_rows : 0;
+}
+
+uint32_t h3_dit_time_rows(const h3_dit *dit) {
+    return dit && dit->schedule ? h3_dit_schedule_time_rows(dit->schedule) : 0;
+}
+
+int h3_dit_read_row_map(const h3_dit *dit, int step, const uint8_t *text_tags,
+                        size_t text_tag_count, uint32_t *rows, size_t count) {
+    return dit && dit->schedule && rows &&
+           h3_dit_schedule_row_map(dit->schedule, step, &dit->layout,
+                                   text_tags, text_tag_count, rows, count);
 }
 
 int h3_dit_read_final_hidden(const h3_dit *dit, float *values,

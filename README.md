@@ -495,15 +495,23 @@ Limits, all checked before any weight loads and reported with the reference
 number: at most 8 references, every side at least 32 pixels, a vision aspect
 ratio of at most 200, a latent side of at most 1024 per reference (16384
 pixels), at most 32768 reference plus image rows, and a packed sequence of at
-most 36864 rows. The sequence limit is unverified above 33069 rows, the
-largest sequence measured. Every weight mode works; the models run one at a
-time (VAE encoder, Qwen vision and text encoder, transformer, VAE decoder),
-and a reference adds the 1.2 GB vision tower and the 0.6 GB VAE encoder to the
-phases, not to the resident transformer. Measured on the development Mac
-(M5, resident BF16): a 512x512 edit with one 256x256 reference takes 32.3 s in
-total, of which the "reference text" phase (vision tower and text encoder) is
-5.0 s; a 1024x768 edit with a 1024x768 reference takes 61.5 s. The noise of
-each reference derives from `--seed`, so the same command writes the same PNG.
+most 36864 rows. The sequence limit is measured up to about 36.6k rows. Every
+weight mode works; the models run one at a time (VAE encoder, Qwen vision and
+text encoder, transformer, VAE decoder), and a reference adds the 1.2 GB vision
+tower and the 0.6 GB VAE encoder to the phases, not to the resident
+transformer. The noise of each reference derives from `--seed`, so the same
+command writes the same PNG.
+
+Measured on M5 Max, 128 GB, BF16 resident unless stated:
+
+| Edit | Result |
+| --- | --- |
+| 512x512, one 256x256 reference | 32.3 s in total: reference VAE 6.2 s, vision tower and text encoder ("reference text") 5.0 s, DiT load 9.4 s, six steps of 1.7 s each; peak footprint 36.8 GiB |
+| 512x512, same reference, `--ssd-streaming` | 43.9 s: DiT load 3.9 s, steps of 4.0 to 4.9 s each (216 GiB of weights read per run) |
+| 512x512, same reference, `--int8` | 31.2 to 33.2 s: DiT load 12.2 s, steps of 1.0 s each; peak footprint 24.5 GiB |
+| 1024x768 with a 1024x768 reference (canvas 2368x1760 through the default minimum generation area) | 61.5 s |
+| 5120x4096 with three references (2048, 3072 and 4096 pixel squares; sequence about 35.9k rows) | 652 to 698 s: reference VAE 86 to 92 s, text 15 s, a DiT step 70 to 80 s; peak footprint 44.4 GiB; two runs byte-identical |
+| 7104x4096 with one 4096x1024 reference (sequence about 36.6k rows, near the 36864 cap) | 593 s; DiT peak 44.9 GiB |
 
 #### Text embedding cache
 

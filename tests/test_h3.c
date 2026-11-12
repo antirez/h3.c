@@ -4,6 +4,7 @@
 #include "h3_image.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
+#include "h3_vae_tiles.h"
 #include "h3_terminal.h"
 
 #include <math.h>
@@ -644,6 +645,49 @@ static void test_image_qkv_interleave(void) {
     CHECK(!h3_image_qkv_source(0, 0, 128, &projection, &source));
 }
 
+static void check_tile_axis(int extent, int count, const int *overlaps) {
+    h3_vae_tile_axis axis;
+    char error[256];
+    CHECK(h3_vae_tile_axis_build(extent, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == count && axis.length == 256);
+    CHECK(axis.starts[0] == 0);
+    for (int index = 1; index < count; index++) {
+        CHECK(axis.overlaps[index - 1] == overlaps[index - 1]);
+        CHECK(axis.starts[index] ==
+              axis.starts[index - 1] + 256 - overlaps[index - 1]);
+    }
+    CHECK(axis.starts[count - 1] + axis.length == extent);
+    h3_vae_tile_axis_free(&axis);
+}
+
+static void test_image_vae_tiles(void) {
+    int overlaps[20];
+    for (int index = 0; index < 20; index++) overlaps[index] = 64;
+    check_tile_axis(4096, 21, overlaps);
+    h3_vae_tile_axis axis;
+    char error[256];
+    CHECK(h3_vae_tile_axis_build(4096, 256, &axis, error, sizeof(error)));
+    CHECK(axis.starts[1] == 192 && axis.starts[2] == 384);
+    h3_vae_tile_axis_free(&axis);
+
+    for (int index = 0; index < 8; index++) overlaps[index] = 80;
+    overlaps[8] = overlaps[9] = 64;
+    check_tile_axis(2048, 11, overlaps);
+    overlaps[0] = overlaps[1] = 128;
+    check_tile_axis(512, 3, overlaps);
+
+    CHECK(h3_vae_tile_axis_build(256, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == 1 && axis.length == 256 && axis.starts[0] == 0);
+    h3_vae_tile_axis_free(&axis);
+    CHECK(h3_vae_tile_axis_build(160, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == 1 && axis.length == 160);
+    h3_vae_tile_axis_free(&axis);
+    CHECK(!h3_vae_tile_axis_build(250, 256, &axis, error, sizeof(error)));
+    CHECK(error[0] != '\0');
+    CHECK(h3_vae_tile_count(4096, 256) == 21);
+    CHECK(h3_vae_tile_count(2048, 256) == 11);
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -686,6 +730,7 @@ int main(void) {
     test_image_timestep_features();
     test_image_patchify();
     test_image_qkv_interleave();
+    test_image_vae_tiles();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

@@ -7,6 +7,12 @@ scalar settings it was produced with, as small int32 tensors, so a C test needs
 nothing else.
 
 Stages: text, block0, step, denoise, vae, e2e (or all).
+`all` loads the text encoder once and the transformer once: one six-step run
+records block 0, steps 0 and 3 and the final latents.
+
+Fixture tensor names that differ from spec 5.3: the step fixture holds
+latents_in_step0, latents_in_step3, noise_pred_step0 and noise_pred_step3
+(plus step0 and step3 scalars) instead of one latents_in / noise_pred.
 Run from the repository root in an environment that has diffusers (with the
 MiniMax-H3-Image classes), transformers, torch and safetensors.
 """
@@ -144,8 +150,7 @@ def run_text(args, device):
     return token_ids, embeds
 
 
-def stage_text(args, device):
-    token_ids, embeds = run_text(args, device)
+def save_text(args, token_ids, embeds):
     height, width = canvas(args)
     save_fixture(
         args,
@@ -157,7 +162,10 @@ def stage_text(args, device):
             **settings(args, height, width),
         },
     )
-    return embeds
+
+
+def stage_text(args, device):
+    save_text(args, *run_text(args, device))
 
 
 def packed_layout(text_tokens, latent_height, latent_width, device):
@@ -201,6 +209,8 @@ def run_transformer(args, device, prompt_embeds, last_step, capture_block0=False
     recorded = {}
 
     def block0_hook(module, hook_args, hook_kwargs, output):
+        if "hidden_in" in recorded:
+            return
         hidden_in, temb, adaln_indices = hook_args[0], hook_args[1], hook_args[2]
         recorded["hidden_in"] = hidden_in[0].detach().cpu()
         recorded["temb"] = temb.detach().float().cpu()
@@ -210,6 +220,8 @@ def run_transformer(args, device, prompt_embeds, last_step, capture_block0=False
             raise StopForward
 
     def refiner_hook(module, hook_args, output):
+        if "refined_text" in recorded:
+            return
         recorded["refined_text"] = output[0].detach().cpu()
 
     handles = [transformer.token_refiner.register_forward_hook(refiner_hook)]
@@ -265,10 +277,7 @@ def prompt_embeds_from_fixture(args):
     return load_fixture(args, "text")["prompt_embeds"][None]
 
 
-def stage_block0(args, device):
-    recorded = run_transformer(
-        args, device, prompt_embeds_from_fixture(args), last_step=0, capture_block0=True, stop_after_block0=True
-    )
+def save_block0(args, recorded):
     height, width = canvas(args)
     save_fixture(
         args,
@@ -285,8 +294,7 @@ def stage_block0(args, device):
     )
 
 
-def stage_step(args, device):
-    recorded = run_transformer(args, device, prompt_embeds_from_fixture(args), last_step=max(STEP_FIXTURE_STEPS))
+def save_step(args, recorded):
     height, width = canvas(args)
     tensors = {"refined_text": recorded["refined_text"], **settings(args, height, width)}
     for step in STEP_FIXTURE_STEPS:
@@ -296,19 +304,35 @@ def stage_step(args, device):
     save_fixture(args, "step", tensors)
 
 
-def run_denoise(args, device, prompt_embeds):
-    recorded = run_transformer(args, device, prompt_embeds, last_step=5)
+def final_latents(args, recorded):
+    """Noise and denoised latents, both (24, Hl, Wl)."""
     canvas_height, canvas_width = canvas(args)
     noise = noise_latents(args, canvas_height, canvas_width)[0, :, 0]
     final = unpatchify(recorded["latents_final"], recorded["latent_height"], recorded["latent_width"])[0]
     return noise, final
 
 
-def stage_denoise(args, device):
-    noise, final = run_denoise(args, device, prompt_embeds_from_fixture(args))
+def save_denoise(args, noise, final):
     height, width = canvas(args)
     save_fixture(args, "denoise", {"noise": noise, "latents_final": final, **settings(args, height, width)})
-    return final
+
+
+def stage_block0(args, device):
+    save_block0(
+        args,
+        run_transformer(
+            args, device, prompt_embeds_from_fixture(args), last_step=0, capture_block0=True, stop_after_block0=True
+        ),
+    )
+
+
+def stage_step(args, device):
+    save_step(args, run_transformer(args, device, prompt_embeds_from_fixture(args), last_step=max(STEP_FIXTURE_STEPS)))
+
+
+def stage_denoise(args, device):
+    recorded = run_transformer(args, device, prompt_embeds_from_fixture(args), last_step=5)
+    save_denoise(args, *final_latents(args, recorded))
 
 
 def decode_latents(vae, latents, device):
@@ -372,9 +396,7 @@ def stage_vae(args, _device):
     )
 
 
-def stage_e2e(args, device):
-    token_ids, embeds = run_text(args, device)
-    noise, final = run_denoise(args, device, embeds)
+def save_e2e(args, token_ids, noise, final):
     image, _, _, _ = run_vae(args, final[None])
     height, width = canvas(args)
     save_fixture(
@@ -384,9 +406,33 @@ def stage_e2e(args, device):
             "image_u8": to_uint8(image)[0],
             "noise": noise,
             "token_ids": torch.tensor(token_ids, dtype=torch.int32),
+            "prompt": torch.tensor(list(args.prompt.encode("utf-8")), dtype=torch.uint8),
             **settings(args, height, width),
         },
     )
+
+
+def stage_e2e(args, device):
+    """Text, denoise and VAE decode in sequence, one model loaded at a time.
+
+    It composes the same computations the separate stages run, so it checks the
+    C pipeline end to end but not the harness's own composition of the stages.
+    """
+    token_ids, embeds = run_text(args, device)
+    recorded = run_transformer(args, device, embeds, last_step=5)
+    save_e2e(args, token_ids, *final_latents(args, recorded))
+
+
+def stage_all(args, device):
+    token_ids, embeds = run_text(args, device)
+    save_text(args, token_ids, embeds)
+    recorded = run_transformer(args, device, embeds, last_step=5, capture_block0=True)
+    save_block0(args, recorded)
+    save_step(args, recorded)
+    noise, final = final_latents(args, recorded)
+    save_denoise(args, noise, final)
+    stage_vae(args, device)
+    save_e2e(args, token_ids, noise, final)
 
 
 STAGES = {
@@ -413,9 +459,10 @@ def main():
     args = parser.parse_args()
 
     device = pick_device(args.device)
-    stages = list(STAGES) if args.stage == "all" else [args.stage]
-    for stage in stages:
-        STAGES[stage](args, device)
+    if args.stage == "all":
+        stage_all(args, device)
+    else:
+        STAGES[args.stage](args, device)
 
 
 if __name__ == "__main__":

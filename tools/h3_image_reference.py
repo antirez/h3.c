@@ -11,10 +11,11 @@ Stages: text, block0, step, f32truth, denoise, vae, e2e (or all), and step_large
 records block 0, steps 0 and 3 and the final latents.
 
 Fixture tensor names that differ from spec 5.3: the step fixture holds
-latents_in_step0, latents_in_step3, noise_pred_step0 and noise_pred_step3
-(plus step0 and step3 scalars) instead of one latents_in / noise_pred.
+latents_in_step{0..5} and noise_pred_step{0..5} (plus step0..step5 scalars)
+instead of one latents_in / noise_pred: every step of the six-step run, each
+fed the bf16 reference's own latents (teacher forcing).
 The f32truth stage is not part of `all`: it reads the step and text fixtures and
-writes h3_image_dit_step_f32.safetensors, the velocities of steps 0 and 3 and
+writes h3_image_dit_step_f32.safetensors, the velocities of all six steps and
 the refined text computed in float32 from the same inputs, one transformer
 block at a time from memory-mapped weights (about 2 GB of float32 weights at a
 time, CPU), so the bf16 reference noise can be told from an implementation
@@ -27,7 +28,9 @@ import argparse
 import copy
 import gc
 import json
+import mmap
 import os
+import struct
 import sys
 
 import torch
@@ -61,7 +64,7 @@ IMAGE_TAG = 0
 PIXEL_MEAN = (0.485, 0.456, 0.406)
 PIXEL_STD = (0.229, 0.224, 0.225)
 SAMPLE_SIGMAS = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]
-STEP_FIXTURE_STEPS = (0, 3)
+STEP_FIXTURE_STEPS = (0, 1, 2, 3, 4, 5)
 
 FIXTURE_NAMES = {
     "text": "h3_image_text_256.safetensors",
@@ -201,6 +204,47 @@ def make_scheduler(args, device):
     return scheduler
 
 
+SAFETENSORS_DTYPES = {"BF16": torch.bfloat16, "F32": torch.float32, "F16": torch.float16}
+
+
+def load_transformer_mmap(directory):
+    """The transformer with every weight a view of its memory-mapped shard.
+
+    Unlike from_pretrained this keeps the 62 GB in evictable file-backed pages
+    instead of anonymous memory; the dtypes are the checkpoint's own (bfloat16
+    everywhere except the float32 output heads).
+    """
+    config = MiniMaxH3ImageTransformer2DModel.load_config(directory)
+    with torch.device("meta"):
+        model = MiniMaxH3ImageTransformer2DModel.from_config(config)
+    with open(os.path.join(directory, "diffusion_pytorch_model.safetensors.index.json")) as handle:
+        weight_map = json.load(handle)["weight_map"]
+    maps = {}
+    state = {}
+    for shard in sorted(set(weight_map.values())):
+        handle = open(os.path.join(directory, shard), "rb")
+        maps[shard] = (handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_COPY))
+        mapped = maps[shard][1]
+        (header_length,) = struct.unpack("<Q", mapped[:8])
+        header = json.loads(mapped[8 : 8 + header_length])
+        for name, entry in header.items():
+            if name == "__metadata__":
+                continue
+            begin, end = entry["data_offsets"]
+            dtype = SAFETENSORS_DTYPES[entry["dtype"]]
+            count = (end - begin) // torch.empty(0, dtype=dtype).element_size()
+            state[name] = torch.frombuffer(mapped, dtype=dtype, count=count, offset=8 + header_length + begin).reshape(
+                entry["shape"]
+            )
+    model.load_state_dict(state, strict=True, assign=True)
+    model.rope = MiniMaxH3ImageRotaryPosEmbed(rope_freq_dim=config["rope_freq_dim"], rope_theta=config["rope_theta"])
+    for name, tensor in [*model.named_parameters(), *model.named_buffers()]:
+        if tensor.device.type == "meta":
+            raise RuntimeError(f"{name} was not loaded")
+    model._h3_mmaps = maps
+    return model.eval()
+
+
 def run_transformer(args, device, prompt_embeds, last_step, capture_block0=False, stop_after_block0=False):
     """Run the first last_step + 1 denoising steps of the transformer on injected noise.
 
@@ -208,10 +252,14 @@ def run_transformer(args, device, prompt_embeds, last_step, capture_block0=False
     """
     canvas_height, canvas_width = canvas(args)
     latent_height, latent_width = canvas_height // VAE_RATIO, canvas_width // VAE_RATIO
-    transformer = MiniMaxH3ImageTransformer2DModel.from_pretrained(
-        os.path.join(args.checkpoint, "transformer_diffusers"), torch_dtype=torch.bfloat16
-    ).to(device)  # unverified: peak memory of the 62 GB .to(device) on MPS; use --device cpu if it swaps
-    transformer.eval()
+    transformer_directory = os.path.join(args.checkpoint, "transformer_diffusers")
+    if device.type == "cpu":
+        transformer = load_transformer_mmap(transformer_directory)
+    else:
+        transformer = MiniMaxH3ImageTransformer2DModel.from_pretrained(
+            transformer_directory, torch_dtype=torch.bfloat16
+        ).to(device)  # unverified: peak memory of the 62 GB .to(device) on MPS; use --device cpu if it swaps
+        transformer.eval()
     scheduler = make_scheduler(args, device)
 
     text_tokens = prompt_embeds.shape[1]

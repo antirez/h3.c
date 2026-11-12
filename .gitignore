@@ -4,6 +4,7 @@ MiniMax-H3/
 MiniMax-H3-Image/
 outputs/
 .ruff_cache/
+__pycache__/
 
 # Compiler and test outputs.
 *.o

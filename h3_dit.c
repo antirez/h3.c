@@ -1179,11 +1179,11 @@ static int prepare_projection_maps(h3_dit *dit, char *error,
             audio_offset += rows;
         }
     }
+    size_t video_sources = video ? h3_dit_video_source_rows(
+        &dit->layout, video, dit->video_total_rows) : dit->video_total_rows;
     if (video_offset != dit->video_total_rows ||
         audio_offset != dit->audio_total_rows ||
-        (video && h3_dit_video_source_rows(&dit->layout, video,
-                                           dit->video_total_rows) !=
-                  dit->video_total_rows)) {
+        video_sources != dit->video_total_rows) {
         free(video); free(audio);
         fail(error, error_size, "projection map rows are inconsistent");
         return 0;

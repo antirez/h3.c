@@ -112,6 +112,9 @@ h3_real_image_dit_test: tests/test_real_image_dit.o $(LIB_OBJ)
 h3_real_image_text_test: tests/test_real_image_text.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_real_image_e2e_test: tests/test_real_image_e2e.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -210,6 +213,18 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: image text encoder weights/fixture are not installed"; \
 	fi
+	@if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
+	         test -f $(H3_IMAGE_DIR)/text_encoder/model-00014-of-00014.safetensors && \
+	         test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
+	         test -f misc/fixtures/h3_image_e2e_512.safetensors; then \
+		for mode in stream int8; do \
+			./h3_real_image_e2e_test $(H3_IMAGE_DIR) \
+				misc/fixtures/h3_image_e2e_512.safetensors $$mode \
+				misc/fixtures/h3_image_denoise.safetensors || exit 1; \
+		done; \
+	else \
+		echo "skip: image end-to-end weights/fixture are not installed"; \
+	fi
 	@if test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
 	         test -f misc/fixtures/h3_image_vae_decode.safetensors; then \
 		./h3_real_image_vae_test $(H3_IMAGE_DIR)/vae_diffusers \
@@ -274,6 +289,6 @@ clean:
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test h3_real_image_vae_test \
 		h3_real_image_dit_block_test h3_real_image_dit_test \
-		h3_real_image_text_test \
+		h3_real_image_text_test h3_real_image_e2e_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

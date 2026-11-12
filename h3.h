@@ -16,6 +16,8 @@ extern "C" {
 #define H3_DEFAULT_STEPS 20
 #define H3_DEFAULT_DIT_LAYERS 50
 #define H3_MIN_DIT_LAYERS 35
+#define H3_IMAGE_DEFAULT_SIZE 1024
+#define H3_IMAGE_DEFAULT_MIN_AREA 4194304
 
 typedef struct h3_ctx h3_ctx;
 typedef struct h3_result h3_result;
@@ -134,6 +136,42 @@ typedef struct {
     1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
 }
 
+/* Text-to-image request. width and height are the size of the returned image,
+ * any positive size; the model runs on a larger canvas when the area is below
+ * min_generation_area and the result is resized back. The progress callback
+ * reports each phase and each of the six denoising steps; on_frame receives
+ * the final image once (frame_index 0, frame_count 1). */
+typedef struct {
+    int width;
+    int height;
+    int min_generation_area;
+    uint64_t seed;
+    const char *output_path;
+    /* Must be 50: the image transformer has no thinned variants. */
+    int dit_layers;
+    int use_int8_row_fc2;
+    int ssd_streaming;
+    int use_slower_bf16_mlp;
+    int use_slower_bf16_qkv;
+    int use_slower_bf16_attention_output;
+    int use_slower_row_major_attention_output;
+    int use_slower_unfused_int8_inputs;
+    int use_slower_unfused_qkv_rope;
+    int use_slower_scalar_qkv_rms;
+    int use_slower_uncached_int8_scales;
+    int use_slower_dynamic_fc1_k;
+    int use_slower_grouped_quantizer;
+    h3_frame_callback on_frame;
+    h3_progress_callback on_progress;
+    void *callback_opaque;
+} h3_image_params;
+
+#define H3_IMAGE_PARAMS_DEFAULT { \
+    H3_IMAGE_DEFAULT_SIZE, H3_IMAGE_DEFAULT_SIZE, H3_IMAGE_DEFAULT_MIN_AREA, \
+    UINT64_C(42), NULL, H3_DEFAULT_DIT_LAYERS, 0, 0, \
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+}
+
 typedef struct {
     char name[128];
     char architecture[128];
@@ -158,6 +196,10 @@ typedef struct {
     h3_component_info ref2va_transformer;
     h3_component_info video_vae;
     h3_component_info audio_vae;
+    /* MiniMax-H3-Image checkpoint: the text encoder above is its own
+     * text_encoder directory. */
+    h3_component_info image_transformer;
+    h3_component_info image_vae;
 } h3_model_info;
 
 struct h3_result {
@@ -173,6 +215,10 @@ struct h3_result {
 h3_ctx *h3_load_dir(const char *model_dir);
 void h3_free(h3_ctx *ctx);
 
+/* Nonzero when the directory is a MiniMax-H3-Image checkpoint, which
+ * generates with h3_generate_image() only. */
+int h3_is_image_model(const h3_ctx *ctx);
+
 const char *h3_last_error(const h3_ctx *ctx);
 const h3_device_info *h3_device(const h3_ctx *ctx);
 const h3_model_info *h3_model(const h3_ctx *ctx);
@@ -186,6 +232,11 @@ void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info);
 /* Generate media, delivering decoded frames incrementally through on_frame. */
 h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                        const h3_params *params);
+/* Text-to-image: tokenize, encode, six denoising steps, VAE decode, resize and
+ * PNG. Each model is loaded, used and freed in turn. The result has frames = 1
+ * and fps = 0. */
+h3_result *h3_generate_image(h3_ctx *ctx, const char *prompt,
+                             const h3_image_params *params);
 void h3_result_free(h3_result *result);
 
 #ifdef __cplusplus

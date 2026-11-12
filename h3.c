@@ -3,6 +3,10 @@
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
+#include "h3_image.h"
+#include "h3_image_pipeline.h"
+#include "h3_image_vae.h"
+#include "h3_gpu.h"
 #include "h3_metal.h"
 #include "h3_multimodal.h"
 #include "h3_safetensors.h"
@@ -421,7 +425,33 @@ h3_ctx *h3_load_dir(const char *model_dir) {
         free(ctx);
         return NULL;
     }
-    if (!h3_require_file(ctx, "FL2VA/transformer/config.json") ||
+    char *video_config = h3_path(model_dir, "FL2VA/transformer/config.json");
+    char *image_config = h3_path(model_dir,
+                                 "transformer_diffusers/config.json");
+    if (!video_config || !image_config) {
+        free(video_config);
+        free(image_config);
+        h3_set_error(ctx, "out of memory resolving model path");
+        snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
+        h3_free(ctx);
+        return NULL;
+    }
+    ctx->image = !h3_is_file(video_config) && h3_is_file(image_config);
+    free(video_config);
+    free(image_config);
+    if (ctx->image) {
+        if (!h3_require_file(ctx, "vae_diffusers/config.json") ||
+            !h3_require_file(ctx, "tokenizer/tokenizer.json") ||
+            !h3_inventory(ctx, "text_encoder", &ctx->model.text_encoder) ||
+            !h3_inventory(ctx, "transformer_diffusers",
+                          &ctx->model.image_transformer) ||
+            !h3_inventory(ctx, "vae_diffusers", &ctx->model.image_vae)) {
+            snprintf(h3_global_error, sizeof(h3_global_error), "%s",
+                     ctx->error);
+            h3_free(ctx);
+            return NULL;
+        }
+    } else if (!h3_require_file(ctx, "FL2VA/transformer/config.json") ||
         !h3_require_file(ctx, "FL2VA/tokenizer/tokenizer.json") ||
         !h3_inventory(ctx, "FL2VA/text_encoder", &ctx->model.text_encoder) ||
         !h3_inventory(ctx, "FL2VA/transformer", &ctx->model.fl2va_transformer) ||
@@ -433,7 +463,7 @@ h3_ctx *h3_load_dir(const char *model_dir) {
     }
     /* Ref2VA is selected only by ordered-reference requests. Keep prompt-only
      * FL2VA usable while that optional 62 GiB checkpoint is not installed. */
-    char *ref_index = h3_path(
+    char *ref_index = ctx->image ? strdup("") : h3_path(
         ctx->model_dir, "Ref2VA/transformer/model.safetensors.index.json");
     if (!ref_index) {
         h3_set_error(ctx, "out of memory resolving optional Ref2VA path");
@@ -464,6 +494,10 @@ void h3_free(h3_ctx *ctx) {
     h3_cache_clear(ctx);
     free(ctx->model_dir);
     free(ctx);
+}
+
+int h3_is_image_model(const h3_ctx *ctx) {
+    return ctx && ctx->image;
 }
 
 const char *h3_last_error(const h3_ctx *ctx) {
@@ -638,15 +672,16 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
 
 typedef struct {
     h3_ctx *ctx;
+    h3_progress_callback callback;
+    void *opaque;
     const h3_params *params;
     int cancelled;
 } h3_generation_progress;
 
 static void h3_progress_emit(h3_generation_progress *state, const char *phase,
                              int completed, int total) {
-    if (!state || state->cancelled || !state->params->on_progress) return;
-    if (state->params->on_progress(phase, completed, total,
-                                   state->params->callback_opaque)) {
+    if (!state || state->cancelled || !state->callback) return;
+    if (state->callback(phase, completed, total, state->opaque)) {
         state->cancelled = 1;
         h3_set_error(state->ctx, "generation cancelled during %s", phase);
     }
@@ -849,6 +884,10 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                        const h3_params *params) {
     if (!ctx) return NULL;
     ctx->error[0] = '\0';
+    if (ctx->image) {
+        h3_set_error(ctx, "this is an image checkpoint: use h3_generate_image");
+        return NULL;
+    }
     if (!prompt || !*prompt) {
         h3_set_error(ctx, "prompt must not be empty");
         return NULL;
@@ -868,7 +907,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "ordered references require the Ref2VA checkpoint");
         return NULL;
     }
-    h3_generation_progress progress = {ctx, params, 0};
+    h3_generation_progress progress = {
+        ctx, params->on_progress, params->callback_opaque, params, 0};
     h3_temporal_shape temporal = h3_temporal(params->frames);
     int latent_w, latent_h;
     h3_latent_canvas(render_width, render_height, &latent_w, &latent_h);
@@ -1724,6 +1764,260 @@ cleanup:
     h3_video_frames_free(&frames);
     h3_audio_waveform_free(&waveform);
     return result;
+}
+
+static int h3_valid_image_params(h3_ctx *ctx, const h3_image_params *params) {
+    if (!params) {
+        h3_set_error(ctx, "generation parameters are required");
+        return 0;
+    }
+    if (params->width < 1 || params->height < 1 ||
+        params->width > H3_IMAGE_MAX_SIDE || params->height > H3_IMAGE_MAX_SIDE) {
+        h3_set_error(ctx, "image width and height must be in [1, %d]",
+                     H3_IMAGE_MAX_SIDE);
+        return 0;
+    }
+    if (params->min_generation_area < H3_IMAGE_MIN_AREA_LOW ||
+        params->min_generation_area > H3_IMAGE_MIN_AREA_HIGH) {
+        h3_set_error(ctx, "min generation area must be in [%d, %d]",
+                     H3_IMAGE_MIN_AREA_LOW, H3_IMAGE_MIN_AREA_HIGH);
+        return 0;
+    }
+    if (params->dit_layers != H3_DEFAULT_DIT_LAYERS) {
+        h3_set_error(ctx, "the image transformer runs all 50 blocks");
+        return 0;
+    }
+    if (params->ssd_streaming != 0 && params->ssd_streaming != 1) {
+        h3_set_error(ctx, "SSD streaming must be zero or one");
+        return 0;
+    }
+    if (params->use_int8_row_fc2 != 0 && params->use_int8_row_fc2 != 1) {
+        h3_set_error(ctx, "int8 row FC2 must be zero or one");
+        return 0;
+    }
+    if (params->ssd_streaming && params->use_int8_row_fc2) {
+        h3_set_error(ctx, "SSD streaming uses original BF16 weights and cannot "
+                         "be combined with int8 row FC2");
+        return 0;
+    }
+    if (params->use_int8_row_fc2 && params->use_slower_bf16_mlp) {
+        h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
+        return 0;
+    }
+    if (params->use_int8_row_fc2 && !h3_device(ctx)->metal4) {
+        h3_set_error(ctx, "int8 row FC2 requires an M5-class Metal 4 GPU");
+        return 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    h3_generation_progress *progress;
+} h3_image_step_state;
+
+static int h3_image_step_bridge(int completed, int total, void *opaque) {
+    h3_image_step_state *state = opaque;
+    h3_progress_emit(state->progress, "image denoise", completed, total);
+    return state->progress->cancelled;
+}
+
+static void h3_image_vae_progress_bridge(int completed, int total,
+                                         void *opaque) {
+    h3_progress_emit(opaque, "image VAE", completed, total);
+}
+
+static void h3_report_peak(const char *label, const h3_gpu_stats *stats) {
+    fprintf(stderr, "h3: %s peak GPU buffers %.2f GiB, %.2f GPU seconds\n",
+            label,
+            (double)stats->peak_live_bytes / (1024.0 * 1024.0 * 1024.0),
+            stats->gpu_seconds);
+}
+
+h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
+                                        const h3_image_params *params,
+                                        h3_image_hooks *hooks) {
+    if (!ctx) return NULL;
+    ctx->error[0] = '\0';
+    if (!ctx->image) {
+        h3_set_error(ctx, "model directory is not a MiniMax-H3-Image "
+                          "checkpoint");
+        return NULL;
+    }
+    if (!prompt || !*prompt) {
+        h3_set_error(ctx, "prompt must not be empty");
+        return NULL;
+    }
+    if (!h3_valid_image_params(ctx, params)) return NULL;
+    int canvas_height, canvas_width;
+    if (!h3_image_canvas(params->height, params->width,
+                         params->min_generation_area, &canvas_height,
+                         &canvas_width)) {
+        h3_set_error(ctx, "cannot compute the generation canvas");
+        return NULL;
+    }
+    int latent_height = canvas_height / 16, latent_width = canvas_width / 16;
+    fprintf(stderr, "h3: image %dx%d requested, generating on a %dx%d canvas "
+            "(latent %dx%d, %d image tokens)\n", params->width, params->height,
+            canvas_width, canvas_height, latent_width, latent_height,
+            (latent_height / 2) * (latent_width / 2));
+    int profile = getenv("H3_PROFILE") != NULL;
+    h3_generation_progress progress = {
+        ctx, params->on_progress, params->callback_opaque, NULL, 0};
+    char detail[512];
+    h3_text_embedding text;
+    memset(&text, 0, sizeof(text));
+    h3_dit *dit = NULL;
+    float *latent = NULL;
+    h3_image_planes planes;
+    memset(&planes, 0, sizeof(planes));
+    uint8_t *planar = NULL, *rgb = NULL;
+    h3_result *result = NULL;
+    char *dit_path = h3_path(ctx->model_dir, "transformer_diffusers");
+    char *vae_path = h3_path(ctx->model_dir, "vae_diffusers");
+    if (!dit_path || !vae_path) {
+        h3_set_error(ctx, "out of memory resolving image model paths");
+        goto cleanup;
+    }
+    h3_progress_emit(&progress, "text encoder", 0, 50);
+    if (!h3_image_encode_prompt(ctx->model_dir, prompt,
+                                h3_text_progress_bridge, &progress, NULL, NULL,
+                                &text, detail, sizeof(detail))) {
+        if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
+        goto cleanup;
+    }
+    if (profile) h3_report_peak("text encoder", &text.gpu_stats);
+    if (progress.cancelled) goto cleanup;
+    dit = h3_dit_load_image(
+        dit_path, "h3_shaders.metal", &text, latent_height, latent_width,
+        (unsigned)params->dit_layers, params->ssd_streaming,
+        params->use_slower_bf16_mlp, params->use_slower_bf16_qkv,
+        params->use_slower_bf16_attention_output,
+        params->use_slower_row_major_attention_output,
+        params->use_slower_unfused_int8_inputs,
+        params->use_slower_unfused_qkv_rope,
+        params->use_slower_scalar_qkv_rms,
+        params->use_slower_uncached_int8_scales,
+        params->use_slower_dynamic_fc1_k,
+        params->use_slower_grouped_quantizer, params->use_int8_row_fc2,
+        h3_dit_progress_bridge, &progress, detail, sizeof(detail));
+    h3_text_embedding_free(&text);
+    if (!dit) {
+        if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
+        goto cleanup;
+    }
+    if (progress.cancelled) goto cleanup;
+    size_t latent_elements = (size_t)H3_IMAGE_LATENT_CHANNELS *
+                             (size_t)latent_height * (size_t)latent_width;
+    latent = malloc(latent_elements * sizeof(*latent));
+    if (!latent) {
+        h3_set_error(ctx, "out of memory allocating the image latent");
+        goto cleanup;
+    }
+    if (hooks && hooks->noise)
+        memcpy(latent, hooks->noise, latent_elements * sizeof(*latent));
+    else
+        h3_image_noise(params->seed, latent_height, latent_width, latent);
+    h3_image_step_state step_state = {&progress};
+    if (!h3_image_sample(latent_height, latent_width, latent,
+                         h3_image_dit_velocity, dit, h3_image_step_bridge,
+                         &step_state, latent, detail, sizeof(detail))) {
+        h3_set_error(ctx, "%s", detail);
+        goto cleanup;
+    }
+    h3_gpu_stats dit_stats;
+    if (profile && h3_dit_get_gpu_stats(dit, &dit_stats))
+        h3_report_peak("image DiT", &dit_stats);
+    h3_dit_free(dit);
+    dit = NULL;
+    h3_progress_emit(&progress, "image VAE", 0, 1);
+    if (progress.cancelled) goto cleanup;
+    if (!h3_image_vae_decode(vae_path, "h3_shaders.metal", latent,
+                             latent_height, latent_width,
+                             h3_image_vae_progress_bridge, &progress, &planes,
+                             detail, sizeof(detail))) {
+        if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
+        goto cleanup;
+    }
+    if (profile) h3_report_peak("image VAE", &planes.gpu_stats);
+    if (planes.height != canvas_height || planes.width != canvas_width) {
+        h3_set_error(ctx, "image VAE returned %dx%d, expected %dx%d",
+                     planes.width, planes.height, canvas_width, canvas_height);
+        goto cleanup;
+    }
+    size_t canvas_pixels = (size_t)canvas_width * (size_t)canvas_height;
+    planar = malloc(canvas_pixels * 3);
+    rgb = malloc(canvas_pixels * 3);
+    if (!planar || !rgb) {
+        h3_set_error(ctx, "out of memory converting the generated image");
+        goto cleanup;
+    }
+    h3_image_planes_to_rgb(&planes);
+    h3_image_planes_to_u8(&planes, planar);
+    h3_image_planes_free(&planes);
+    h3_image_interleave_rgb(planar, canvas_width, canvas_height, rgb);
+    free(planar);
+    planar = NULL;
+    if (progress.cancelled) goto cleanup;
+    if (canvas_width != params->width || canvas_height != params->height) {
+        uint8_t *resized = NULL;
+        if (!h3_resize_rgb24_high_quality(rgb, 1, canvas_width, canvas_height,
+                                          params->width, params->height,
+                                          &resized)) {
+            h3_set_error(ctx, "cannot resize the generated image");
+            goto cleanup;
+        }
+        free(rgb);
+        rgb = resized;
+    }
+    if (params->on_frame) {
+        h3_frame frame = {params->width, params->height, params->width * 3,
+                          rgb, 0, 1, -1, 0};
+        if (params->on_frame(&frame, params->callback_opaque)) {
+            h3_set_error(ctx, "generation cancelled while delivering the image");
+            goto cleanup;
+        }
+    }
+    if (params->output_path && *params->output_path) {
+        h3_progress_emit(&progress, "PNG", 0, 1);
+        if (!h3_ffmpeg_write_png_rgb24(params->output_path, rgb, params->width,
+                                       params->height, detail,
+                                       sizeof(detail))) {
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        h3_progress_emit(&progress, "PNG", 1, 1);
+    }
+    result = calloc(1, sizeof(*result));
+    if (!result) {
+        h3_set_error(ctx, "out of memory creating generation result");
+        goto cleanup;
+    }
+    result->width = params->width;
+    result->height = params->height;
+    result->frames = 1;
+    result->seed = params->seed;
+    if (hooks) {
+        hooks->latent = latent;
+        latent = NULL;
+        hooks->rgb = rgb;
+        rgb = NULL;
+    }
+
+cleanup:
+    free(dit_path);
+    free(vae_path);
+    h3_text_embedding_free(&text);
+    h3_dit_free(dit);
+    h3_image_planes_free(&planes);
+    free(latent);
+    free(planar);
+    free(rgb);
+    return result;
+}
+
+h3_result *h3_generate_image(h3_ctx *ctx, const char *prompt,
+                             const h3_image_params *params) {
+    return h3_generate_image_with_hooks(ctx, prompt, params, NULL);
 }
 
 void h3_result_free(h3_result *result) {

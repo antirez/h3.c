@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #define H3_IMAGE_STEPS 6
+#define H3_IMAGE_MAX_SIDE 16384
 #define H3_IMAGE_MIN_AREA_LOW 1024
 #define H3_IMAGE_MIN_AREA_HIGH 16777216
 #define H3_IMAGE_DIT_ROPE_FREQS 16

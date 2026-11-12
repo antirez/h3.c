@@ -14,6 +14,7 @@ struct h3_ctx {
     char error[512];
     h3_device_info device;
     h3_model_info model;
+    int image;
     int cache_enabled;
     char *conditioning_key;
     size_t conditioning_tokens;
@@ -32,6 +33,22 @@ struct h3_ctx {
     char *video_decoder_key;
     struct h3_video_vae_decoder *video_decoder;
 };
+
+/* Test hooks of h3_generate_image(). */
+typedef struct {
+    /* Initial latent noise [24][latent_height][latent_width] instead of the
+     * seed's. */
+    const float *noise;
+    /* Receive malloc'd copies; the caller frees them. latent is the final
+     * normalised latent [24][latent_height][latent_width], rgb the returned
+     * image, interleaved [height][width][3]. */
+    float *latent;
+    uint8_t *rgb;
+} h3_image_hooks;
+
+h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
+                                        const h3_image_params *params,
+                                        h3_image_hooks *hooks);
 
 void h3_set_error(h3_ctx *ctx, const char *format, ...)
     __attribute__((format(printf, 2, 3)));

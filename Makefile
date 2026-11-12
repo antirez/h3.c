@@ -54,6 +54,9 @@ h3_audio_gpu_tests: tests/test_audio_gpu.o $(LIB_OBJ)
 h3_image_gpu_tests: tests/test_image_gpu.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_gpu_determinism_tests: tests/test_gpu_determinism.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_audio_vae_test: tests/test_real_audio_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -135,7 +138,8 @@ h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
 
 test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	h3_edit_presentation_tests h3_text_tests \
-	h3_audio_gpu_tests h3_image_gpu_tests h3_real_audio_vae_test \
+	h3_audio_gpu_tests h3_image_gpu_tests h3_gpu_determinism_tests \
+	h3_real_audio_vae_test \
 	h3_real_audio_encoder_test h3_av_mux_test h3_png_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test \
@@ -164,6 +168,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	fi
 	./h3_audio_gpu_tests
 	./h3_image_gpu_tests
+	./h3_gpu_determinism_tests
 	@if test -f MiniMax-H3/FL2VA/audio_vae/model.safetensors && \
 	         test -f misc/fixtures/h3_real_audio_vae_37.safetensors; then \
 		./h3_real_audio_vae_test; \
@@ -341,7 +346,8 @@ clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_edit_presentation_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
-		h3_audio_gpu_tests h3_image_gpu_tests h3_real_audio_vae_test \
+		h3_audio_gpu_tests h3_image_gpu_tests h3_gpu_determinism_tests \
+		h3_real_audio_vae_test \
 		h3_real_audio_encoder_test h3_av_mux_test h3_png_test \
 		h3_real_video_encoder_test h3_real_qwen_vision_test \
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \

@@ -719,6 +719,38 @@ static void test_dit_names(void) {
     CHECK(h3_dit_names_for((h3_dit_family)99) == NULL);
 }
 
+static void test_image_dit_bookkeeping(void) {
+    h3_layout layout;
+    h3_layout_summary summary;
+    char error[256];
+    CHECK(h3_layout_build_image(5, 32, 32, NULL, 0, &layout, error,
+                                sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 5, &summary, error, sizeof(error)));
+    CHECK(layout.seq_len == 5 + 256);
+    CHECK(layout.audio_target_rows == 0 && layout.img_target_rows == 256);
+    CHECK(summary.audio_condition == 0 && summary.audio_target == 0);
+    CHECK(summary.video_condition == 0 && summary.video_target == 256);
+    CHECK(summary.video_target_start == 5);
+    CHECK(layout.segment_count == 2);
+    CHECK(layout.segments[0].kind == H3_SEG_TEXT &&
+          layout.segments[1].kind == H3_SEG_VIDEO);
+    h3_layout_free(&layout);
+
+    for (int step = 0; step < H3_IMAGE_STEPS; step++)
+        CHECK(h3_dit_image_head_for_step(step) == step);
+    CHECK(h3_dit_image_head_for_step(-1) == -1);
+    CHECK(h3_dit_image_head_for_step(H3_IMAGE_STEPS) == -1);
+    CHECK(h3_dit_image_rows(NULL) == 0);
+
+    h3_sigma_schedule schedule;
+    CHECK(h3_image_schedule_build(&schedule));
+    for (int step = 0; step < H3_IMAGE_STEPS; step++) {
+        CHECK(schedule.video[step] == schedule.audio[step]);
+        for (int other = 0; other < step; other++)
+            CHECK(schedule.video[step] != schedule.video[other]);
+    }
+}
+
 static void test_missing_weight_names(void) {
     const h3_dit_names *image = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
     const h3_dit_names *video = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
@@ -935,6 +967,7 @@ int main(void) {
     test_image_patchify();
     test_image_qkv_interleave();
     test_dit_names();
+    test_image_dit_bookkeeping();
     test_qkv_slab_plan();
     test_missing_weight_names();
     test_image_vae_tiles();

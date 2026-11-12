@@ -212,14 +212,15 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	@if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
 	         test -f misc/fixtures/h3_image_dit_step.safetensors && \
 	         test -f misc/fixtures/h3_image_text_256.safetensors; then \
-		rm -f h3_image_dit_velocity.bin.step*; \
+		rm -f h3_image_dit_velocity.bin; \
 		for mode in stream bf16 int8; do \
 			./h3_real_image_dit_test $(H3_IMAGE_DIR)/transformer_diffusers \
 				misc/fixtures/h3_image_dit_step.safetensors \
 				misc/fixtures/h3_image_text_256.safetensors $$mode \
-				h3_image_dit_velocity.bin || exit 1; \
+				h3_image_dit_velocity.bin \
+				misc/fixtures/h3_image_dit_step_f32.safetensors || exit 1; \
 		done; \
-		rm -f h3_image_dit_velocity.bin.step*; \
+		rm -f h3_image_dit_velocity.bin; \
 	else \
 		echo "skip: image DiT weights/step fixtures are not installed"; \
 	fi

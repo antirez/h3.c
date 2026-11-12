@@ -36,6 +36,35 @@ int h3_image_parse_size(const char *text, int *width, int *height);
  * the quadratic attention time is). */
 const char *h3_image_canvas_error(int canvas_height, int canvas_width);
 
+#define H3_REFERENCE_CANVAS_MULTIPLE 32
+#define H3_REFERENCE_MIN_SHORT_EDGE 1024
+#define H3_REFERENCE_MAX_SHORT_EDGE 2048
+#define H3_VISION_MIN_SHORT_EDGE 1024
+#define H3_VISION_MAX_SHORT_EDGE 1024
+
+/* Reference sizing of an edit (MiniMaxH3ImageEditResizeStep): a short edge in
+ * [min_short, max_short] keeps the size, else the image is scaled to put the
+ * short edge on the nearer bound and each side rounds half-to-even to a
+ * multiple of 32 (at least 32). Returns 0 for a non-positive argument or a
+ * result beyond INT32_MAX. */
+int h3_image_edit_bound_short_edge(int w, int h, int min_short, int max_short,
+                                   int *out_w, int *out_h);
+/* Qwen smart_resize of the vision copy: factor 32, min_pixels 65536,
+ * max_pixels 16777216. Returns 0 for an aspect ratio above 200. */
+int h3_image_edit_smart_resize(int w, int h, int *out_w, int *out_h);
+
+typedef struct {
+    int vae_w, vae_h;       /* VAE copy: bound_short_edge(1024, 2048) */
+    int crop_w, crop_h;     /* top-left crop to multiples of 16 */
+    int latent_w, latent_h; /* crop / 16, cut to even sides */
+    int vision_w, vision_h; /* bound_short_edge(1024, 1024), then smart_resize */
+    int vision_tokens;      /* vision_w * vision_h / 1024 */
+    int dit_rows;           /* latent_w * latent_h / 4 */
+} h3_image_reference_geometry;
+/* Returns 0 when a side is below 32 or the vision aspect ratio is above 200. */
+int h3_image_edit_reference_geometry(int w, int h,
+                                     h3_image_reference_geometry *geometry);
+
 /* Whether the first half of the image checkpoint's FC1 (ff.net.0.proj) rows is
  * the SwiGLU gate, the order the fused kernels expect. 0 means the loader swaps
  * the halves. */

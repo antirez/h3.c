@@ -2,6 +2,7 @@
 #define H3_IMAGE_VAE_ENCODE_H
 
 #include "h3_gpu.h"
+#include "h3_image.h"
 #include "h3_image_vae.h"
 
 #include <stddef.h>
@@ -11,21 +12,8 @@
  * diffusers MiniMax-H3-Image pipeline does it. Images are planar RGB bytes
  * [3][height][width]. */
 
-#define H3_REFERENCE_CANVAS_MULTIPLE 32
-#define H3_REFERENCE_MIN_SHORT_EDGE 1024
-#define H3_REFERENCE_MAX_SHORT_EDGE 2048
-#define H3_VISION_MIN_SHORT_EDGE 1024
-#define H3_VISION_MAX_SHORT_EDGE 1024
 /* The level reference latents are noised to: t in t * x + (1 - t) * noise. */
 #define H3_REFERENCE_NOISE_AUG 0.999f
-
-/* bound_short_edge: a short edge within [min_short_edge, max_short_edge] keeps
- * the size, else the image is scaled to put the short edge on the nearer bound
- * and both sides round half-to-even to a multiple, at least one multiple.
- * Returns 0 for a non-positive argument or a size beyond INT32_MAX. */
-int h3_reference_bound_short_edge(int width, int height, int min_short_edge,
-                                  int max_short_edge, int multiple,
-                                  int *out_width, int *out_height);
 
 /* PIL Image.resize(resample=LANCZOS) byte for byte: 8-bit fixed-point
  * coefficients, a horizontal pass then a vertical pass, each rounded to bytes.

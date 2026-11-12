@@ -1069,23 +1069,91 @@ static void test_reference_size_rule(void) {
     };
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
         int width = 0, height = 0;
-        CHECK(h3_reference_bound_short_edge(
+        CHECK(h3_image_edit_bound_short_edge(
             cases[index].width, cases[index].height,
             H3_REFERENCE_MIN_SHORT_EDGE, H3_REFERENCE_MAX_SHORT_EDGE,
-            H3_REFERENCE_CANVAS_MULTIPLE, &width, &height));
+            &width, &height));
         CHECK(width == cases[index].reference_w &&
               height == cases[index].reference_h);
-        CHECK(h3_reference_bound_short_edge(
+        CHECK(h3_image_edit_bound_short_edge(
             cases[index].width, cases[index].height,
             H3_VISION_MIN_SHORT_EDGE, H3_VISION_MAX_SHORT_EDGE,
-            H3_REFERENCE_CANVAS_MULTIPLE, &width, &height));
+            &width, &height));
         CHECK(width == cases[index].vision_w && height == cases[index].vision_h);
     }
     int width, height;
-    CHECK(!h3_reference_bound_short_edge(0, 256, 1024, 2048, 32, &width, &height));
-    CHECK(!h3_reference_bound_short_edge(256, 256, 1024, 2048, 0, &width, &height));
-    CHECK(!h3_reference_bound_short_edge(33, 2000000000, 1024, 2048, 32, &width,
-                                         &height));
+    CHECK(!h3_image_edit_bound_short_edge(0, 256, 1024, 2048, &width, &height));
+    CHECK(!h3_image_edit_bound_short_edge(256, 256, 0, 2048, &width, &height));
+    CHECK(!h3_image_edit_bound_short_edge(33, 2000000000, 1024, 2048, &width,
+                                          &height));
+}
+
+static void test_image_edit_bound_short_edge(void) {
+    /* (w, h) -> VAE copy size, then the vision copy's first stage. */
+    const struct { int w, h, vae_w, vae_h, stage_w, stage_h; } cases[] = {
+        {1024, 1024, 1024, 1024, 1024, 1024}, {256, 256, 1024, 1024, 1024, 1024},
+        {250, 370, 1024, 1504, 1024, 1504}, {3000, 2000, 3000, 2000, 1536, 1024},
+        {4000, 3000, 2720, 2048, 1376, 1024}, {640, 480, 1376, 1024, 1376, 1024},
+        {2049, 2049, 2048, 2048, 1024, 1024}, {1500, 1024, 1500, 1024, 1500, 1024},
+        {1024, 1500, 1024, 1500, 1024, 1500}, {2000, 3000, 2000, 3000, 1024, 1536}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int w, h;
+        CHECK(h3_image_edit_bound_short_edge(cases[index].w, cases[index].h,
+                                             1024, 2048, &w, &h));
+        CHECK(w == cases[index].vae_w && h == cases[index].vae_h);
+        CHECK(h3_image_edit_bound_short_edge(cases[index].w, cases[index].h,
+                                             1024, 1024, &w, &h));
+        CHECK(w == cases[index].stage_w && h == cases[index].stage_h);
+    }
+}
+
+static void test_image_edit_smart_resize(void) {
+    /* (h, w) -> (h, w) */
+    const struct { int h, w, out_h, out_w; } cases[] = {
+        {1024, 1024, 1024, 1024}, {1024, 1500, 1024, 1504},
+        {1504, 1024, 1504, 1024}, {1024, 1040, 1024, 1024},
+        {1024, 1056, 1024, 1056}, {200, 200, 256, 256},
+        {4096, 8192, 2880, 5792}, {32, 32, 256, 256}, {100, 40, 416, 192}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int w, h;
+        CHECK(h3_image_edit_smart_resize(cases[index].w, cases[index].h, &w, &h));
+        CHECK(w == cases[index].out_w && h == cases[index].out_h);
+    }
+    int w, h;
+    CHECK(!h3_image_edit_smart_resize(6500, 32, &w, &h));
+}
+
+static void test_image_edit_geometry(void) {
+    h3_image_reference_geometry g;
+    CHECK(h3_image_edit_reference_geometry(256, 256, &g));
+    CHECK(g.vae_w == 1024 && g.vae_h == 1024 && g.crop_w == 1024 &&
+          g.crop_h == 1024 && g.latent_w == 64 && g.latent_h == 64 &&
+          g.dit_rows == 1024 && g.vision_w == 1024 && g.vision_h == 1024 &&
+          g.vision_tokens == 1024);
+    CHECK(h3_image_edit_reference_geometry(1500, 1024, &g));
+    CHECK(g.vae_w == 1500 && g.vae_h == 1024 && g.crop_w == 1488 &&
+          g.crop_h == 1024 && g.latent_w == 92 && g.latent_h == 64 &&
+          g.dit_rows == 46 * 32 && g.vision_w == 1504 && g.vision_h == 1024 &&
+          g.vision_tokens == 1504);
+    CHECK(h3_image_edit_reference_geometry(1046, 1050, &g));
+    CHECK(g.crop_w == 1040 && g.crop_h == 1040 && g.latent_w == 64 &&
+          g.latent_h == 64);
+    CHECK(!h3_image_edit_reference_geometry(31, 100, &g));
+}
+
+static void test_image_edit_aug_constant(void) {
+    float aug = H3_REFERENCE_NOISE_AUG, remainder = 1.0f - H3_REFERENCE_NOISE_AUG;
+    float decimal = 0.001f;
+    uint32_t aug_bits, remainder_bits, decimal_bits;
+    memcpy(&aug_bits, &aug, 4);
+    memcpy(&remainder_bits, &remainder, 4);
+    memcpy(&decimal_bits, &decimal, 4);
+    CHECK(aug_bits == 0x3F7FBE77u);
+    CHECK(remainder_bits == 0x3A831200u);
+    CHECK(decimal_bits == 0x3A83126Fu);
+    CHECK(remainder != decimal);
 }
 
 static void test_reference_resize_lanczos(void) {
@@ -1272,6 +1340,10 @@ int main(void) {
     test_image_unpack_2d();
     test_image_vae_config_parse();
     test_reference_size_rule();
+    test_image_edit_bound_short_edge();
+    test_image_edit_smart_resize();
+    test_image_edit_geometry();
+    test_image_edit_aug_constant();
     test_reference_resize_lanczos();
     test_reference_pipeline_steps();
     test_metal_probe();

@@ -24,33 +24,6 @@ static void fail(char *error, size_t error_size, const char *format, ...) {
     va_end(arguments);
 }
 
-int h3_reference_bound_short_edge(int width, int height, int min_short_edge,
-                                  int max_short_edge, int multiple,
-                                  int *out_width, int *out_height) {
-    if (width < 1 || height < 1 || min_short_edge < 1 ||
-        max_short_edge < min_short_edge || multiple < 1 || !out_width ||
-        !out_height) return 0;
-    int short_edge = width < height ? width : height;
-    if (short_edge >= min_short_edge && short_edge <= max_short_edge) {
-        *out_width = width;
-        *out_height = height;
-        return 1;
-    }
-    double scale = (double)(short_edge < min_short_edge ? min_short_edge :
-                            max_short_edge) / short_edge;
-    double sides[2] = {width, height};
-    int sized[2];
-    for (int side = 0; side < 2; side++) {
-        double units = nearbyint(sides[side] * scale / multiple);
-        if (units < 1.0) units = 1.0;
-        if (units * multiple > (double)INT32_MAX) return 0;
-        sized[side] = (int)units * multiple;
-    }
-    *out_width = sized[0];
-    *out_height = sized[1];
-    return 1;
-}
-
 typedef struct {
     int ksize;
     int *bounds;

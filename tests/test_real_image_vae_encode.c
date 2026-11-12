@@ -113,10 +113,10 @@ int main(int argc, char **argv) {
             H3_DTYPE_U8, (size_t)3 * resized_h * resized_w);
 
         int size_w, size_h, vision_w, vision_h;
-        if (!h3_reference_bound_short_edge(width, height, bounds[0], bounds[1],
-                H3_REFERENCE_CANVAS_MULTIPLE, &size_w, &size_h) ||
-            !h3_reference_bound_short_edge(width, height, bounds[2], bounds[3],
-                H3_REFERENCE_CANVAS_MULTIPLE, &vision_w, &vision_h))
+        if (!h3_image_edit_bound_short_edge(width, height, bounds[0], bounds[1],
+                &size_w, &size_h) ||
+            !h3_image_edit_bound_short_edge(width, height, bounds[2], bounds[3],
+                &vision_w, &vision_h))
             die("size rule failed");
         if (size_w != resized_w || size_h != resized_h ||
             vision_h != sizes[10] || vision_w != sizes[11])
@@ -196,6 +196,30 @@ int main(int argc, char **argv) {
         printf("  %.3f GiB allocated, %.3f GPU seconds\n",
                (double)got.gpu_stats.allocated_bytes /
                    (1024.0 * 1024.0 * 1024.0), got.gpu_stats.gpu_seconds);
+
+        if (index == 0) {
+            h3_reference_latents seeded;
+            if (!h3_image_vae_encode(weights, "h3_shaders.metal", resized,
+                                     resized_h, resized_w, NULL, 7, NULL, NULL,
+                                     &seeded, error, sizeof(error)))
+                die(error);
+            if (seeded.latent_height != latent_h ||
+                seeded.latent_width != latent_w)
+                die("seeded encoder returned the wrong shape");
+            size_t unequal = 0;
+            for (size_t item = 0; item < 24 * latent_plane; item++) {
+                if (!isfinite(seeded.latents[item]))
+                    die("seeded encoder returned non-finite latents");
+                if (seeded.latents[item] != got.latents[item]) unequal++;
+            }
+            double seeded_l2 = relative_l2(seeded.latents, got.latents,
+                                           24 * latent_plane, &maximum);
+            printf("  seeded noise: %zu of %zu latents differ, rel-L2 %.3g\n",
+                   unequal, 24 * latent_plane, seeded_l2);
+            if (unequal < 24 * latent_plane / 2 || seeded_l2 < 1e-3)
+                die("seeded noise did not change the sample");
+            h3_reference_latents_free(&seeded);
+        }
 
         free(exact); free(rows); free(noised);
         h3_reference_latents_free(&got);

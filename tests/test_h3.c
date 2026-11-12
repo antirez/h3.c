@@ -500,22 +500,18 @@ static void test_image_layout(void) {
 }
 
 static void test_image_rope_inv_freq(void) {
-    const double dit[16] = {
-        1.0, 0.5623413, 0.31622776, 0.17782794, 0.1, 0.05623413, 0.031622778,
-        0.017782794, 0.01, 0.0056234133, 0.0031622778, 0.0017782794, 0.001,
-        0.00056234130, 0.00031622779, 0.00017782794
+    const uint32_t dit[16] = {
+        0x3f800000, 0x3f0ff59a, 0x3ea1e89b, 0x3e361887, 0x3dcccccd, 0x3d6655c2,
+        0x3d0186e3, 0x3c91ad39, 0x3c23d70a, 0x3bb8449c, 0x3b4f3e38, 0x3ae91528,
+        0x3a83126f, 0x3a136a16, 0x39a5cb60, 0x393a7753
     };
     float values[16];
     h3_image_dit_inv_freq(values);
     for (size_t index = 0; index < 16; index++)
-        CHECK(fabs(values[index] - dit[index]) <= 2e-7 * dit[index]);
-    const double vae[8] = {
-        1.0, 0.5623413, 0.31622776, 0.17782794, 0.1, 0.05623413, 0.031622778,
-        0.017782794
-    };
+        CHECK(float_bits(values[index]) == dit[index]);
     h3_image_vae_inv_freq(values);
     for (size_t index = 0; index < 8; index++)
-        CHECK(fabs(values[index] - vae[index]) <= 2e-7 * vae[index]);
+        CHECK(float_bits(values[index]) == dit[index]);
 }
 
 static void test_image_timestep_features(void) {

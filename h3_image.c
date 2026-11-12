@@ -35,19 +35,19 @@ int h3_image_canvas(int height, int width, int min_area,
     return 1;
 }
 
-static void rope_inv_freq(float *out, int count, double base, double span) {
+static void rope_inv_freq(float *out, int count, int index_step, float base,
+                          int span) {
     for (int index = 0; index < count; index++) {
-        out[index] = (float)(1.0 / pow(base, (double)index / span));
+        out[index] = 1.0f / powf(base, (float)(index * index_step) / (float)span);
     }
 }
 
 void h3_image_dit_inv_freq(float *out) {
-    rope_inv_freq(out, H3_IMAGE_DIT_ROPE_FREQS, 10000.0,
-                  H3_IMAGE_DIT_ROPE_FREQS);
+    rope_inv_freq(out, H3_IMAGE_DIT_ROPE_FREQS, 2, 10000.0f, 32);
 }
 
 void h3_image_vae_inv_freq(float *out) {
-    rope_inv_freq(out, H3_IMAGE_VAE_ROPE_FREQS, 100.0, H3_IMAGE_VAE_ROPE_FREQS);
+    rope_inv_freq(out, H3_IMAGE_VAE_ROPE_FREQS, 1, 100.0f, 8);
 }
 
 int h3_image_qkv_source(size_t dest_row, unsigned heads, unsigned head_dim,

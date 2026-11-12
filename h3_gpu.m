@@ -802,6 +802,16 @@ int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *opaque, const char *path,
         opaque, path, file_offset, elements, 0, 1, 1, error, error_size);
 }
 
+int h3_gpu_tensor_stream_file_bf16_range(h3_gpu_tensor *opaque,
+                                         size_t destination_offset,
+                                         const char *path,
+                                         uint64_t file_offset, size_t elements,
+                                         char *error, size_t error_size) {
+    return h3_gpu_tensor_read_file_bf16_mode(
+        opaque, path, file_offset, elements, destination_offset, 0, 1,
+        error, error_size);
+}
+
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor) {
     if (!tensor) return;
     @autoreleasepool {

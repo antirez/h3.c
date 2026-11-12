@@ -75,7 +75,47 @@ h3_dit *h3_dit_load_conditioned(
                          size_t condition_audio_elements,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size);
+
+/* Load the text-to-image transformer (diffusers MiniMax-H3-Image layout). The
+ * packed layout is [text | latent rows] for a latent_height x latent_width
+ * canvas; the schedule is the fixed six-step grid. `active_blocks` thins the
+ * 50 blocks as for video. Options have the video loaders' meaning. */
+h3_dit *h3_dit_load_image(const char *weight_directory,
+                          const char *shader_source_path,
+                          const h3_text_embedding *text,
+                          int latent_height, int latent_width,
+                          unsigned active_blocks,
+                          int ssd_streaming,
+                          int use_slower_bf16_mlp,
+                          int use_slower_bf16_qkv,
+                          int use_slower_bf16_attention_output,
+                          int use_slower_row_major_attention_output,
+                          int use_slower_unfused_int8_inputs,
+                          int use_slower_unfused_qkv_rope,
+                          int use_slower_scalar_qkv_rms,
+                          int use_slower_uncached_int8_scales,
+                          int use_slower_dynamic_fc1_k,
+                          int use_slower_grouped_quantizer,
+                          int use_int8_row_fc2,
+                          h3_dit_progress progress, void *progress_opaque,
+                          char *error, size_t error_size);
 void h3_dit_free(h3_dit *dit);
+
+/* One image velocity evaluation with output head `step`. latent_rows is the
+ * patchified F32 [rows, 96] canvas, velocity_rows receives F32 [rows, 96]
+ * straight from the F32 head with no BF16 rounding. */
+int h3_dit_forward_image(h3_dit *dit, int step, const float *latent_rows,
+                         float *velocity_rows, char *error, size_t error_size);
+
+/* Rows of the generated image (P) of an image transformer, else 0. */
+size_t h3_dit_image_rows(const h3_dit *dit);
+
+/* Output head used at a sampling step, or -1 outside [0, H3_IMAGE_STEPS). */
+int h3_dit_image_head_for_step(int step);
+
+/* Copy the refined text rows [tokens, 5376] as BF16, for diagnostics. */
+int h3_dit_read_refined_text(const h3_dit *dit, uint16_t *values,
+                             size_t elements);
 
 /* Reset mutable sampler state and replace seed-dependent condition rows before
  * reusing an otherwise identical prepared transformer. */

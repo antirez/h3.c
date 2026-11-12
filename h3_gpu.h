@@ -72,6 +72,13 @@ int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *tensor,
 int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                    uint64_t file_offset, size_t elements,
                                    char *error, size_t error_size);
+/* Streaming read of `elements` BF16 values into the tensor starting at element
+ * `destination_offset`, uncached as above. */
+int h3_gpu_tensor_stream_file_bf16_range(h3_gpu_tensor *tensor,
+                                         size_t destination_offset,
+                                         const char *path,
+                                         uint64_t file_offset, size_t elements,
+                                         char *error, size_t error_size);
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor);
 size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor);
 h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor);

@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
     params.ssd_streaming = stream;
     params.use_int8 = int8;
     params.on_progress = progress;
-    h3_image_hooks hooks = {noise, NULL, NULL, NULL};
+    h3_image_hooks hooks = {.noise = noise};
     printf("mode %s: \"%s\" at %dx%d, min area %d, seed %d\n", mode, prompt,
            width, height, min_area, seed);
     double started = seconds_now();

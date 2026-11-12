@@ -20,6 +20,13 @@ int h3_ffmpeg_read_image_f32(const char *path, int width, int height,
                              h3_image_fit fit, float **pixels,
                              char *error, size_t error_size);
 
+/* Decode one image at its own size with its EXIF orientation applied (the
+ * result is the upright image). The caller owns planar RGB bytes
+ * [3][height][width]. Rejects sides above 16384 and more than 134217728
+ * pixels. */
+int h3_ffmpeg_read_image_u8(const char *path, int *width, int *height,
+                            uint8_t **planar, char *error, size_t error_size);
+
 /* Decode a 24 fps visual stream to channel-major F32 [3,T,H,W] in [0,1].
  * The returned frame count is trimmed down to the released 5+17k cadence. */
 int h3_ffmpeg_read_video_f32(const char *path, int width, int height,

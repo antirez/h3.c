@@ -15,12 +15,13 @@ LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
 	h3_terminal.c h3_vision_encoder.c h3_multimodal.c h3_image.c \
-	h3_vae_tiles.c h3_image_vae.c h3_image_vae_encode.c h3_image_pipeline.c
+	h3_vae_tiles.c h3_image_vae.c h3_image_vae_encode.c h3_image_pipeline.c \
+	h3_image_edit.c
 LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity image-check clean
+.PHONY: all test parity real-parity image-check image-edit-check clean
 
 all: h3 libh3.a
 
@@ -70,6 +71,9 @@ h3_png_test: tests/test_png.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_image_png_test: tests/test_image_png.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_image_edit_tests: tests/test_image_edit.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_real_video_encoder_test: tests/test_real_video_encoder.o $(LIB_OBJ)
@@ -130,6 +134,9 @@ h3_real_image_text_test: tests/test_real_image_text.o $(LIB_OBJ)
 h3_real_image_e2e_test: tests/test_real_image_e2e.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_real_image_edit_e2e_test: tests/test_real_image_edit_e2e.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -145,7 +152,8 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test \
 	h3_real_image_vae_test h3_real_image_vae_encode_test \
 	h3_real_image_dit_block_test h3_real_image_dit_test h3_real_image_dit_large_test \
-	h3_real_image_text_test h3_real_image_e2e_test
+	h3_real_image_text_test h3_real_image_e2e_test h3_image_edit_tests \
+	h3_real_image_edit_e2e_test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -184,6 +192,14 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	@if command -v ffmpeg >/dev/null 2>&1; then \
 		./h3_av_mux_test; \
 		./h3_png_test; \
+		tokenizer=; model=; \
+		if test -f $(H3_IMAGE_DIR)/tokenizer/tokenizer.json; then \
+			tokenizer=$(H3_IMAGE_DIR)/tokenizer/tokenizer.json; \
+			if test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors; then \
+				model=$(H3_IMAGE_DIR); \
+			fi; \
+		fi; \
+		./h3_image_edit_tests $$tokenizer $$model || exit 1; \
 	else \
 		echo "skip: FFmpeg is not installed"; \
 	fi
@@ -248,6 +264,28 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		rm -f h3_image_e2e_latent.bin; \
 	else \
 		echo "skip: image end-to-end weights/fixture are not installed"; \
+	fi
+	@if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
+	         test -f $(H3_IMAGE_DIR)/text_encoder/model-00014-of-00014.safetensors && \
+	         test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
+	         test -f misc/fixtures/h3_image_edit_e2e_512.safetensors && \
+	         test -f misc/fixtures/h3_image_edit_vae.safetensors && \
+	         command -v ffmpeg >/dev/null 2>&1; then \
+		rm -f h3_image_edit_e2e_latent.bin; \
+		for mode in stream bf16 int8; do \
+			./h3_real_image_edit_e2e_test $(H3_IMAGE_DIR) \
+				misc/fixtures/h3_image_edit_e2e_512.safetensors $$mode \
+				misc/fixtures/h3_image_edit_vae.safetensors \
+				h3_image_edit_e2e_latent.bin || exit 1; \
+		done; \
+		rm -f h3_image_edit_e2e_latent.bin; \
+	elif test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
+	         test -f misc/fixtures/h3_image_edit_vae.safetensors && \
+	         command -v ffmpeg >/dev/null 2>&1; then \
+		./h3_real_image_edit_e2e_test $(H3_IMAGE_DIR) - refs \
+			misc/fixtures/h3_image_edit_vae.safetensors; \
+	else \
+		echo "skip: image edit end-to-end weights/fixture are not installed"; \
 	fi
 	@if test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
 	         test -f misc/fixtures/h3_image_vae_decode.safetensors; then \
@@ -318,6 +356,28 @@ image-check: h3 h3_image_png_test
 	./h3_image_png_test 512 512 $$dir/a.png $$dir/b.png; \
 	status=$$?; rm -rf $$dir; exit $$status
 
+# Two default-mode edits of a synthetic 256x256 reference must give a valid
+# 512x512 PNG and identical bytes, and the text-to-image image-check must still
+# pass. It runs the 62 GB text encoder and transformer: through the guard
+# wrapper like image-check. It skips when the image checkpoint is not installed.
+image-edit-check: h3 h3_image_png_test
+	@if ! test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors || \
+	    ! command -v ffmpeg >/dev/null 2>&1; then \
+		echo "skip: image weights or FFmpeg are not installed"; exit 0; \
+	fi; \
+	$(MAKE) image-check || exit 1; \
+	dir=$$(mktemp -d) && \
+	ffmpeg -v error -f lavfi -i testsrc2=size=256x256 -frames:v 1 \
+		$$dir/ref.png && \
+	for run in a b; do \
+		./h3 -d $(H3_IMAGE_DIR) -p "<Picture 1> the same scene at night" \
+			--ref-image $$dir/ref.png --size 512x512 \
+			--min-generation-area 1024 --seed 42 \
+			-o $$dir/$$run.png || { rm -rf $$dir; exit 1; }; \
+	done && \
+	./h3_image_png_test 512 512 $$dir/a.png $$dir/b.png; \
+	status=$$?; rm -rf $$dir; exit $$status
+
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors
 	./h3_bf16_tests misc/fixtures/h3_dit_bf16.safetensors
@@ -356,5 +416,6 @@ clean:
 		h3_real_image_vae_encode_test \
 		h3_real_image_dit_block_test h3_real_image_dit_test \
 		h3_real_image_dit_large_test h3_real_image_text_test h3_real_image_e2e_test h3_image_png_test \
+		h3_image_edit_tests h3_real_image_edit_e2e_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

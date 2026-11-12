@@ -263,6 +263,121 @@ int h3_ffmpeg_read_image_f32(const char *path, int width, int height,
     return 1;
 }
 
+int h3_ffmpeg_read_image_u8(const char *path, int *width, int *height,
+                            uint8_t **planar, char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (width) *width = 0;
+    if (height) *height = 0;
+    if (planar) *planar = NULL;
+    if (!path || !*path || !width || !height || !planar) {
+        fail(error, error_size, "invalid FFmpeg image input arguments");
+        return 0;
+    }
+    int stream[2];
+    if (pipe(stream) != 0) {
+        fail(error, error_size, "cannot create FFmpeg image pipe: %s",
+             strerror(errno));
+        return 0;
+    }
+    char *arguments[] = {
+        "ffmpeg", "-v", "error", "-i", (char *)path, "-frames:v", "1",
+        "-c:v", "ppm", "-pix_fmt", "rgb24", "-f", "image2pipe", "pipe:1", NULL
+    };
+    posix_spawn_file_actions_t actions;
+    int code = posix_spawn_file_actions_init(&actions);
+    if (!code) code = posix_spawn_file_actions_adddup2(
+        &actions, stream[1], STDOUT_FILENO);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[0]);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[1]);
+    pid_t child = -1;
+    if (!code) code = posix_spawnp(&child, ffmpeg_program(), &actions, NULL,
+                                    arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(stream[1]);
+    if (code) {
+        close(stream[0]);
+        fail(error, error_size, "cannot start FFmpeg: %s", strerror(code));
+        return 0;
+    }
+    /* The ppm header is "P6\n<width> <height>\n255\n". */
+    char header[64];
+    size_t header_size = 0;
+    int newlines = 0;
+    while (newlines < 3 && header_size + 1 < sizeof(header)) {
+        char byte;
+        ssize_t amount = read(stream[0], &byte, 1);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount <= 0) break;
+        header[header_size++] = byte;
+        if (byte == '\n') newlines++;
+    }
+    header[header_size] = '\0';
+    int parsed_width = 0, parsed_height = 0, maximum = 0;
+    uint8_t *interleaved = NULL;
+    uint8_t *planes = NULL;
+    size_t bytes = 0, received = 0;
+    int ok = newlines == 3 &&
+             sscanf(header, "P6 %d %d %d", &parsed_width, &parsed_height,
+                    &maximum) == 3 && maximum == 255 && parsed_width > 0 &&
+             parsed_height > 0 && parsed_width <= 16384 &&
+             parsed_height <= 16384 &&
+             (int64_t)parsed_width * parsed_height <= 134217728;
+    int too_large = 0;
+    if (ok) {
+        bytes = (size_t)parsed_width * (size_t)parsed_height * 3;
+        interleaved = malloc(bytes);
+        planes = malloc(bytes);
+        if (!interleaved || !planes) {
+            fail(error, error_size, "out of memory decoding input image");
+            ok = 0;
+        }
+    } else if (newlines == 3 && sscanf(header, "P6 %d %d", &parsed_width,
+                                       &parsed_height) == 2) {
+        too_large = 1;
+    }
+    while (ok && received < bytes) {
+        ssize_t amount = read(stream[0], interleaved + received,
+                              bytes - received);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount <= 0) break;
+        received += (size_t)amount;
+    }
+    close(stream[0]);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        free(interleaved);
+        free(planes);
+        fail(error, error_size, "cannot wait for FFmpeg: %s", strerror(errno));
+        return 0;
+    }
+    if (ok && (received != bytes || !WIFEXITED(status) ||
+               WEXITSTATUS(status) != 0)) ok = 0;
+    if (!ok) {
+        free(interleaved);
+        free(planes);
+        if (error && error_size && !error[0]) {
+            if (too_large)
+                fail(error, error_size, "image %s is %dx%d: sides are limited "
+                     "to 16384 and the area to 134217728 pixels", path,
+                     parsed_width, parsed_height);
+            else
+                fail(error, error_size, "FFmpeg could not decode image %s",
+                     path);
+        }
+        return 0;
+    }
+    size_t area = (size_t)parsed_width * (size_t)parsed_height;
+    for (size_t pixel = 0; pixel < area; pixel++)
+        for (size_t channel = 0; channel < 3; channel++)
+            planes[channel * area + pixel] = interleaved[3 * pixel + channel];
+    free(interleaved);
+    *width = parsed_width;
+    *height = parsed_height;
+    *planar = planes;
+    return 1;
+}
+
 int h3_ffmpeg_read_video_f32(const char *path, int width, int height,
                              int max_frames, float **pixels, int *frames,
                              char *error, size_t error_size) {

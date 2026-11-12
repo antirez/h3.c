@@ -136,11 +136,24 @@ typedef struct {
     1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
 }
 
+#define H3_IMAGE_MAX_REFERENCES 8
+
+/* One edit reference: an image file FFmpeg can read. The prompt names it
+ * <Picture N>, N counting from 1 in request order. */
+typedef struct {
+    const char *path;
+} h3_image_reference;
+
 /* Text-to-image request. width and height are the size of the returned image,
  * any positive size; the model runs on a larger canvas when the area is below
  * min_generation_area and the result is resized back. The progress callback
  * reports each phase and each of the six denoising steps; on_frame receives
- * the final image once (frame_index 0, frame_count 1). */
+ * the final image once (frame_index 0, frame_count 1).
+ *
+ * With reference_count > 0 the request edits: the references (at most
+ * H3_IMAGE_MAX_REFERENCES, each with both sides at least 32 pixels) condition
+ * the image, and width and height may both be 0 to return the size of the
+ * first reference. reference_count 0 is text-to-image. */
 typedef struct {
     int width;
     int height;
@@ -171,6 +184,8 @@ typedef struct {
     h3_frame_callback on_frame;
     h3_progress_callback on_progress;
     void *callback_opaque;
+    const h3_image_reference *references;
+    size_t reference_count;
 } h3_image_params;
 
 #define H3_IMAGE_PARAMS_DEFAULT { \

@@ -1293,20 +1293,24 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                             VIDEO_PATCH, error, error_size);
     dit->video_patch_b = f1(dit, names->patch_bias, HIDDEN,
                             error, error_size);
-    dit->audio_patch_w = f2(dit, names->audio_patch_weight, HIDDEN,
-                            AUDIO_CHANNELS, error, error_size);
-    dit->audio_patch_b = f1(dit, names->audio_patch_bias, HIDDEN,
-                            error, error_size);
+    if (names->audio_patch_weight && names->audio_patch_bias) {
+        dit->audio_patch_w = f2(dit, names->audio_patch_weight, HIDDEN,
+                                AUDIO_CHANNELS, error, error_size);
+        dit->audio_patch_b = f1(dit, names->audio_patch_bias, HIDDEN,
+                                error, error_size);
+    }
     dit->final_norm = bf1(dit, names->final_norm, HIDDEN,
                           error, error_size);
     dit->final_video_w = f2(dit, head_weight, VIDEO_PATCH,
                             HIDDEN, error, error_size);
     dit->final_video_b = f1(dit, head_bias, VIDEO_PATCH,
                             error, error_size);
-    dit->final_audio_w = f2(dit, names->audio_head_weight, AUDIO_CHANNELS,
-                            HIDDEN, error, error_size);
-    dit->final_audio_b = f1(dit, names->audio_head_bias, AUDIO_CHANNELS,
-                            error, error_size);
+    if (names->audio_head_weight && names->audio_head_bias) {
+        dit->final_audio_w = f2(dit, names->audio_head_weight, AUDIO_CHANNELS,
+                                HIDDEN, error, error_size);
+        dit->final_audio_b = f1(dit, names->audio_head_bias, AUDIO_CHANNELS,
+                                error, error_size);
+    }
     if (dit->bf16_final && dit->final_video_w && dit->final_video_b &&
         dit->final_audio_w && dit->final_audio_b) {
         h3_gpu_tensor *source[4] = {

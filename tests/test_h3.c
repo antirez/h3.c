@@ -719,6 +719,32 @@ static void test_dit_names(void) {
     CHECK(h3_dit_names_for((h3_dit_family)99) == NULL);
 }
 
+static void test_missing_weight_names(void) {
+    const h3_dit_names *image = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
+    const h3_dit_names *video = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
+    CHECK(image->audio_patch_weight == NULL && image->audio_patch_bias == NULL);
+    CHECK(image->audio_head_weight == NULL && image->audio_head_bias == NULL);
+    CHECK(video->audio_patch_weight && video->audio_patch_bias);
+    CHECK(video->audio_head_weight && video->audio_head_bias);
+    uint64_t shape[2] = {2, 2};
+    char error[256] = "";
+    CHECK(h3_weight_load_bf16(NULL, NULL, image->audio_patch_weight, 2, shape,
+                              error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_f32(NULL, NULL, image->audio_head_bias, 1, shape,
+                             error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_bf16_qkv(NULL, NULL, NULL, "k", "v", 2, 2, 2, error,
+                                  sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_bf16_halves(NULL, NULL, NULL, 4, 2, 1, error,
+                                     sizeof(error)) == NULL);
+    CHECK(error[0] != '\0');
+}
+
 static void test_qkv_slab_plan(void) {
     const uint64_t columns = 5376, slab = 128 * columns;
     unsigned projection;
@@ -910,6 +936,7 @@ int main(void) {
     test_image_qkv_interleave();
     test_dit_names();
     test_qkv_slab_plan();
+    test_missing_weight_names();
     test_image_vae_tiles();
     test_image_unpack_2d();
     test_image_vae_config_parse();

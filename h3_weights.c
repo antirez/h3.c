@@ -145,6 +145,10 @@ static h3_gpu_tensor *load_tensor(const h3_weight_store *store, h3_gpu *gpu,
                                   const char *name, int ndim,
                                   const uint64_t *shape, h3_dtype dtype,
                                   char *error, size_t error_size) {
+    if (!name) {
+        fail(error, error_size, "weight name is missing for this model family");
+        return NULL;
+    }
     const h3_st_header *header = NULL;
     const h3_st_tensor *tensor = h3_weight_find(store, name, &header);
     if (!tensor) {
@@ -206,8 +210,13 @@ static int find_bf16_matrix(const h3_weight_store *store, const char *name,
                             const h3_st_header **header,
                             const h3_st_tensor **tensor,
                             char *error, size_t error_size) {
-    *tensor = h3_weight_find(store, name, header);
+    *tensor = name ? h3_weight_find(store, name, header) : NULL;
     if (!*tensor) {
+        if (!name) {
+            fail(error, error_size,
+                 "weight name is missing for this model family");
+            return 0;
+        }
         fail(error, error_size, "required weight is absent: %s", name);
         return 0;
     }
@@ -280,8 +289,9 @@ h3_gpu_tensor *h3_weight_load_bf16_halves(const h3_weight_store *store,
                                           uint64_t rows, uint64_t columns,
                                           int swap_halves,
                                           char *error, size_t error_size) {
-    if (rows % 2) {
-        fail(error, error_size, "weight %s cannot be split into halves", name);
+    if (!name || rows % 2) {
+        fail(error, error_size, "weight %s cannot be split into halves",
+             name ? name : "(unnamed)");
         return NULL;
     }
     const h3_st_header *header;

@@ -19,18 +19,19 @@ enum { LATENT_CHANNELS = 24, REFERENCE_CASES = 3, SIZES = 12 };
  * transformer): the encoder is F32, so the rows agree to rounding. */
 #define REFERENCE_ROWS_BOUND 2.4e-5
 
-/* PLACEHOLDERS: the parity pair is copied from the text-to-image end-to-end
- * test and the own-resampling pair is a guess. Replace all four with 1.4x the
- * values measured in the gated window. The parity run feeds the fixture's
- * resized copies and noises. */
+/* 1.4x the measured distance to the F32 truth (PSNR lowered by 20 log10 1.4,
+ * the byte miss fraction and the latent rel-L2 scaled by 1.4). At S = 2324
+ * the six free-running steps amplify BF16 rounding: the diffusers BF16
+ * pipeline itself lands at latent rel-L2 0.143 and 24.3 dB from the same
+ * truth. The parity run feeds the fixture's resized copies and noises. */
 typedef struct {
     double psnr, within16, latent;
 } bounds;
-static const bounds BF16_BOUNDS = {26.0, 0.96, 0.107}; /* placeholder */
-static const bounds INT8_BOUNDS = {16.0, 0.74, 0.385}; /* placeholder */
+static const bounds BF16_BOUNDS = {19.8, 0.65, 0.264};
+static const bounds INT8_BOUNDS = {19.6, 0.63, 0.263};
 /* The same run with h3.c's own resampling of the reference. */
-static const bounds OWN_BF16_BOUNDS = {20.0, 0.85, 0.3}; /* placeholder */
-static const bounds OWN_INT8_BOUNDS = {14.0, 0.65, 0.5}; /* placeholder */
+static const bounds OWN_BF16_BOUNDS = {19.8, 0.65, 0.264};
+static const bounds OWN_INT8_BOUNDS = {19.6, 0.63, 0.263};
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_edit_e2e.c: %s\n", message);

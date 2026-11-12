@@ -1,5 +1,6 @@
 #include "h3_host.h"
 #include "h3_dit.h"
+#include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
 #include "h3_image.h"
 #include "h3_image_vae.h"
@@ -7,6 +8,7 @@
 #include "h3_safetensors.h"
 #include "h3_vae_tiles.h"
 #include "h3_terminal.h"
+#include "h3_weights.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -646,6 +648,121 @@ static void test_image_qkv_interleave(void) {
     CHECK(!h3_image_qkv_source(0, 0, 128, &projection, &source));
 }
 
+static void test_dit_names(void) {
+    const h3_dit_names *video = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
+    const h3_dit_names *image = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
+    CHECK(video && image && video != image);
+    CHECK(video->family == H3_DIT_FAMILY_VIDEO);
+    CHECK(image->family == H3_DIT_FAMILY_IMAGE);
+    char name[160];
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 7,
+                            video->qkv));
+    CHECK(strcmp(name, "blocks.7.attn.qkv_proj.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 49, video->fc1));
+    CHECK(strcmp(name, "blocks.49.mlp.fc1.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 0,
+                            video->adaln_bias));
+    CHECK(strcmp(name, "blocks.0.adaln_proj.linear.bias") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 1, 1, video->q_norm));
+    CHECK(strcmp(name, "token_refiner.blocks.1.attn.q_norm.weight") == 0);
+    CHECK(strcmp(video->time_in_weight, "time_embedder.proj_in.weight") == 0);
+    CHECK(strcmp(video->time_out_bias, "time_embedder.proj_out.bias") == 0);
+    CHECK(strcmp(video->condition_weight, "condition_proj.weight") == 0);
+    CHECK(strcmp(video->patch_weight, "video_patch_proj.weight") == 0);
+    CHECK(strcmp(video->final_norm, "final_layer.norm.weight") == 0);
+    CHECK(strcmp(video->final_adaln_weight,
+                 "final_layer.adaln_proj.linear.weight") == 0);
+    CHECK(strcmp(video->refiner_final_norm,
+                 "token_refiner.final_norm.weight") == 0);
+    CHECK(strcmp(video->rope_inv_freq, "rope.inv_freq") == 0);
+    CHECK(video->q == NULL && video->k == NULL && video->v == NULL);
+    CHECK(video->audio_patch_weight && video->audio_head_weight);
+    CHECK(h3_dit_name_format(name, sizeof(name), video->head_weight, 3));
+    CHECK(strcmp(name, "final_layer.video_out.weight") == 0);
+
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 12, image->q));
+    CHECK(strcmp(name, "transformer_blocks.12.attn.to_q.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->v));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.to_v.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->k_norm));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.norm_k.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->out));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.to_out.0.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 49, image->fc1));
+    CHECK(strcmp(name, "transformer_blocks.49.ff.net.0.proj.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 3, image->fc2));
+    CHECK(strcmp(name, "transformer_blocks.3.ff.net.2.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 3,
+                            image->adaln_weight));
+    CHECK(strcmp(name, "transformer_blocks.3.adaln_proj.linear.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 1, 0, image->norm1));
+    CHECK(strcmp(name, "token_refiner.refiner_blocks.0.norm1.weight") == 0);
+    CHECK(strcmp(image->time_in_weight, "time_embedder.linear_1.weight") == 0);
+    CHECK(strcmp(image->time_out_bias, "time_embedder.linear_2.bias") == 0);
+    CHECK(strcmp(image->condition_bias, "context_embedder.bias") == 0);
+    CHECK(strcmp(image->patch_weight, "proj_in.weight") == 0);
+    CHECK(strcmp(image->final_norm, "norm_out.norm.weight") == 0);
+    CHECK(strcmp(image->final_adaln_bias, "norm_out.linear.bias") == 0);
+    CHECK(strcmp(image->refiner_final_norm,
+                 "token_refiner.final_norm.weight") == 0);
+    CHECK(h3_dit_name_format(name, sizeof(name), image->head_weight, 5));
+    CHECK(strcmp(name, "pdd_proj_out.5.weight") == 0);
+    CHECK(h3_dit_name_format(name, sizeof(name), image->head_bias, 0));
+    CHECK(strcmp(name, "pdd_proj_out.0.bias") == 0);
+    CHECK(image->qkv == NULL && image->rope_inv_freq == NULL);
+    CHECK(image->audio_patch_weight == NULL && image->audio_head_weight == NULL);
+
+    char tiny[8];
+    CHECK(!h3_dit_block_name(tiny, sizeof(tiny), image, 0, 0, image->q));
+    CHECK(!h3_dit_block_name(name, sizeof(name), image, 0, 0, NULL));
+    CHECK(!h3_dit_name_format(name, sizeof(name), NULL, 0));
+    CHECK(h3_dit_names_for((h3_dit_family)99) == NULL);
+}
+
+static void test_qkv_slab_plan(void) {
+    const uint64_t columns = 5376, slab = 128 * columns;
+    unsigned projection;
+    uint64_t source, destination;
+    CHECK(h3_weight_qkv_slab(0, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 0 && source == 0 && destination == 0);
+    CHECK(h3_weight_qkv_slab(1, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 1 && source == 0 && destination == slab);
+    CHECK(h3_weight_qkv_slab(5, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 2 && source == slab && destination == 5 * slab);
+    CHECK(h3_weight_qkv_slab(167, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 2 && source == 55 * slab && destination == 167 * slab);
+    CHECK(!h3_weight_qkv_slab(168, 56, 128, columns, &projection, &source,
+                              &destination));
+    CHECK(!h3_weight_qkv_slab(0, 0, 128, columns, &projection, &source,
+                              &destination));
+
+    /* Applying the plan to three small matrices gives the row order that
+     * h3_image_qkv_source describes. */
+    enum { HEADS = 3, DIM = 4, COLUMNS = 5 };
+    int matrices[3][HEADS * DIM * COLUMNS];
+    int grouped[3 * HEADS * DIM * COLUMNS];
+    for (int p = 0; p < 3; p++)
+        for (int index = 0; index < HEADS * DIM * COLUMNS; index++)
+            matrices[p][index] = p * 1000 + index;
+    for (size_t slab_index = 0; slab_index < 3 * HEADS; slab_index++) {
+        CHECK(h3_weight_qkv_slab(slab_index, HEADS, DIM, COLUMNS,
+                                 &projection, &source, &destination));
+        memcpy(grouped + destination, matrices[projection] + source,
+               DIM * COLUMNS * sizeof(int));
+    }
+    for (size_t row = 0; row < 3 * HEADS * DIM; row++) {
+        size_t source_row;
+        CHECK(h3_image_qkv_source(row, HEADS, DIM, &projection, &source_row));
+        CHECK(memcmp(grouped + row * COLUMNS,
+                     matrices[projection] + source_row * COLUMNS,
+                     COLUMNS * sizeof(int)) == 0);
+    }
+}
+
 static void check_tile_axis(int extent, int count, const int *overlaps) {
     h3_vae_tile_axis axis;
     char error[256];
@@ -791,6 +908,8 @@ int main(void) {
     test_image_timestep_features();
     test_image_patchify();
     test_image_qkv_interleave();
+    test_dit_names();
+    test_qkv_slab_plan();
     test_image_vae_tiles();
     test_image_unpack_2d();
     test_image_vae_config_parse();

@@ -722,12 +722,15 @@ h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *opaque, const char *path,
 static int h3_gpu_tensor_read_file_bf16_mode(
                                  h3_gpu_tensor *opaque, const char *path,
                                  uint64_t file_offset, size_t elements,
+                                 size_t destination_offset, int whole,
                                  int uncached,
                                  char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (!opaque || !path || !*path ||
         TENSOR(opaque).dtype != H3_GPU_BF16 ||
-        elements != TENSOR(opaque).elements ||
+        (whole && elements != TENSOR(opaque).elements) ||
+        destination_offset > TENSOR(opaque).elements ||
+        elements > TENSOR(opaque).elements - destination_offset ||
         elements > SIZE_MAX / sizeof(uint16_t) || file_offset > INT64_MAX) {
         if (error && error_size)
             snprintf(error, error_size, "invalid BF16 file read request");
@@ -751,7 +754,8 @@ static int h3_gpu_tensor_read_file_bf16_mode(
 #else
     (void)uncached;
 #endif
-    unsigned char *destination = TENSOR(opaque).buffer.contents;
+    unsigned char *destination = (unsigned char *)TENSOR(opaque).buffer.contents +
+        destination_offset * sizeof(uint16_t);
     size_t completed = 0;
     while (completed < bytes) {
         size_t request = MIN(bytes - completed, (size_t)SSIZE_MAX);
@@ -778,14 +782,24 @@ int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *opaque, const char *path,
                                  uint64_t file_offset, size_t elements,
                                  char *error, size_t error_size) {
     return h3_gpu_tensor_read_file_bf16_mode(
-        opaque, path, file_offset, elements, 0, error, error_size);
+        opaque, path, file_offset, elements, 0, 1, 0, error, error_size);
+}
+
+int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *opaque,
+                                       size_t destination_offset,
+                                       const char *path,
+                                       uint64_t file_offset, size_t elements,
+                                       char *error, size_t error_size) {
+    return h3_gpu_tensor_read_file_bf16_mode(
+        opaque, path, file_offset, elements, destination_offset, 0, 0,
+        error, error_size);
 }
 
 int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *opaque, const char *path,
                                    uint64_t file_offset, size_t elements,
                                    char *error, size_t error_size) {
     return h3_gpu_tensor_read_file_bf16_mode(
-        opaque, path, file_offset, elements, 1, error, error_size);
+        opaque, path, file_offset, elements, 0, 1, 1, error, error_size);
 }
 
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor) {

@@ -59,6 +59,13 @@ h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *gpu, const char *path,
 int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                  uint64_t file_offset, size_t elements,
                                  char *error, size_t error_size);
+/* Read `elements` BF16 values from the file into the tensor starting at element
+ * `destination_offset`; the rest of the tensor is untouched. */
+int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *tensor,
+                                       size_t destination_offset,
+                                       const char *path,
+                                       uint64_t file_offset, size_t elements,
+                                       char *error, size_t error_size);
 /* As above, but ask Darwin to avoid retaining a second copy in the file cache.
  * Intended for large sequential weight streams whose destination is the only
  * useful resident copy. */

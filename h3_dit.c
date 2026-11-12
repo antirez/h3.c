@@ -1,6 +1,8 @@
 #include "h3_dit.h"
 
+#include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
+#include "h3_image.h"
 #include "h3_weights.h"
 
 #include <math.h>
@@ -71,6 +73,9 @@ struct h3_dit {
     h3_gpu *gpu;
     h3_weight_store *weights;
     h3_dit_schedule *schedule;
+    const h3_dit_names *names;
+    int fc1_gate_first;
+    h3_dit_adaln_order adaln_order;
     int fused_mlp;
     int nax_mlp;
     int int8_mlp;
@@ -449,45 +454,77 @@ static uint32_t token_reduced_parent(const h3_dit *dit, uint32_t full_row) {
            (local % spatial_width) / 2;
 }
 
-static int load_block(h3_dit *dit, h3_dit_block *block, const char *prefix,
-                      char *error, size_t error_size) {
-    char name[160];
-#define LOAD1(field, suffix, width) do {                                       \
-    snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
+static int load_block(h3_dit *dit, h3_dit_block *block, int refiner,
+                      unsigned index, char *error, size_t error_size) {
+    const h3_dit_names *names = dit->names;
+    char name[160], second[160], third[160];
+#define BLOCK_NAME(buffer, member) do {                                        \
+    if (!h3_dit_block_name(buffer, sizeof(buffer), names, refiner, index,      \
+                           names->member)) {                                   \
+        fail(error, error_size, "missing DiT tensor name: " #member);          \
+        return 0;                                                              \
+    }                                                                          \
+} while (0)
+#define LOAD1(field, member, width) do {                                       \
+    BLOCK_NAME(name, member);                                                  \
     block->field = bf1(dit, name, width, error, error_size);                    \
     if (!block->field) return 0;                                                \
 } while (0)
-#define LOAD2(field, suffix, rows, columns) do {                               \
-    snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
+#define LOAD2(field, member, rows, columns) do {                               \
+    BLOCK_NAME(name, member);                                                  \
     block->field = bf2(dit, name, rows, columns, error, error_size);            \
     if (!block->field) return 0;                                                \
 } while (0)
-    LOAD1(norm1, "norm1.weight", HIDDEN);
-    LOAD1(norm2, "norm2.weight", HIDDEN);
-    LOAD2(qkv, "attn.qkv_proj.weight", INNER * 3, HIDDEN);
-    LOAD1(q_norm, "attn.q_norm.weight", HEAD_DIM);
-    LOAD1(k_norm, "attn.k_norm.weight", HEAD_DIM);
-    LOAD2(out, "attn.out_proj.weight", HIDDEN, INNER);
-    LOAD2(fc1, "mlp.fc1.weight", FFN * 2, HIDDEN);
-    LOAD2(fc2, "mlp.fc2.weight", HIDDEN, FFN);
+    LOAD1(norm1, norm1, HIDDEN);
+    LOAD1(norm2, norm2, HIDDEN);
+    if (names->qkv) {
+        LOAD2(qkv, qkv, INNER * 3, HIDDEN);
+    } else {
+        BLOCK_NAME(name, q);
+        BLOCK_NAME(second, k);
+        BLOCK_NAME(third, v);
+        block->qkv = h3_weight_load_bf16_qkv(
+            dit->weights, dit->gpu, name, second, third, HEADS, HEAD_DIM,
+            HIDDEN, error, error_size);
+        if (!block->qkv) return 0;
+    }
+    LOAD1(q_norm, q_norm, HEAD_DIM);
+    LOAD1(k_norm, k_norm, HEAD_DIM);
+    LOAD2(out, out, HIDDEN, INNER);
+    if (dit->fc1_gate_first) {
+        LOAD2(fc1, fc1, FFN * 2, HIDDEN);
+    } else {
+        BLOCK_NAME(name, fc1);
+        block->fc1 = h3_weight_load_bf16_halves(
+            dit->weights, dit->gpu, name, FFN * 2, HIDDEN, 1,
+            error, error_size);
+        if (!block->fc1) return 0;
+    }
+    LOAD2(fc2, fc2, HIDDEN, FFN);
+#undef BLOCK_NAME
 #undef LOAD1
 #undef LOAD2
     return 1;
 }
 
 static int load_block_norms(h3_dit *dit, h3_dit_block *block,
-                            const char *prefix,
+                            unsigned index,
                             char *error, size_t error_size) {
+    const h3_dit_names *names = dit->names;
     char name[160];
-#define LOAD1(field, suffix, width) do {                                       \
-    snprintf(name, sizeof(name), "%s%s", prefix, suffix);                    \
+#define LOAD1(field, member, width) do {                                       \
+    if (!h3_dit_block_name(name, sizeof(name), names, 0, index,                \
+                           names->member)) {                                   \
+        fail(error, error_size, "missing DiT tensor name: " #member);          \
+        return 0;                                                              \
+    }                                                                          \
     block->field = bf1(dit, name, width, error, error_size);                    \
     if (!block->field) return 0;                                                \
 } while (0)
-    LOAD1(norm1, "norm1.weight", HIDDEN);
-    LOAD1(norm2, "norm2.weight", HIDDEN);
-    LOAD1(q_norm, "attn.q_norm.weight", HEAD_DIM);
-    LOAD1(k_norm, "attn.k_norm.weight", HEAD_DIM);
+    LOAD1(norm1, norm1, HIDDEN);
+    LOAD1(norm2, norm2, HIDDEN);
+    LOAD1(q_norm, q_norm, HEAD_DIM);
+    LOAD1(k_norm, k_norm, HEAD_DIM);
 #undef LOAD1
     return 1;
 }
@@ -755,9 +792,9 @@ static int refine_text(h3_dit *dit, const h3_text_embedding *text,
                        char *error, size_t error_size) {
     h3_gpu_tensor *source = h3_gpu_tensor_from_bf16(
         dit->gpu, text->values, text->tokens * TEXT_DIM);
-    h3_gpu_tensor *condition_w = bf2(dit, "condition_proj.weight", HIDDEN,
+    h3_gpu_tensor *condition_w = bf2(dit, dit->names->condition_weight, HIDDEN,
                                      TEXT_DIM, error, error_size);
-    h3_gpu_tensor *condition_b = bf1(dit, "condition_proj.bias", HIDDEN,
+    h3_gpu_tensor *condition_b = bf1(dit, dit->names->condition_bias, HIDDEN,
                                      error, error_size);
     h3_dit_block refiner[2];
     memset(refiner, 0, sizeof(refiner));
@@ -766,11 +803,9 @@ static int refine_text(h3_dit *dit, const h3_text_embedding *text,
     h3_gpu_tensor *value = NULL, *heads = NULL, *branch = NULL, *fc1 = NULL;
     h3_gpu_tensor *activated = NULL;
     int ok = source && condition_w && condition_b &&
-        load_block(dit, &refiner[0], "token_refiner.blocks.0.",
-                   error, error_size) &&
-        load_block(dit, &refiner[1], "token_refiner.blocks.1.",
-                   error, error_size);
-    if (ok) final_norm = bf1(dit, "token_refiner.final_norm.weight", HIDDEN,
+        load_block(dit, &refiner[0], 1, 0, error, error_size) &&
+        load_block(dit, &refiner[1], 1, 1, error, error_size);
+    if (ok) final_norm = bf1(dit, dit->names->refiner_final_norm, HIDDEN,
                              error, error_size);
     size_t rows = dit->text_rows;
     if (ok && final_norm) {
@@ -831,16 +866,21 @@ cleanup:
 }
 
 static int prepare_rope(h3_dit *dit, char *error, size_t error_size) {
-    h3_gpu_tensor *inverse_tensor = f1(dit, "rope.inv_freq", ROPE_FREQS,
-                                       error, error_size);
     float inverse[ROPE_FREQS];
-    if (!inverse_tensor ||
-        !h3_gpu_tensor_read_f32(inverse_tensor, inverse, ROPE_FREQS)) {
+    if (dit->names->rope_inv_freq) {
+        h3_gpu_tensor *inverse_tensor = f1(dit, dit->names->rope_inv_freq,
+                                           ROPE_FREQS, error, error_size);
+        if (!inverse_tensor ||
+            !h3_gpu_tensor_read_f32(inverse_tensor, inverse, ROPE_FREQS)) {
+            free_tensor(&inverse_tensor);
+            if (!error || !*error)
+                fail(error, error_size, "cannot read RoPE frequencies");
+            return 0;
+        }
         free_tensor(&inverse_tensor);
-        if (!error || !*error) fail(error, error_size, "cannot read RoPE frequencies");
-        return 0;
+    } else {
+        h3_image_dit_inv_freq(inverse);
     }
-    free_tensor(&inverse_tensor);
     float spatial_scale = dit->spatial_rope_scale;
     size_t count = (size_t)dit->sequence * ROPE_HALF;
     size_t reduced_count = dit->token_reduction ?
@@ -1196,15 +1236,13 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                    H3_DIT_BLOCKS);
             continue;
         }
-        char prefix[64];
-        snprintf(prefix, sizeof(prefix), "blocks.%u.", index);
         if (dit->ssd_streaming) {
-            if (!load_block_norms(dit, &dit->blocks[index], prefix,
+            if (!load_block_norms(dit, &dit->blocks[index], index,
                                   error, error_size) ||
                 !prepare_stream_layer(dit, index, error, error_size))
                 return 0;
         } else {
-            if (!load_block(dit, &dit->blocks[index], prefix,
+            if (!load_block(dit, &dit->blocks[index], 0, index,
                             error, error_size)) return 0;
             if (dit->int8_mlp &&
                 !quantize_block_mlp(dit, &dit->blocks[index],
@@ -1242,23 +1280,32 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
         dit->stream_bytes += job.bytes;
         dit->stream_read_seconds += job.seconds;
     }
-    dit->video_patch_w = f2(dit, "video_patch_proj.weight", HIDDEN,
+    const h3_dit_names *names = dit->names;
+    char head_weight[96], head_bias[96];
+    if (!h3_dit_name_format(head_weight, sizeof(head_weight),
+                            names->head_weight, 0) ||
+        !h3_dit_name_format(head_bias, sizeof(head_bias),
+                            names->head_bias, 0)) {
+        fail(error, error_size, "missing DiT output head name");
+        return 0;
+    }
+    dit->video_patch_w = f2(dit, names->patch_weight, HIDDEN,
                             VIDEO_PATCH, error, error_size);
-    dit->video_patch_b = f1(dit, "video_patch_proj.bias", HIDDEN,
+    dit->video_patch_b = f1(dit, names->patch_bias, HIDDEN,
                             error, error_size);
-    dit->audio_patch_w = f2(dit, "audio_patch_proj.weight", HIDDEN,
+    dit->audio_patch_w = f2(dit, names->audio_patch_weight, HIDDEN,
                             AUDIO_CHANNELS, error, error_size);
-    dit->audio_patch_b = f1(dit, "audio_patch_proj.bias", HIDDEN,
+    dit->audio_patch_b = f1(dit, names->audio_patch_bias, HIDDEN,
                             error, error_size);
-    dit->final_norm = bf1(dit, "final_layer.norm.weight", HIDDEN,
+    dit->final_norm = bf1(dit, names->final_norm, HIDDEN,
                           error, error_size);
-    dit->final_video_w = f2(dit, "final_layer.video_out.weight", VIDEO_PATCH,
+    dit->final_video_w = f2(dit, head_weight, VIDEO_PATCH,
                             HIDDEN, error, error_size);
-    dit->final_video_b = f1(dit, "final_layer.video_out.bias", VIDEO_PATCH,
+    dit->final_video_b = f1(dit, head_bias, VIDEO_PATCH,
                             error, error_size);
-    dit->final_audio_w = f2(dit, "final_layer.audio_out.weight", AUDIO_CHANNELS,
+    dit->final_audio_w = f2(dit, names->audio_head_weight, AUDIO_CHANNELS,
                             HIDDEN, error, error_size);
-    dit->final_audio_b = f1(dit, "final_layer.audio_out.bias", AUDIO_CHANNELS,
+    dit->final_audio_b = f1(dit, names->audio_head_bias, AUDIO_CHANNELS,
                             error, error_size);
     if (dit->bf16_final && dit->final_video_w && dit->final_video_b &&
         dit->final_audio_w && dit->final_audio_b) {
@@ -1548,6 +1595,9 @@ static h3_dit *load_dit(const char *weight_directory,
         fail(error, error_size, "out of memory creating DiT model");
         return NULL;
     }
+    dit->names = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
+    dit->fc1_gate_first = 1;
+    dit->adaln_order = H3_DIT_ADALN_CAST_THEN_SILU;
     dit->fused_mlp = getenv("H3_DISABLE_FUSED_MLP") == NULL;
     /* The released final heads are F32, but their inputs are already BF16.
      * Converting these small weights once selects the Iris-derived tiled
@@ -1618,8 +1668,9 @@ static h3_dit *load_dit(const char *weight_directory,
     report(progress, progress_opaque, "refine text", 1, 1);
     schedule_progress schedule_state = {progress, progress_opaque};
     dit->schedule = h3_dit_schedule_precompute(
-        dit->weights, dit->gpu, sigmas, dit->video_condition_rows != 0,
-        dit->audio_condition_rows != 0, schedule_report, &schedule_state,
+        dit->weights, dit->names, dit->gpu, sigmas,
+        dit->video_condition_rows != 0, dit->audio_condition_rows != 0,
+        dit->adaln_order, schedule_report, &schedule_state,
         error, error_size);
     if (dit->schedule) {
         configure_gate_ranked_blocks(dit);

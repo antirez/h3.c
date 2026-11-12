@@ -1,6 +1,7 @@
 #ifndef H3_DIT_SCHEDULE_H
 #define H3_DIT_SCHEDULE_H
 
+#include "h3_dit_names.h"
 #include "h3_gpu.h"
 #include "h3_host.h"
 #include "h3_weights.h"
@@ -24,13 +25,34 @@ void h3_dit_time_features(float time, float *row);
 typedef void (*h3_dit_schedule_progress)(int completed_blocks,
                                          int total_blocks, void *opaque);
 
+/* Order of the AdaLN activation on the timestep embedding. The video
+ * checkpoint was validated with the BF16 cast first; the image reference
+ * applies SiLU to the F32 embedding and casts afterwards. */
+typedef enum {
+    H3_DIT_ADALN_CAST_THEN_SILU = 0,
+    H3_DIT_ADALN_SILU_THEN_CAST
+} h3_dit_adaln_order;
+
+/* Timestep features [rows, H3_DIT_TIME_INPUT] through the time embedder MLP:
+ * F32 [rows, H3_DIT_TIME_DIM]. */
+h3_gpu_tensor *h3_dit_time_embed(const h3_weight_store *weights,
+                                 const h3_dit_names *names, h3_gpu *gpu,
+                                 uint32_t rows, const float *features,
+                                 char *error, size_t error_size);
+
+/* BF16 [rows, H3_DIT_TIME_DIM] input of every AdaLN projection, from the F32
+ * embedding of h3_dit_time_embed. */
+h3_gpu_tensor *h3_dit_adaln_input(h3_gpu *gpu, const h3_gpu_tensor *time,
+                                  uint32_t rows, h3_dit_adaln_order order,
+                                  char *error, size_t error_size);
+
 /* Materialize every per-step AdaLN value. This intentionally submits one
  * projection at a time, so a 498 MiB block projection is released before the
  * next is loaded. */
 h3_dit_schedule *h3_dit_schedule_precompute(
-    const h3_weight_store *weights, h3_gpu *gpu,
+    const h3_weight_store *weights, const h3_dit_names *names, h3_gpu *gpu,
     const h3_sigma_schedule *sigmas, int visual_condition,
-    int audio_condition,
+    int audio_condition, h3_dit_adaln_order order,
     h3_dit_schedule_progress progress, void *progress_opaque,
     char *error, size_t error_size);
 void h3_dit_schedule_free(h3_dit_schedule *schedule);

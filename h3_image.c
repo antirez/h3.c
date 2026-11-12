@@ -65,11 +65,11 @@ const char *h3_image_canvas_error(int canvas_height, int canvas_width) {
         canvas_width / H3_IMAGE_VAE_SCALE > H3_IMAGE_MAX_LATENT_SIDE)
         return "the generation canvas is more than 16384 pixels on a side";
     if ((long long)canvas_height * canvas_width > H3_IMAGE_MAX_CANVAS_AREA)
-        return "the generation canvas is larger than 33554432 pixels (8192x4096, "
-               "32768 image tokens), the largest size that was measured; "
-               "the limit is time, not memory (attention time grows with "
-               "the square of the token count), and --int8 and "
-               "--ssd-streaming do not raise it, so ask for a smaller image";
+        return "the generation canvas is larger than 33554432 pixels (32768 "
+               "image tokens); runs were measured up to 8192x4096, and the "
+               "cap is the same in every weight mode by policy (--int8 is "
+               "faster per step but does not raise it), so ask for a "
+               "smaller image";
     return NULL;
 }
 

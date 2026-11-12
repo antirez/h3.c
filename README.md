@@ -430,11 +430,11 @@ Three weight modes, measured at 512x512 on an M5 Max:
 BF16 and streaming give bit-identical latents; int8 gives a different but
 equally plausible picture. `--int8` and `--ssd-streaming` exclude each other.
 
-Large canvases, one seed, M5 Max with 128 GB, `--profile` (footprint is the
-process physical footprint, which includes MPSGraph transients; swap stayed
-flat in every run):
+Large canvases, one seed, M5 Max with 128 GB, `--profile` (the footprint is the
+lifetime maximum of the process physical footprint, which includes MPSGraph
+transients; swap stayed flat in every run):
 
-| canvas | image tokens | mode | per step | whole run | peak footprint |
+| canvas | image tokens | mode | per step | whole run | footprint (lifetime max) |
 |---|---|---|---|---|---|
 | 2048x2048 | 4096 | BF16 | 3.1 s | 40 s | 37.1 GiB |
 | 3072x3072 | 9216 | BF16 | 10.9 s | 100 s | 38.4 GiB |
@@ -445,12 +445,24 @@ flat in every run):
 | 8192x4096 | 32768 | BF16 | 61 s | 418 s | 43.9 GiB |
 
 The attention scores are not materialised (the footprint grows by about
-0.25 MiB per token over the 36 GiB of weights, not by 56 S^2 elements), so the
-limit is time: the attention cost grows with the square of the token count.
-8192x4096 (33554432 pixels) is the largest canvas measured and the limit; a
-larger canvas is refused before any weight is loaded, and neither `--int8` nor
-`--ssd-streaming` raises it. The image VAE decode takes 12 s at 4096x4096 and
-24 s at 8192x4096. BF16 and streaming write byte-identical PNGs at 4096x4096.
+0.25 MiB per token over the 36 GiB of weights, not by 56 S^2 elements), and
+the attention time grows with the square of the token count. Sizes were
+measured up to 8192x4096 (33554432 pixels, 32768 tokens), which is also the
+cap. 16384x2048 has the same token count and is accepted on arithmetic, but it
+was never run; 8192x8192 was not measured. The cap is the same in every weight
+mode by policy: `--int8` is about 1.5x faster per step at 16384 tokens (13.8 s
+against 20.9 s) but does not raise it. A larger canvas is refused before any
+weight is loaded. The image VAE decode takes 12 s at 4096x4096 and 24 s at
+8192x4096. BF16 and streaming write byte-identical PNGs at 4096x4096.
+
+Precision on large canvases: against an F32 run of the same checkpoint, the
+step-0 velocity is verified up to 9216 image rows (3072x3072). Above that only
+"finite, decodes, BF16 equals streaming" is checked. At about 9k tokens and
+more the model amplifies BF16 attention rounding: the global velocity error is
+0.08 at 9216 rows (0.013 at 4096), while the median row stays at 0.012, and the
+error sits in a central blob. The MPSGraph BF16 attention is at the BF16
+rounding floor; running the attention in F32 only halves the global error at
+twice the forward time, so it is not shipped.
 
 ## Tests and runtime requirements
 

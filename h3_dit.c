@@ -29,7 +29,8 @@ enum {
     ROPE_FREQS = 16,
     ROPE_HALF = 48,
     SLOTS = 6,
-    FINAL_SLOTS = 2
+    FINAL_SLOTS = 2,
+    IMAGE_MAX_LATENT = 1024
 };
 
 typedef struct {
@@ -1469,27 +1470,23 @@ static int allocate_activations(h3_dit *dit, char *error, size_t error_size) {
             return 0;
         }
     }
-    if (!dit->image) {
+    if (!dit->image)
         dit->video_output_bf16 = h3_gpu_tensor_new_bf16(
             dit->gpu, video * VIDEO_PATCH);
-        if (!dit->video_output_bf16) {
-            fail(error, error_size, "cannot allocate DiT video output: %s",
-                 h3_gpu_error(dit->gpu));
-            return 0;
-        }
-    }
-    if (audio) {
+    if (audio_total)
         dit->audio_input = h3_gpu_tensor_new_f32(
             dit->gpu, audio_total * AUDIO_CHANNELS);
+    if (audio) {
         dit->final_audio_inverse = h3_gpu_tensor_new_f32(dit->gpu, audio);
         dit->audio_output_bf16 = h3_gpu_tensor_new_bf16(
             dit->gpu, audio * AUDIO_CHANNELS);
-        if (!dit->audio_input || !dit->final_audio_inverse ||
-            !dit->audio_output_bf16) {
-            fail(error, error_size, "cannot allocate DiT audio activations: %s",
-                 h3_gpu_error(dit->gpu));
-            return 0;
-        }
+    }
+    if ((!dit->image && !dit->video_output_bf16) ||
+        (audio_total && !dit->audio_input) ||
+        (audio && (!dit->final_audio_inverse || !dit->audio_output_bf16))) {
+        fail(error, error_size, "cannot allocate DiT activation arena: %s",
+             h3_gpu_error(dit->gpu));
+        return 0;
     }
     if (!dit->fused_patch_pack) {
         dit->video_projected = h3_gpu_tensor_new_bf16(
@@ -1746,7 +1743,7 @@ static h3_dit *load_dit(const char *weight_directory,
     if (!dit->gpu) goto failed;
     dit->nax_mlp = dit->fused_mlp && h3_gpu_has_nax_mlp(dit->gpu);
     dit->int8_mlp = !dit->ssd_streaming && dit->fused_mlp &&
-                    !use_slower_bf16_mlp &&
+                    !use_slower_bf16_mlp && dit->sequence >= 128 &&
                     h3_gpu_has_int8_mlp(dit->gpu);
     dit->int8_qkv = !dit->ssd_streaming && !use_slower_bf16_qkv &&
                     dit->sequence >= 128 &&
@@ -1924,6 +1921,18 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
     if (error && error_size) error[0] = '\0';
     if (!text || !text->values || text->tokens < 1 || text->tokens > INT_MAX) {
         fail(error, error_size, "image DiT requires text embeddings");
+        return NULL;
+    }
+    if (active_blocks != H3_DIT_BLOCKS) {
+        fail(error, error_size,
+             "image DiT block thinning is not supported yet: use all %u blocks",
+             H3_DIT_BLOCKS);
+        return NULL;
+    }
+    if (latent_height < 1 || latent_width < 1 ||
+        latent_height > IMAGE_MAX_LATENT || latent_width > IMAGE_MAX_LATENT) {
+        fail(error, error_size, "image latent size must be 1 to %d per side",
+             IMAGE_MAX_LATENT);
         return NULL;
     }
     h3_layout layout;
@@ -2598,6 +2607,11 @@ int h3_dit_reset_run(h3_dit *dit,
                      size_t condition_audio_elements,
                      char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
+    if (dit && dit->image) {
+        fail(error, error_size,
+             "h3_dit_reset_run is not available for an image transformer");
+        return 0;
+    }
     if (!dit) {
         fail(error, error_size, "prepared DiT is absent");
         return 0;
@@ -2630,6 +2644,11 @@ int h3_dit_forward(h3_dit *dit, int step,
                    float *video_velocity, float *audio_velocity,
                    char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
+    if (dit && dit->image) {
+        fail(error, error_size,
+             "%s is not available for an image transformer", "h3_dit_forward");
+        return 0;
+    }
     if (!dit || step < 0 || step >= h3_dit_schedule_steps(dit->schedule) ||
         !video_latent || !audio_latent || !video_velocity || !audio_velocity) {
         fail(error, error_size, "invalid DiT forward arguments");
@@ -2695,8 +2714,11 @@ size_t h3_dit_image_rows(const h3_dit *dit) {
     return dit && dit->image ? dit->video_rows : 0;
 }
 
-int h3_dit_image_head_for_step(int step) {
-    return step >= 0 && step < H3_IMAGE_STEPS ? step : -1;
+int h3_dit_read_final_hidden(const h3_dit *dit, float *values,
+                             size_t elements) {
+    return dit && dit->image && dit->final_video_f32 && values &&
+           elements == (size_t)dit->video_rows * HIDDEN &&
+           h3_gpu_tensor_read_f32(dit->final_video_f32, values, elements);
 }
 
 int h3_dit_read_refined_text(const h3_dit *dit, uint16_t *values,
@@ -2710,7 +2732,7 @@ int h3_dit_forward_image(h3_dit *dit, int step, const float *latent_rows,
                          float *velocity_rows, char *error,
                          size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!dit || !dit->image || h3_dit_image_head_for_step(step) < 0 ||
+    if (!dit || !dit->image || step < 0 || step >= H3_IMAGE_STEPS ||
         step >= h3_dit_schedule_steps(dit->schedule) || !latent_rows ||
         !velocity_rows) {
         fail(error, error_size, "invalid image DiT forward arguments");
@@ -3013,6 +3035,11 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
                    h3_dit_progress progress, void *progress_opaque,
                    char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
+    if (dit && dit->image) {
+        fail(error, error_size,
+             "%s is not available for an image transformer", "h3_dit_denoise");
+        return 0;
+    }
     if (!dit || !video_latent || !audio_latent ||
         dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule)) {
         fail(error, error_size, "invalid DiT denoising arguments");
@@ -3090,6 +3117,11 @@ int h3_dit_denoise_euler_preview(
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
+    if (dit && dit->image) {
+        fail(error, error_size,
+             "%s is not available for an image transformer", "Euler denoising");
+        return 0;
+    }
     if (!dit || !video_latent || !audio_latent || reuse_interval < 1 ||
         reuse_interval > 32 ||
         dit->sigmas.steps != h3_dit_schedule_steps(dit->schedule)) {

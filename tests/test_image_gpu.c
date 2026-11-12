@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
 enum {
@@ -285,12 +286,24 @@ static void test_swiglu_half_order(void) {
     h3_gpu_tensor_free(output);
 }
 
+static void test_int8_mlp_row_guard(void) {
+    h3_gpu_tensor *tensor = scratch(128);
+    int ok = h3_gpu_mlp_int8_bf16(gpu, tensor, tensor, tensor, tensor, tensor,
+                                  tensor, tensor, tensor, tensor, NULL, NULL,
+                                  4, 128, 128, 128, 0, 0, 0, 0);
+    if (ok) die("int8 MLP accepted 4 rows");
+    if (!strstr(h3_gpu_error(gpu), "128 rows"))
+        die("int8 MLP row rejection has no explanatory error");
+    h3_gpu_tensor_free(tensor);
+}
+
 int main(void) {
     char error[512];
     gpu = h3_gpu_create("h3_shaders.metal", error, sizeof(error));
     if (!gpu) die(error);
     test_block();
     test_swiglu_half_order();
+    test_int8_mlp_row_guard();
     h3_gpu_free(gpu);
     puts("ok: image decoder Metal ops match double-precision references");
     return 0;

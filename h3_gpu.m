@@ -795,13 +795,6 @@ int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *opaque,
         error, error_size);
 }
 
-int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *opaque, const char *path,
-                                   uint64_t file_offset, size_t elements,
-                                   char *error, size_t error_size) {
-    return h3_gpu_tensor_read_file_bf16_mode(
-        opaque, path, file_offset, elements, 0, 1, 1, error, error_size);
-}
-
 int h3_gpu_tensor_stream_file_bf16_range(h3_gpu_tensor *opaque,
                                          size_t destination_offset,
                                          const char *path,
@@ -3078,6 +3071,11 @@ int h3_gpu_mlp_int8_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
                          int use_int8_row_fc2,
                          int input_is_quantized) {
     H3GPU *gpu = GPU(opaque);
+    if (rows < 128) {
+        h3_gpu_set_error(gpu, @"int8 MLP needs at least 128 rows, got %u",
+                         rows);
+        return 0;
+    }
     uint32_t padded_rows = (rows + 127u) & ~127u;
     uint32_t fc2_scale_groups = hidden_dim / 1024u;
     size_t activation_capacity = (size_t)padded_rows *

@@ -110,8 +110,10 @@ int h3_dit_forward_image(h3_dit *dit, int step, const float *latent_rows,
 /* Rows of the generated image (P) of an image transformer, else 0. */
 size_t h3_dit_image_rows(const h3_dit *dit);
 
-/* Output head used at a sampling step, or -1 outside [0, H3_IMAGE_STEPS). */
-int h3_dit_image_head_for_step(int step);
+/* Copy the F32 final hidden state [rows, 5376] that fed the output head of
+ * the last image forward, for diagnostics. */
+int h3_dit_read_final_hidden(const h3_dit *dit, float *values,
+                             size_t elements);
 
 /* Copy the refined text rows [tokens, 5376] as BF16, for diagnostics. */
 int h3_dit_read_refined_text(const h3_dit *dit, uint16_t *values,

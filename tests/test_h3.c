@@ -736,10 +736,6 @@ static void test_image_dit_bookkeeping(void) {
           layout.segments[1].kind == H3_SEG_VIDEO);
     h3_layout_free(&layout);
 
-    for (int step = 0; step < H3_IMAGE_STEPS; step++)
-        CHECK(h3_dit_image_head_for_step(step) == step);
-    CHECK(h3_dit_image_head_for_step(-1) == -1);
-    CHECK(h3_dit_image_head_for_step(H3_IMAGE_STEPS) == -1);
     CHECK(h3_dit_image_rows(NULL) == 0);
 
     h3_sigma_schedule schedule;

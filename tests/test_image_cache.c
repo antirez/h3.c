@@ -1,3 +1,5 @@
+#include "h3_ffmpeg.h"
+#include "h3_image.h"
 #include "h3_image_cache.h"
 
 #include <stdint.h>
@@ -373,12 +375,180 @@ static void test_limit(void) {
     unsetenv("H3_CACHE_BYTES");
 }
 
-int main(void) {
+/* The fake model directory holds a tokenizer and nothing else, so any weight
+ * load fails: a run that gets past the cache lookup stops at the reference VAE
+ * encoder, which opens first. */
+static void write_png(const char *path, const uint8_t *planar, int width,
+                      int height) {
+    size_t area = (size_t)width * (size_t)height;
+    uint8_t *interleaved = malloc(area * 3);
+    char error[256];
+    CHECK(interleaved != NULL);
+    for (size_t pixel = 0; pixel < area; pixel++)
+        for (size_t c = 0; c < 3; c++)
+            interleaved[3 * pixel + c] = planar[c * area + pixel];
+    CHECK(h3_ffmpeg_write_png_rgb24(path, interleaved, width, height, error,
+                                    sizeof(error)));
+    free(interleaved);
+}
+
+static int at_vae_open(const h3_ctx *ctx) {
+    return strstr(h3_last_error(ctx), "vae_diffusers") != NULL;
+}
+
+static void test_wiring(const char *tokenizer_json) {
+    char model[512], cache[512], link[512];
+    snprintf(model, sizeof(model), "%s/wire", directory);
+    snprintf(cache, sizeof(cache), "%s/wire_cache", directory);
+    snprintf(link, sizeof(link), "%s/tokenizer", model);
+    CHECK(mkdir(model, 0755) == 0);
+    CHECK(mkdir(link, 0755) == 0);
+    snprintf(link, sizeof(link), "%s/tokenizer/tokenizer.json", model);
+    char *absolute = realpath(tokenizer_json, NULL);
+    CHECK(absolute != NULL);
+    CHECK(symlink(absolute, link) == 0);
+    free(absolute);
+
+    uint8_t *pixels = picture(64, 64, 4);
+    const char *reference_path = path_in("wire_reference.png");
+    write_png(reference_path, pixels, 64, 64);
+    free(pixels);
+    int width, height;
+    uint8_t *decoded = NULL;
+    char error[256];
+    CHECK(h3_ffmpeg_read_image_u8(reference_path, &width, &height, &decoded,
+                                  error, sizeof(error)));
+    h3_image_reference_geometry geometry;
+    CHECK(h3_image_edit_reference_geometry(width, height, &geometry));
+
+    h3_ctx *ctx = fake_context(model);
+    const char *prompt = "Keep <Picture 1> as it is, at night.";
+    const uint8_t *sources[1] = {decoded};
+    int vision_w[1] = {geometry.vision_w}, vision_h[1] = {geometry.vision_h};
+    char *edit_key = h3_image_cache_key(ctx, prompt, 1, &width, &height,
+                                        sources, vision_w, vision_h);
+    char *text_key = h3_image_cache_key(ctx, "a red fox", 0, NULL, NULL, NULL,
+                                        NULL, NULL);
+    CHECK(edit_key && text_key);
+    h3_text_embedding stored = make_text(7, 6, 1);
+    h3_text_embedding plain = make_text(3, 8, 0);
+    char file[1024];
+    CHECK(h3_image_cache_store(cache, edit_key, &stored,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+    CHECK(h3_image_cache_store(cache, text_key, &plain,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+
+    h3_image_reference reference = {reference_path};
+    h3_image_params params = H3_IMAGE_PARAMS_DEFAULT;
+    params.references = &reference;
+    params.reference_count = 1;
+    params.width = params.height = 0;
+    params.min_generation_area = 1024;
+    params.seed = 1;
+    h3_image_hooks hooks;
+
+    /* A hit returns the stored embedding before any weight loads, whatever
+     * the seed and the size. */
+    ctx->cache_dir = strdup(cache);
+    CHECK(ctx->cache_dir != NULL);
+    for (int run = 0; run < 3; run++) {
+        params.seed = run == 0 ? 1 : 987654321;
+        params.width = params.height = run == 2 ? 128 : 0;
+        memset(&hooks, 0, sizeof(hooks));
+        hooks.stop_after_lookup = 1;
+        h3_result *result = h3_generate_image_with_hooks(ctx, prompt, &params,
+                                                         &hooks);
+        CHECK(result != NULL);
+        CHECK(same_text(&stored, &hooks.text));
+        CHECK(hooks.text_tokens > 0 && hooks.condition_rows == NULL &&
+              hooks.latent == NULL && hooks.rgb == NULL);
+        h3_text_embedding_free(&hooks.text);
+        h3_result_free(result);
+    }
+    params.width = params.height = 0;
+
+    /* A hit without the stop hook goes on to the reference VAE. */
+    memset(&hooks, 0, sizeof(hooks));
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+
+    /* Another prompt, another reference, a disabled cache and test hooks that
+     * replace pixels all miss: the run reaches the reference VAE. */
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, "Keep <Picture 1> as it is, by day.",
+                                       &params, &hooks) == NULL);
+    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    const char *other_path = path_in("wire_other.png");
+    uint8_t *other = picture(64, 64, 5);
+    write_png(other_path, other, 64, 64);
+    free(other);
+    h3_image_reference other_reference = {other_path};
+    params.references = &other_reference;
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    params.references = &reference;
+
+    char *kept = ctx->cache_dir;
+    ctx->cache_dir = NULL;
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    ctx->cache_dir = kept;
+
+    const uint8_t *vae_hook[1] = {decoded};
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    hooks.vae_pixels = vae_hook;
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+
+    /* Text-to-image shares the cache with no references. */
+    h3_image_params text_params = H3_IMAGE_PARAMS_DEFAULT;
+    text_params.min_generation_area = 1024;
+    text_params.width = text_params.height = 64;
+    text_params.seed = 11;
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    h3_result *result = h3_generate_image_with_hooks(ctx, "a red fox",
+                                                     &text_params, &hooks);
+    CHECK(result != NULL);
+    CHECK(same_text(&plain, &hooks.text));
+    h3_text_embedding_free(&hooks.text);
+    h3_result_free(result);
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, "a blue fox", &text_params,
+                                       &hooks) == NULL);
+    CHECK(hooks.text.values == NULL);
+
+    free(decoded);
+    free(edit_key);
+    free(text_key);
+    h3_text_embedding_free(&stored);
+    h3_text_embedding_free(&plain);
+    free(ctx->cache_dir);
+    free(ctx->model_dir);
+    free(ctx);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 2) {
+        fprintf(stderr, "usage: %s [TOKENIZER_JSON]\n", argv[0]);
+        return 2;
+    }
     make_directory();
     test_key();
     test_round_trip();
     test_eviction();
     test_limit();
+    if (argc > 1) test_wiring(argv[1]);
+    else printf("skip: the wiring test needs TOKENIZER_JSON\n");
     remove_directory();
     printf("ok: %d image cache checks\n", tests_run);
     return 0;

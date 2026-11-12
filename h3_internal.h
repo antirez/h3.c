@@ -3,6 +3,7 @@
 
 #include "h3.h"
 #include "h3_host.h"
+#include "h3_text_encoder.h"
 
 #include <stdarg.h>
 
@@ -16,6 +17,7 @@ struct h3_ctx {
     h3_model_info model;
     int image;
     int cache_enabled;
+    char *cache_dir;
     char *conditioning_key;
     size_t conditioning_tokens;
     size_t conditioning_width;
@@ -68,6 +70,11 @@ typedef struct {
     /* Edits: stop after the reference VAE encoder. No text encoder or
      * transformer loads, nothing is generated, condition_rows is set. */
     int references_only;
+    /* When the disk cache holds the text embedding, stop right after the
+     * lookup and return it in text (the caller frees it with
+     * h3_text_embedding_free()). After a miss the run goes on. */
+    int stop_after_lookup;
+    h3_text_embedding text;
 } h3_image_hooks;
 
 h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,

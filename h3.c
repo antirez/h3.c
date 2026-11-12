@@ -4,6 +4,7 @@
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
 #include "h3_image.h"
+#include "h3_image_cache.h"
 #include "h3_image_edit.h"
 #include "h3_image_pipeline.h"
 #include "h3_image_vae.h"
@@ -74,6 +75,12 @@ void h3_cache_set_enabled(h3_ctx *ctx, int enabled) {
     if (!ctx) return;
     if (!enabled) h3_cache_clear(ctx);
     ctx->cache_enabled = enabled != 0;
+}
+
+void h3_cache_set_directory(h3_ctx *ctx, const char *dir) {
+    if (!ctx) return;
+    free(ctx->cache_dir);
+    ctx->cache_dir = dir && *dir ? strdup(dir) : NULL;
 }
 
 void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info) {
@@ -516,6 +523,7 @@ void h3_free(h3_ctx *ctx) {
     if (!ctx) return;
     h3_cache_clear(ctx);
     free(ctx->model_dir);
+    free(ctx->cache_dir);
     free(ctx);
 }
 
@@ -2067,7 +2075,7 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
                                      const h3_image_hooks *hooks,
                                      h3_edit_state *edit, const char *vae_path,
                                      h3_generation_progress *progress,
-                                     int profile) {
+                                     int profile, int need_vision) {
     char detail[512];
     size_t rows = 0;
     h3_image_vae_encoder *encoder = NULL;
@@ -2094,7 +2102,8 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
         const uint8_t *vae_pixels;
         if (!h3_image_edit_copies(edit->sources[index], edit->widths[index],
                                   edit->heights[index], g, &vae_copy,
-                                  &edit->vision[index])) {
+                                  need_vision ? &edit->vision[index] :
+                                                NULL)) {
             h3_set_error(ctx, "reference %zu: cannot resize the image",
                          index + 1);
             goto done;
@@ -2227,6 +2236,53 @@ static int h3_edit_encode_text(h3_ctx *ctx, const char *prompt,
     return ok;
 }
 
+typedef struct {
+    char *key;
+    char path[1024];
+    const char *label;
+    int hit;
+} h3_text_cache_state;
+
+/* Look the text embedding up on disk. The key is built from the decoded
+ * references, so this runs before the reference VAE frees them. */
+static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
+                                 const h3_edit_state *edit,
+                                 const h3_image_hooks *hooks,
+                                 h3_text_cache_state *cache,
+                                 h3_text_embedding *text) {
+    const uint8_t *sources[H3_IMAGE_MAX_REFERENCES];
+    int vision_w[H3_IMAGE_MAX_REFERENCES], vision_h[H3_IMAGE_MAX_REFERENCES];
+    cache->label = edit->count ? "edit text cache" : "text cache";
+    if (!ctx->cache_dir ||
+        (hooks && (hooks->vae_pixels || hooks->vision_pixels))) {
+        fprintf(stderr, "h3: %s disabled\n", cache->label);
+        return;
+    }
+    for (size_t index = 0; index < edit->count; index++) {
+        sources[index] = edit->sources[index];
+        vision_w[index] = edit->geometry[index].vision_w;
+        vision_h[index] = edit->geometry[index].vision_h;
+    }
+    cache->key = h3_image_cache_key(ctx, prompt, edit->count, edit->widths,
+                                    edit->heights, sources, vision_w,
+                                    vision_h);
+    if (!cache->key) return;
+    cache->hit = h3_image_cache_load(ctx->cache_dir, cache->key, text,
+                                     cache->path, sizeof(cache->path));
+    if (cache->hit)
+        fprintf(stderr, "h3: %s hit %s\n", cache->label, cache->path);
+}
+
+static void h3_text_cache_store(const h3_ctx *ctx, h3_text_cache_state *cache,
+                                const h3_text_embedding *text) {
+    if (cache->key && !cache->hit &&
+        h3_image_cache_store(ctx->cache_dir, cache->key, text,
+                             h3_image_cache_limit(), cache->path,
+                             sizeof(cache->path)))
+        fprintf(stderr, "h3: %s miss; stored %s\n", cache->label,
+                cache->path);
+}
+
 h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                                         const h3_image_params *params,
                                         h3_image_hooks *hooks) {
@@ -2258,6 +2314,8 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     int edit = params->reference_count > 0;
     h3_edit_state edit_state;
     memset(&edit_state, 0, sizeof(edit_state));
+    h3_text_cache_state text_cache;
+    memset(&text_cache, 0, sizeof(text_cache));
     h3_image_phase_log phase_log = {{{0}}, 0, h3_wall_seconds()};
     int request_width = params->width, request_height = params->height;
     int size_defaulted = 0;
@@ -2303,6 +2361,12 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                            presentation_tokens, size_defaulted)) goto cleanup;
         if (hooks) hooks->text_tokens = presentation_tokens;
     }
+    h3_text_cache_lookup(ctx, prompt, &edit_state, hooks, &text_cache, &text);
+    if (text_cache.hit && hooks && hooks->stop_after_lookup) {
+        hooks->text = text;
+        memset(&text, 0, sizeof(text));
+        goto deliver;
+    }
     dit_path = h3_path(ctx->model_dir, "transformer_diffusers");
     vae_path = h3_path(ctx->model_dir, "vae_diffusers");
     if (!dit_path || !vae_path) {
@@ -2312,23 +2376,35 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     if (edit) {
         h3_progress_emit(&progress, "reference VAE", 0, 1);
         if (!h3_edit_encode_references(ctx, params, hooks, &edit_state,
-                                       vae_path, &progress, profile))
+                                       vae_path, &progress, profile,
+                                       !text_cache.hit))
             goto cleanup;
         if (profile) h3_image_phase_end(&phase_log, "reference VAE");
         if (hooks && hooks->references_only) goto deliver;
-        if (!h3_edit_encode_text(ctx, prompt, &edit_state, hooks, &progress,
-                                 profile, &text)) goto cleanup;
-        if (profile) h3_report_peak("text encoder", &text.gpu_stats);
+        if (text_cache.hit) {
+            h3_progress_emit(&progress, "text encoder", 50, 50);
+        } else {
+            if (!h3_edit_encode_text(ctx, prompt, &edit_state, hooks,
+                                     &progress, profile, &text)) goto cleanup;
+            h3_text_cache_store(ctx, &text_cache, &text);
+            if (profile) h3_report_peak("text encoder", &text.gpu_stats);
+        }
         if (profile) h3_image_phase_end(&phase_log, "reference text");
     } else {
-        h3_progress_emit(&progress, "text encoder", 0, 50);
-        if (!h3_image_encode_prompt(ctx->model_dir, prompt,
-                                    h3_text_progress_bridge, &progress, NULL,
-                                    NULL, &text, detail, sizeof(detail))) {
-            if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
-            goto cleanup;
+        if (text_cache.hit) {
+            h3_progress_emit(&progress, "text encoder", 50, 50);
+        } else {
+            h3_progress_emit(&progress, "text encoder", 0, 50);
+            if (!h3_image_encode_prompt(ctx->model_dir, prompt,
+                                        h3_text_progress_bridge, &progress,
+                                        NULL, NULL, &text, detail,
+                                        sizeof(detail))) {
+                if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
+                goto cleanup;
+            }
+            h3_text_cache_store(ctx, &text_cache, &text);
+            if (profile) h3_report_peak("text encoder", &text.gpu_stats);
         }
-        if (profile) h3_report_peak("text encoder", &text.gpu_stats);
         if (profile) h3_image_phase_end(&phase_log, "text encoder");
     }
     if (progress.cancelled) goto cleanup;
@@ -2472,6 +2548,7 @@ deliver:
 
 cleanup:
     h3_edit_state_free(&edit_state);
+    free(text_cache.key);
     free(dit_path);
     free(vae_path);
     h3_text_embedding_free(&text);

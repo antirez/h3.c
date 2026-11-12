@@ -155,7 +155,7 @@ static uint64_t get_u64(const uint8_t *at) {
 }
 
 static void warn(const char *path, const char *reason) {
-    fprintf(stderr, "h3: warning: edit text cache: ignoring %s: %s\n", path,
+    fprintf(stderr, "h3: warning: text cache: ignoring %s: %s\n", path,
             reason);
 }
 

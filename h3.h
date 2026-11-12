@@ -250,6 +250,10 @@ const h3_model_info *h3_model(const h3_ctx *ctx);
 void h3_cache_set_enabled(h3_ctx *ctx, int enabled);
 void h3_cache_clear(h3_ctx *ctx);
 void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info);
+/* Image runs: keep the text embedding of a prompt (and its references) in
+ * files under dir, and reuse it in later runs, even in other processes. NULL
+ * disables it, which is the default. H3_CACHE_BYTES caps the directory. */
+void h3_cache_set_directory(h3_ctx *ctx, const char *dir);
 
 /* Generate media, delivering decoded frames incrementally through on_frame. */
 h3_result *h3_generate(h3_ctx *ctx, const char *prompt,

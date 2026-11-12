@@ -22,22 +22,27 @@ static void usage(const char *program) {
         "A MiniMax-H3-Image directory (transformer_diffusers/) selects text-to-image:\n"
         "  %s -d MiniMax-H3-Image -p PROMPT [--size WxH] [--min-generation-area N]\n"
         "      [--seed N] [--ssd-streaming] [-o out.png]\n"
+        "  %s -d MiniMax-H3-Image -p PROMPT --ref-image PATH [--ref-image PATH ...]\n"
+        "      edits: the prompt calls the references <Picture 1>, <Picture 2>, ...\n"
         "The interactive session and the video-only options below (--steps, --reuse,\n"
         "--core-reuse, --token-reduction, --frames, --seconds, --first-frame,\n"
-        "--last-frame, --ref-*, --render-*, --layers other than 50) do not apply to\n"
-        "image directories.\n"
+        "--last-frame, --ref-image-size, --ref-video and the other --ref-* options,\n"
+        "--render-*, --layers other than 50) do not apply to image directories.\n"
         "Image weight modes: resident BF16 by default (about 36 GiB of GPU buffers,\n"
         "fast); --int8 (about 18.6 GiB, a little faster, less exact); --ssd-streaming\n"
         "(exact BF16, about 1.5 GiB, slower). --int8 and --ssd-streaming exclude\n"
-        "each other.\n\n"
+        "each other.\n\n",
+        program, program, program, program, program);
+    fprintf(stderr,
         "Options:\n"
         "  -d, --model-dir PATH   MiniMax-H3 or MiniMax-H3-Image local directory\n"
         "  -p, --prompt TEXT      Raw H3 prompt\n"
         "  -o, --output PATH      Output MP4, or PNG for images (default:\n"
         "                         outputs/h3.mp4, outputs/h3.png)\n"
         "      --image            Require an image directory (error otherwise)\n"
-        "      --size WxH         Output size (image default: 1024x1024; the generation\n"
-        "                         canvas is limited to 33554432 pixels, 8192x4096)\n"
+        "      --size WxH         Output size (image default: 1024x1024, or the size of\n"
+        "                         <Picture 1> when editing; the generation canvas is\n"
+        "                         limited to 33554432 pixels, 8192x4096)\n"
         "      --min-generation-area N  Image canvas area floor (default: 4194304,\n"
         "                         range 1024..16777216; 1024 disables enlarging)\n"
         "      --width N          Output width (default: 864)\n"
@@ -69,7 +74,9 @@ static void usage(const char *program) {
         "      --seed N           Random seed (default: 42)\n"
         "      --first-frame PATH First-frame conditioning image\n"
         "      --last-frame PATH  Last-frame conditioning image\n"
-        "      --ref-image PATH    Append an ordered Ref2VA image\n"
+        "      --ref-image PATH    Video: append an ordered Ref2VA image. Images: edit\n"
+        "                         with a reference, repeatable up to 8 (each side at\n"
+        "                         least 32 pixels; the prompt names it <Picture N>)\n"
         "      --ref-image-size S  Image sizing: match (default) or max\n"
         "      --ref-video PATH    Append video, including embedded audio\n"
         "      --ref-silent-video PATH  Append video without its audio\n"
@@ -80,8 +87,7 @@ static void usage(const char *program) {
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase timing, allocation and memory data\n"
         "      --info             Inspect model/device without mapping weights\n"
-        "  -h, --help             Show this help\n",
-        program, program, program, program);
+        "  -h, --help             Show this help\n");
 }
 
 static int parse_int(const char *value, const char *label) {
@@ -124,10 +130,13 @@ static uint64_t parse_u64(const char *value, const char *label) {
     return (uint64_t)parsed;
 }
 
-static h3_reference *append_reference(h3_reference references[12],
-                                      size_t *count) {
-    if (*count >= 12) {
-        fprintf(stderr, "h3: Ref2VA supports at most 12 references\n");
+#define MAX_CLI_REFERENCES 32
+
+static h3_reference *append_reference(
+        h3_reference references[MAX_CLI_REFERENCES], size_t *count) {
+    if (*count >= MAX_CLI_REFERENCES) {
+        fprintf(stderr, "h3: at most %d --ref-* options are accepted\n",
+                MAX_CLI_REFERENCES);
         exit(2);
     }
     h3_reference *reference = &references[(*count)++];
@@ -384,7 +393,7 @@ int main(int argc, char **argv) {
     int min_area = H3_IMAGE_DEFAULT_MIN_AREA;
     int min_area_given = 0;
     h3_params params = H3_PARAMS_DEFAULT;
-    h3_reference references[12];
+    h3_reference references[MAX_CLI_REFERENCES];
     size_t reference_count = 0;
     cli_state cli = {{0}, 0, -1, -1, H3_TERM_NONE, 0, NULL, 0};
     int show = 0;
@@ -494,7 +503,6 @@ int main(int argc, char **argv) {
             case OPT_FIRST: video_only = video_only ? video_only : "--first-frame"; params.first_frame = optarg; break;
             case OPT_LAST: video_only = video_only ? video_only : "--last-frame"; params.last_frame = optarg; break;
             case OPT_REF_IMAGE: {
-                video_only = video_only ? video_only : "--ref-image";
                 h3_reference *reference = append_reference(
                     references, &reference_count);
                 reference->kind = H3_REFERENCE_IMAGE;
@@ -625,9 +633,16 @@ int main(int argc, char **argv) {
     if (info) print_info(ctx);
     if (image && prompt) {
         h3_image_params image_params = H3_IMAGE_PARAMS_DEFAULT;
+        h3_image_reference edit_references[MAX_CLI_REFERENCES];
+        for (size_t index = 0; index < reference_count; index++)
+            edit_references[index].path = references[index].path;
+        image_params.references = edit_references;
+        image_params.reference_count = reference_count;
         if (width_given) {
             image_params.width = params.width;
             image_params.height = params.height;
+        } else if (reference_count) {
+            image_params.width = image_params.height = 0;
         }
         image_params.min_generation_area = min_area;
         image_params.seed = params.seed;

@@ -464,6 +464,45 @@ error sits in a central blob. The MPSGraph BF16 attention is at the BF16
 rounding floor; running the attention in F32 only halves the global error at
 twice the forward time, so it is not shipped.
 
+#### Edit with reference images
+
+`--ref-image PATH`, repeated up to 8 times, turns the request into an edit. The
+prompt calls the references `<Picture 1>`, `<Picture 2>`, ... in command-line
+order; say what to keep first, then what to change, then the target image:
+
+```sh
+./h3 -d MiniMax-H3-Image --ref-image fox.png --ref-image scarf.png \
+  -p "Keep <Picture 1> as it is, put the scarf of <Picture 2> on the fox, \
+a photo in autumn light." --seed 42 -o outputs/edit.png
+```
+
+Without `--size` the result has the size of the first reference (after EXIF
+orientation); the canvas rules above apply to it unchanged. A prompt that names
+a `<Picture N>` above the reference count, or that never names a reference,
+prints a warning and runs anyway.
+
+Each reference is resized twice, keeping its own aspect ratio, as the
+diffusers pipeline does. The VAE copy keeps a short edge between 1024 and 2048
+pixels as it is, and scales anything else to the nearer bound with both sides
+rounded to a multiple of 32. The Qwen vision copy has a short edge of exactly
+1024 pixels, then both sides round to a multiple of 32. A reference adds
+`vae_width * vae_height / 1024` transformer rows and `vision_width *
+vision_height / 1024` text tokens. The resizing is a port of PIL's Lanczos
+(byte exact against PIL; the vision copy's second stage, bicubic in the
+reference, is Lanczos here).
+
+Limits, all checked before any weight loads and reported with the reference
+number: at most 8 references, every side at least 32 pixels, a vision aspect
+ratio of at most 200, a latent side of at most 1024 per reference (16384
+pixels), at most 32768 reference plus image rows, and a packed sequence of at
+most 36864 rows. The sequence limit is unverified above 33069 rows, the
+largest sequence measured. Every weight mode works; the models run one at a
+time (VAE encoder, Qwen vision and text encoder, transformer, VAE decoder),
+and a reference adds the 1.2 GB vision tower and the 0.6 GB VAE encoder to the
+phases, not to the resident transformer. Edit timings have not been measured
+yet. The noise of each reference derives from `--seed`, so the same command
+writes the same PNG.
+
 ## Tests and runtime requirements
 
 ```sh

@@ -292,69 +292,14 @@ oom:
 static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
                            char *error, size_t error_size) {
     const h3_layout *layout = &dit->layout;
-    int image = layout->signature[4] == 0;
-    if (!text || !text->values || text->width != TEXT_DIM || !text->tokens ||
-        layout->signature[0] != (int)text->tokens ||
-        !layout->segments || layout->segment_count < (image ? 2u : 3u) ||
-        layout->segments[0].kind != H3_SEG_TEXT ||
-        layout->segments[layout->segment_count - 1].kind != H3_SEG_VIDEO ||
-        layout->signature[1] < 1 || layout->signature[2] < 2 ||
-        layout->signature[3] < 2 || layout->signature[4] < (image ? 0 : 1) ||
-        layout->signature[2] % 2 || layout->signature[3] % 2 ||
-        layout->seq_len > UINT32_MAX || text->tokens > UINT32_MAX ||
-        layout->img_cond_rows > UINT32_MAX ||
-        layout->audio_cond_rows > UINT32_MAX ||
-        layout->audio_target_rows > UINT32_MAX ||
-        layout->img_target_rows > UINT32_MAX) {
+    h3_layout_summary summary;
+    if (!text || !text->values || text->width != TEXT_DIM) {
         fail(error, error_size,
              "DiT requires a valid contiguous H3 packed layout");
         return 0;
     }
-    size_t cursor = 0, text_rows = 0, video_condition = 0;
-    size_t audio_condition = 0, video_target = 0, audio_target = 0;
-    unsigned target_video_segments = 0, target_audio_segments = 0;
-    for (size_t index = 0; index < layout->segment_count; index++) {
-        const h3_segment *segment = &layout->segments[index];
-        if (segment->start != cursor || segment->stop < segment->start ||
-            segment->stop > layout->seq_len) {
-            fail(error, error_size, "DiT layout segments are not contiguous");
-            return 0;
-        }
-        size_t rows = segment->stop - segment->start;
-        switch (segment->kind) {
-        case H3_SEG_TEXT: text_rows += rows; break;
-        case H3_SEG_COND:
-        case H3_SEG_REF_IMAGE: video_condition += rows; break;
-        case H3_SEG_REF_AUDIO: audio_condition += rows; break;
-        case H3_SEG_AUDIO:
-            audio_target += rows;
-            target_audio_segments++;
-            dit->audio_target_start = (uint32_t)segment->start;
-            break;
-        case H3_SEG_VIDEO:
-            video_target += rows;
-            target_video_segments++;
-            dit->video_target_start = (uint32_t)segment->start;
-            break;
-        default:
-            fail(error, error_size, "DiT layout contains an unknown segment");
-            return 0;
-        }
-        cursor = segment->stop;
-    }
-    if (cursor != layout->seq_len || text_rows != text->tokens ||
-        video_condition != layout->img_cond_rows ||
-        audio_condition != layout->audio_cond_rows ||
-        (image && audio_condition) ||
-        video_target != layout->img_target_rows ||
-        audio_target != layout->audio_target_rows ||
-        target_video_segments != 1 ||
-        target_audio_segments != (image ? 0u : 1u) ||
-        video_condition > UINT32_MAX - video_target ||
-        audio_condition > UINT32_MAX - audio_target) {
-        fail(error, error_size, "DiT layout row-source counts are inconsistent");
+    if (!h3_layout_validate(layout, text->tokens, &summary, error, error_size))
         return 0;
-    }
     if (text->tags) {
         for (size_t index = 0; index < text->tokens; index++) {
             if (text->tags[index] >= H3_DIT_MODALITIES) {
@@ -363,17 +308,19 @@ static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
             }
         }
     }
+    dit->audio_target_start = (uint32_t)summary.audio_target_start;
+    dit->video_target_start = (uint32_t)summary.video_target_start;
     dit->latent_t = layout->signature[1];
     dit->latent_h = layout->signature[2];
     dit->latent_w = layout->signature[3];
     dit->audio_t = layout->signature[4];
     dit->text_rows = (uint32_t)text->tokens;
-    dit->video_condition_rows = (uint32_t)video_condition;
-    dit->audio_condition_rows = (uint32_t)audio_condition;
+    dit->video_condition_rows = (uint32_t)summary.video_condition;
+    dit->audio_condition_rows = (uint32_t)summary.audio_condition;
     dit->audio_rows = (uint32_t)layout->audio_target_rows;
     dit->video_rows = (uint32_t)layout->img_target_rows;
-    dit->video_total_rows = (uint32_t)(video_condition + video_target);
-    dit->audio_total_rows = (uint32_t)(audio_condition + audio_target);
+    dit->video_total_rows = (uint32_t)(summary.video_condition + summary.video_target);
+    dit->audio_total_rows = (uint32_t)(summary.audio_condition + summary.audio_target);
     dit->sequence = (uint32_t)layout->seq_len;
     return 1;
 }

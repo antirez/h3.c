@@ -543,6 +543,81 @@ fail:
     return 0;
 }
 
+int h3_layout_validate(const h3_layout *layout, size_t text_tokens,
+                       h3_layout_summary *summary, char *error,
+                       size_t error_size) {
+    h3_layout_builder builder = {NULL, 0, 0, error, error_size};
+    if (!layout || !summary) return 0;
+    int image = layout->signature[4] == 0;
+    if (!text_tokens || layout->signature[0] != (int)text_tokens ||
+        !layout->segments || layout->segment_count < (image ? 2u : 3u) ||
+        layout->segments[0].kind != H3_SEG_TEXT ||
+        layout->segments[layout->segment_count - 1].kind != H3_SEG_VIDEO ||
+        layout->signature[1] < 1 || layout->signature[2] < 2 ||
+        layout->signature[3] < 2 || layout->signature[4] < 0 ||
+        (image && layout->signature[1] != 1) ||
+        layout->signature[2] % 2 || layout->signature[3] % 2 ||
+        layout->seq_len > UINT32_MAX || text_tokens > UINT32_MAX ||
+        layout->img_cond_rows > UINT32_MAX ||
+        layout->audio_cond_rows > UINT32_MAX ||
+        layout->audio_target_rows > UINT32_MAX ||
+        layout->img_target_rows > UINT32_MAX) {
+        return h3_builder_fail(&builder,
+                               "DiT requires a valid contiguous H3 packed layout");
+    }
+    h3_layout_summary found = {image, 0, 0, 0, 0, 0, 0};
+    size_t cursor = 0, text_rows = 0;
+    unsigned target_video_segments = 0, target_audio_segments = 0;
+    for (size_t index = 0; index < layout->segment_count; index++) {
+        const h3_segment *segment = &layout->segments[index];
+        if (segment->start != cursor || segment->stop < segment->start ||
+            segment->stop > layout->seq_len) {
+            return h3_builder_fail(&builder, "DiT layout segments are not contiguous");
+        }
+        size_t rows = segment->stop - segment->start;
+        switch (segment->kind) {
+        case H3_SEG_TEXT: text_rows += rows; break;
+        case H3_SEG_COND:
+            if (image) {
+                return h3_builder_fail(&builder,
+                                       "image layout cannot hold COND segments");
+            }
+            found.video_condition += rows;
+            break;
+        case H3_SEG_REF_IMAGE: found.video_condition += rows; break;
+        case H3_SEG_REF_AUDIO: found.audio_condition += rows; break;
+        case H3_SEG_AUDIO:
+            found.audio_target += rows;
+            target_audio_segments++;
+            found.audio_target_start = segment->start;
+            break;
+        case H3_SEG_VIDEO:
+            found.video_target += rows;
+            target_video_segments++;
+            found.video_target_start = segment->start;
+            break;
+        default:
+            return h3_builder_fail(&builder, "DiT layout contains an unknown segment");
+        }
+        cursor = segment->stop;
+    }
+    if (cursor != layout->seq_len || text_rows != text_tokens ||
+        found.video_condition != layout->img_cond_rows ||
+        found.audio_condition != layout->audio_cond_rows ||
+        (image && found.audio_condition) ||
+        found.video_target != layout->img_target_rows ||
+        found.audio_target != layout->audio_target_rows ||
+        target_video_segments != 1 ||
+        target_audio_segments != (image ? 0u : 1u) ||
+        found.video_condition > UINT32_MAX - found.video_target ||
+        found.audio_condition > UINT32_MAX - found.audio_target) {
+        return h3_builder_fail(&builder,
+                               "DiT layout row-source counts are inconsistent");
+    }
+    *summary = found;
+    return 1;
+}
+
 void h3_layout_free(h3_layout *layout) {
     if (!layout) return;
     free(layout->segments);

@@ -184,6 +184,9 @@ static void test_layout_tiny(void) {
     CHECK(close_enough(sums[0], 339.6666666666667, 1e-10));
     CHECK(close_enough(weighted[0], 6498.0, 1e-10));
     CHECK(sums[1] == 0.0 && sums[2] == 0.0);
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
     h3_layout_free(&layout);
 }
 
@@ -210,6 +213,9 @@ static void test_layout_fl2va(void) {
     CHECK(close_enough(weighted[0], 5883121758.0, 1e-4));
     CHECK(close_enough(sums[1], 117002.11801356057, 1e-7));
     CHECK(close_enough(sums[2], 119830.2393846486, 1e-7));
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 128, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
     h3_layout_free(&layout);
 }
 
@@ -242,6 +248,43 @@ static void test_layout_ref2va(void) {
     CHECK(close_enough(weighted[0], 12788836714.0, 1e-3));
     CHECK(close_enough(sums[1], 115719.96684277552, 1e-7));
     CHECK(close_enough(sums[2], 122360.11344760543, 1e-7));
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 192, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
+    h3_layout_free(&layout);
+}
+
+static void test_layout_validate(void) {
+    h3_layout layout;
+    h3_layout_summary summary;
+    char error[256];
+    CHECK(h3_layout_build_image(3, 4, 4, NULL, 0, &layout, error, sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    CHECK(summary.image && summary.video_target == 4 && summary.video_target_start == 3);
+    CHECK(summary.video_condition == 0 && summary.audio_target == 0);
+    CHECK(!h3_layout_validate(&layout, 4, &summary, error, sizeof(error)));
+    layout.signature[1] = 2;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    layout.signature[1] = 1;
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    h3_layout_free(&layout);
+
+    const h3_layout_ref reference = {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0};
+    CHECK(h3_layout_build_image(3, 4, 4, &reference, 1, &layout,
+                                error, sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    CHECK(summary.video_condition == 1 && summary.video_target_start == 4);
+    layout.segments[1].kind = H3_SEG_COND;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    layout.segments[1].kind = H3_SEG_REF_AUDIO;
+    layout.audio_cond_rows = 1;
+    layout.img_cond_rows = 0;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    h3_layout_free(&layout);
+
+    h3_layout_spec no_audio = {12, 2, 2, 2, 0, 5, NULL, 0, NULL, 0};
+    CHECK(h3_layout_build(&no_audio, &layout, error, sizeof(error)));
+    CHECK(!h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
     h3_layout_free(&layout);
 }
 
@@ -617,6 +660,7 @@ int main(void) {
     test_layout_tiny();
     test_layout_fl2va();
     test_layout_ref2va();
+    test_layout_validate();
     test_safetensors();
     test_rng_and_solver();
     test_rgb_resize();

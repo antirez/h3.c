@@ -123,6 +123,23 @@ int h3_layout_build_image(int text_len, int latent_h, int latent_w,
                           const h3_layout_ref *references,
                           size_t reference_count, h3_layout *layout,
                           char *error, size_t error_size);
+
+typedef struct {
+    int image;
+    size_t video_condition;
+    size_t audio_condition;
+    size_t video_target;
+    size_t audio_target;
+    size_t video_target_start;
+    size_t audio_target_start;
+} h3_layout_summary;
+
+/* Check that a layout is a contiguous packed H3 layout the DiT can run: video
+ * ([TEXT | ... | AUDIO | VIDEO]) or image (signature[4] == 0, no audio, one
+ * latent frame, no COND segments). Fills the row counts and target starts. */
+int h3_layout_validate(const h3_layout *layout, size_t text_tokens,
+                       h3_layout_summary *summary, char *error,
+                       size_t error_size);
 void h3_layout_free(h3_layout *layout);
 const char *h3_segment_name(h3_segment_kind kind);
 

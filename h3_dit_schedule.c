@@ -75,6 +75,16 @@ static void free_tensor(h3_gpu_tensor **tensor) {
     *tensor = NULL;
 }
 
+void h3_dit_time_features(float time, float *row) {
+    for (uint32_t index = 0; index < TIME_INPUT / 2; index++) {
+        float frequency = expf(-logf(10000.0f) *
+                               (float)index / (float)(TIME_INPUT / 2));
+        float angle = time * frequency;
+        row[index] = cosf(angle);
+        row[TIME_INPUT / 2 + index] = sinf(angle);
+    }
+}
+
 static int prepare_rows(h3_dit_schedule *schedule,
                         const h3_sigma_schedule *sigmas,
                         int visual_condition, int audio_condition,
@@ -145,16 +155,8 @@ static int prepare_rows(h3_dit_schedule *schedule,
     }
     if (visual_condition) times[visual_condition_row] = 0.999f;
     if (audio_condition) times[audio_condition_row] = 1.0f;
-    for (uint32_t row = 0; row < count; row++) {
-        for (uint32_t index = 0; index < TIME_INPUT / 2; index++) {
-            float frequency = expf(-logf(10000.0f) *
-                                   (float)index / (float)(TIME_INPUT / 2));
-            float angle = times[row] * frequency;
-            features[(size_t)row * TIME_INPUT + index] = cosf(angle);
-            features[(size_t)row * TIME_INPUT + TIME_INPUT / 2 + index] =
-                sinf(angle);
-        }
-    }
+    for (uint32_t row = 0; row < count; row++)
+        h3_dit_time_features(times[row], features + (size_t)row * TIME_INPUT);
     free(times);
     *features_out = features;
     return 1;

@@ -117,6 +117,12 @@ int h3_serving_schedule_build(int evaluations, h3_sigma_schedule *schedule);
 
 int h3_layout_build(const h3_layout_spec *spec, h3_layout *layout,
                     char *error, size_t error_size);
+/* Image layout: [TEXT | REF_IMAGE* | VIDEO], one latent frame per image, no
+ * audio. Only H3_LAYOUT_REF_IMAGE references are accepted. */
+int h3_layout_build_image(int text_len, int latent_h, int latent_w,
+                          const h3_layout_ref *references,
+                          size_t reference_count, h3_layout *layout,
+                          char *error, size_t error_size);
 void h3_layout_free(h3_layout *layout);
 const char *h3_segment_name(h3_segment_kind kind);
 

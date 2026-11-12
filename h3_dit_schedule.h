@@ -13,8 +13,13 @@
 #define H3_DIT_TIME_DIM 2688u
 #define H3_DIT_MODALITIES 3u
 #define H3_DIT_ADALN_SLOTS 6u
+#define H3_DIT_TIME_INPUT 256u
 
 typedef struct h3_dit_schedule h3_dit_schedule;
+
+/* Sinusoidal timestep features [cos | sin] of one time value, H3_DIT_TIME_INPUT
+ * floats. Public internally so a cheap test can pin it. */
+void h3_dit_time_features(float time, float *row);
 
 typedef void (*h3_dit_schedule_progress)(int completed_blocks,
                                          int total_blocks, void *opaque);

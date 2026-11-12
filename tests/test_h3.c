@@ -1,5 +1,7 @@
 #include "h3_host.h"
 #include "h3_dit.h"
+#include "h3_dit_schedule.h"
+#include "h3_image.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
 #include "h3_terminal.h"
@@ -373,6 +375,214 @@ static void test_dit_row_conversions(void) {
     CHECK(memcmp(audio, unpacked, sizeof(audio)) == 0);
 }
 
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void test_image_schedule(void) {
+    h3_sigma_schedule schedule;
+    CHECK(h3_image_schedule_build(&schedule));
+    CHECK(schedule.steps == 6);
+    const uint32_t sigma_bits[7] = {
+        0x3f800000, 0x3f77afa2, 0x3f633661, 0x3f400000,
+        0x3f0863df, 0x3e6d93bc, 0x00000000
+    };
+    const uint32_t timestep_bits[6] = {
+        0x00000000, 0x3d0505e0, 0x3de64cf8, 0x3e800000, 0x3eef3842, 0x3f449b11
+    };
+    const float deltas[6] = {
+        0.032476306f, 0.07997519f, 0.1375485f, 0.21722609f, 0.30076504f,
+        0.23200887f
+    };
+    for (int index = 0; index <= 6; index++) {
+        CHECK(float_bits(schedule.video[index]) == sigma_bits[index]);
+        CHECK(float_bits(schedule.audio[index]) == sigma_bits[index]);
+    }
+    for (int index = 0; index < 6; index++) {
+        CHECK(float_bits(1.0f - schedule.video[index]) == timestep_bits[index]);
+        CHECK(close_enough(schedule.video[index] - schedule.video[index + 1],
+                           deltas[index], 1e-7));
+    }
+    CHECK(!h3_image_schedule_build(NULL));
+}
+
+static void test_image_canvas(void) {
+    const struct { int width, height, min_area, canvas_w, canvas_h; } cases[] = {
+        {1024, 1024, 4194304, 2048, 2048},
+        {768, 1024, 4194304, 1760, 2368},
+        {1024, 768, 4194304, 2368, 1760},
+        {1920, 1080, 4194304, 2720, 1536},
+        {1000, 1000, 1024, 992, 992},
+        {4096, 4096, 4194304, 4096, 4096},
+        {16, 16, 1024, 32, 32},
+        {48, 80, 1024, 64, 64}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int canvas_w = 0, canvas_h = 0;
+        CHECK(h3_image_canvas(cases[index].height, cases[index].width,
+                              cases[index].min_area, &canvas_h, &canvas_w));
+        CHECK(canvas_w == cases[index].canvas_w);
+        CHECK(canvas_h == cases[index].canvas_h);
+    }
+    int canvas_w, canvas_h;
+    CHECK(h3_image_canvas(1024, 1024, 1024, &canvas_h, &canvas_w));
+    CHECK(h3_image_canvas(1024, 1024, 16777216, &canvas_h, &canvas_w));
+    CHECK(canvas_w == 4096 && canvas_h == 4096);
+    CHECK(!h3_image_canvas(1024, 1024, 1023, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, 1024, 16777217, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(0, 1024, 4194304, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, -1, 4194304, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, 1024, 4194304, NULL, &canvas_w));
+}
+
+static void test_image_layout(void) {
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build_image(3, 4, 4, NULL, 0, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 7);
+    const size_t bounds[][2] = {{0, 3}, {3, 7}};
+    const h3_segment_kind kinds[] = {H3_SEG_TEXT, H3_SEG_VIDEO};
+    check_segments(&layout, bounds, kinds, 2);
+    CHECK(layout.img_cond_rows == 0 && layout.img_target_rows == 4);
+    CHECK(layout.audio_cond_rows == 0 && layout.audio_target_rows == 0);
+    const int signature[5] = {3, 1, 4, 4, 0};
+    CHECK(memcmp(layout.signature, signature, sizeof(signature)) == 0);
+    for (size_t row = 0; row < 3; row++) {
+        CHECK(layout.positions[row].t == (double)row);
+        CHECK(layout.positions[row].h == 0.0 && layout.positions[row].w == 0.0);
+    }
+    const double axis[2] = {0.0, 16.0};
+    for (size_t row = 0; row < 4; row++) {
+        CHECK(layout.positions[3 + row].t == 3.0);
+        CHECK(close_enough(layout.positions[3 + row].h, axis[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, axis[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    CHECK(h3_layout_build_image(3, 6, 4, NULL, 0, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 9 && layout.img_target_rows == 6);
+    const double heights[3] = {-3.59591794, 9.46802735, 22.53197265};
+    const double widths[2] = {2.93605471, 16.0};
+    for (size_t row = 0; row < 6; row++) {
+        CHECK(close_enough(layout.positions[3 + row].h, heights[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, widths[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    const h3_layout_ref refs[2] = {
+        {H3_LAYOUT_REF_IMAGE, 1, 2, 4, 0}, {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0}
+    };
+    CHECK(h3_layout_build_image(2, 4, 4, refs, 2, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 2 + 2 + 1 + 4);
+    const size_t ref_bounds[][2] = {{0, 2}, {2, 4}, {4, 5}, {5, 9}};
+    const h3_segment_kind ref_kinds[] = {
+        H3_SEG_TEXT, H3_SEG_REF_IMAGE, H3_SEG_REF_IMAGE, H3_SEG_VIDEO
+    };
+    check_segments(&layout, ref_bounds, ref_kinds, 4);
+    CHECK(layout.img_cond_rows == 3 && layout.img_target_rows == 4);
+    CHECK(layout.positions[2].t == 2.0 && layout.positions[4].t == 3.0);
+    CHECK(layout.positions[5].t == 4.0);
+    h3_layout_free(&layout);
+
+    const h3_layout_ref audio = {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 4};
+    CHECK(!h3_layout_build_image(3, 4, 4, &audio, 1, &layout,
+                                 error, sizeof(error)));
+    CHECK(error[0] != '\0' && layout.positions == NULL);
+    CHECK(!h3_layout_build_image(0, 4, 4, NULL, 0, &layout,
+                                 error, sizeof(error)));
+    CHECK(!h3_layout_build_image(3, 3, 4, NULL, 0, &layout,
+                                 error, sizeof(error)));
+}
+
+static void test_image_rope_inv_freq(void) {
+    const double dit[16] = {
+        1.0, 0.5623413, 0.31622776, 0.17782794, 0.1, 0.05623413, 0.031622778,
+        0.017782794, 0.01, 0.0056234133, 0.0031622778, 0.0017782794, 0.001,
+        0.00056234130, 0.00031622779, 0.00017782794
+    };
+    float values[16];
+    h3_image_dit_inv_freq(values);
+    for (size_t index = 0; index < 16; index++)
+        CHECK(fabs(values[index] - dit[index]) <= 2e-7 * dit[index]);
+    const double vae[8] = {
+        1.0, 0.5623413, 0.31622776, 0.17782794, 0.1, 0.05623413, 0.031622778,
+        0.017782794
+    };
+    h3_image_vae_inv_freq(values);
+    for (size_t index = 0; index < 8; index++)
+        CHECK(fabs(values[index] - vae[index]) <= 2e-7 * vae[index]);
+}
+
+static void test_image_timestep_features(void) {
+    float row[H3_DIT_TIME_INPUT];
+    h3_dit_time_features(0.032476306f, row);
+    CHECK(close_enough(row[0], 0.9994727, 1e-6));
+    CHECK(close_enough(row[128], 0.0324706, 1e-6));
+    CHECK(close_enough(row[127], 1.0, 1e-6));
+    CHECK(close_enough(row[128 + 2], 0.02811961, 1e-6));
+    h3_dit_time_features(0.0f, row);
+    CHECK(row[0] == 1.0f && row[128] == 0.0f && row[255] == 0.0f);
+}
+
+static void test_image_patchify(void) {
+    enum { C = 24, H = 4, W = 4, ELEMENTS = C * H * W, ROWS = 4, ROW = C * 4 };
+    float latent[ELEMENTS], rows[ELEMENTS], roundtrip[ELEMENTS];
+    for (size_t index = 0; index < ELEMENTS; index++) latent[index] = (float)index;
+    CHECK(h3_dit_patchify_video(latent, C, 1, H, W, rows, ELEMENTS));
+    for (size_t row = 0; row < ROWS; row++) {
+        for (size_t c = 0; c < C; c++) {
+            for (size_t dh = 0; dh < 2; dh++) {
+                for (size_t dw = 0; dw < 2; dw++) {
+                    size_t y = 2 * (row / 2) + dh, x = 2 * (row % 2) + dw;
+                    CHECK(rows[row * ROW + c * 4 + dh * 2 + dw] ==
+                          latent[(c * H + y) * W + x]);
+                }
+            }
+        }
+    }
+    CHECK(h3_dit_unpatchify_video(rows, C, 1, H, W, roundtrip, ELEMENTS));
+    CHECK(memcmp(latent, roundtrip, sizeof(latent)) == 0);
+}
+
+static void test_image_qkv_interleave(void) {
+    const struct { unsigned heads, head_dim; } shapes[] = {{56, 128}, {16, 64}};
+    for (size_t shape = 0; shape < 2; shape++) {
+        unsigned heads = shapes[shape].heads, dim = shapes[shape].head_dim;
+        size_t rows = (size_t)3 * heads * dim;
+        unsigned char *seen = calloc(rows, 1);
+        CHECK(seen != NULL);
+        for (size_t dest = 0; dest < rows; dest++) {
+            unsigned projection;
+            size_t source;
+            CHECK(h3_image_qkv_source(dest, heads, dim, &projection, &source));
+            size_t head = dest / ((size_t)3 * dim);
+            CHECK(projection == (dest / dim) % 3);
+            CHECK(source == head * dim + dest % dim);
+            size_t flat = projection * (size_t)heads * dim + source;
+            CHECK(!seen[flat]);
+            seen[flat] = 1;
+        }
+        free(seen);
+        unsigned projection;
+        size_t source;
+        CHECK(!h3_image_qkv_source(rows, heads, dim, &projection, &source));
+    }
+    unsigned projection;
+    size_t source;
+    CHECK(h3_image_qkv_source(56 * 384 - 1, 56, 128, &projection, &source));
+    CHECK(projection == 2 && source == 56 * 128 - 1);
+    CHECK(h3_image_qkv_source(128, 56, 128, &projection, &source));
+    CHECK(projection == 1 && source == 0);
+    CHECK(h3_image_qkv_source(384 + 2 * 128 + 5, 56, 128, &projection, &source));
+    CHECK(projection == 2 && source == 128 + 5);
+    CHECK(!h3_image_qkv_source(0, 0, 128, &projection, &source));
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -407,6 +617,13 @@ int main(void) {
     test_rng_and_solver();
     test_rgb_resize();
     test_dit_row_conversions();
+    test_image_schedule();
+    test_image_canvas();
+    test_image_layout();
+    test_image_rope_inv_freq();
+    test_image_timestep_features();
+    test_image_patchify();
+    test_image_qkv_interleave();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

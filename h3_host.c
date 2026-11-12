@@ -472,6 +472,77 @@ fail:
     return 0;
 }
 
+int h3_layout_build_image(int text_len, int latent_h, int latent_w,
+                          const h3_layout_ref *references,
+                          size_t reference_count, h3_layout *layout,
+                          char *error, size_t error_size) {
+    if (!layout) return 0;
+    memset(layout, 0, sizeof(*layout));
+    if (error && error_size) error[0] = '\0';
+    h3_layout_builder builder = {layout, 0, 0, error, error_size};
+    if (text_len < 1 || (reference_count && !references)) {
+        return h3_builder_fail(&builder, "invalid image layout dimensions");
+    }
+    h3_position *text = malloc((size_t)text_len * sizeof(*text));
+    if (!text) goto oom;
+    for (int index = 0; index < text_len; index++) {
+        text[index] = (h3_position){(double)index, 0.0, 0.0};
+    }
+    int ok = h3_emit(&builder, H3_SEG_TEXT, text, (size_t)text_len);
+    free(text);
+    if (!ok) goto fail;
+
+    double cursor = (double)text_len;
+    for (size_t index = 0; index < reference_count; index++) {
+        if (references[index].kind != H3_LAYOUT_REF_IMAGE) {
+            h3_builder_fail(&builder, "image layout accepts only image references");
+            goto fail;
+        }
+        h3_position *frame = NULL;
+        double *w_axis = NULL;
+        size_t rows = 0, w_count = 0;
+        if (!h3_frame_grid(references[index].latent_h, references[index].latent_w,
+                           &frame, &rows, &w_axis, &w_count)) {
+            h3_builder_fail(&builder, "invalid reference latent canvas or out of memory");
+            goto fail;
+        }
+        for (size_t row = 0; row < rows; row++) frame[row].t = cursor;
+        ok = h3_emit(&builder, H3_SEG_REF_IMAGE, frame, rows);
+        free(frame);
+        free(w_axis);
+        if (!ok) goto fail;
+        layout->img_cond_rows += rows;
+        cursor += 1.0;
+    }
+
+    h3_position *frame = NULL;
+    double *w_axis = NULL;
+    size_t rows = 0, w_count = 0;
+    if (!h3_frame_grid(latent_h, latent_w, &frame, &rows, &w_axis, &w_count)) {
+        h3_builder_fail(&builder, "invalid latent canvas or out of memory");
+        goto fail;
+    }
+    for (size_t row = 0; row < rows; row++) frame[row].t = cursor;
+    ok = h3_emit(&builder, H3_SEG_VIDEO, frame, rows);
+    free(frame);
+    free(w_axis);
+    if (!ok) goto fail;
+
+    layout->img_target_rows = rows;
+    layout->signature[0] = text_len;
+    layout->signature[1] = 1;
+    layout->signature[2] = latent_h;
+    layout->signature[3] = latent_w;
+    layout->signature[4] = 0;
+    return 1;
+
+oom:
+    h3_builder_fail(&builder, "out of memory while building layout");
+fail:
+    h3_layout_free(layout);
+    return 0;
+}
+
 void h3_layout_free(h3_layout *layout) {
     if (!layout) return;
     free(layout->segments);

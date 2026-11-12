@@ -292,13 +292,14 @@ oom:
 static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
                            char *error, size_t error_size) {
     const h3_layout *layout = &dit->layout;
+    int image = layout->signature[4] == 0;
     if (!text || !text->values || text->width != TEXT_DIM || !text->tokens ||
         layout->signature[0] != (int)text->tokens ||
-        !layout->segments || layout->segment_count < 3 ||
+        !layout->segments || layout->segment_count < (image ? 2u : 3u) ||
         layout->segments[0].kind != H3_SEG_TEXT ||
         layout->segments[layout->segment_count - 1].kind != H3_SEG_VIDEO ||
         layout->signature[1] < 1 || layout->signature[2] < 2 ||
-        layout->signature[3] < 2 || layout->signature[4] < 1 ||
+        layout->signature[3] < 2 || layout->signature[4] < (image ? 0 : 1) ||
         layout->signature[2] % 2 || layout->signature[3] % 2 ||
         layout->seq_len > UINT32_MAX || text->tokens > UINT32_MAX ||
         layout->img_cond_rows > UINT32_MAX ||
@@ -344,9 +345,11 @@ static int validate_layout(h3_dit *dit, const h3_text_embedding *text,
     if (cursor != layout->seq_len || text_rows != text->tokens ||
         video_condition != layout->img_cond_rows ||
         audio_condition != layout->audio_cond_rows ||
+        (image && audio_condition) ||
         video_target != layout->img_target_rows ||
         audio_target != layout->audio_target_rows ||
-        target_video_segments != 1 || target_audio_segments != 1 ||
+        target_video_segments != 1 ||
+        target_audio_segments != (image ? 0u : 1u) ||
         video_condition > UINT32_MAX - video_target ||
         audio_condition > UINT32_MAX - audio_target) {
         fail(error, error_size, "DiT layout row-source counts are inconsistent");

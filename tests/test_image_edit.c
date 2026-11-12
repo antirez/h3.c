@@ -370,6 +370,18 @@ static void test_limits_before_loading(const char *tokenizer_json) {
             "reference 1 brings the reference and image rows to 33792, above "
             "32768");
 
+    /* No --size: the canvas of a 8300x4200 reference is over the cap, and the
+     * message says where the size came from. */
+    uint8_t *wide = malloc((size_t)3 * 8300 * 4200);
+    CHECK(wide != NULL);
+    memset(wide, 90, (size_t)3 * 8300 * 4200);
+    write_png(path_in("wide.png"), wide, 8300, 4200);
+    free(wide);
+    references[0].path = path_in("wide.png");
+    params.width = params.height = 0;
+    refused(ctx, "<Picture 1>", &params,
+            "the size was taken from reference 1; pass --size");
+
     if (tokenizer_json) {
         /* A canvas of 7936x4096 (31744 rows) and one 1024x1024 reference make
          * 32768 rows, the cap; a 4096-token prompt, the label and the 1024
@@ -391,6 +403,7 @@ static void test_limits_before_loading(const char *tokenizer_json) {
         CHECK(prompt != NULL);
         strcpy(prompt, "<Picture 1>");
         for (int word = 0; word < 5000; word++) strcat(prompt, " word");
+        references[0].path = path_in("big.png");
         params.width = 7936;
         params.height = 4096;
         refused(ctx, prompt, &params,
@@ -506,8 +519,30 @@ static void test_reference_rows(const char *model_dir) {
     free(hooks.condition_rows);
     h3_result_free(result);
 
-    /* The same rows from hook inputs: our own copies, the stream noises. */
-    const uint8_t *vae_hook[COUNT] = {vae_copies[0], vae_copies[1]};
+    /* Hook inputs: the stream noises and VAE copies that differ from h3's
+     * own (inverted), so a hook that is ignored gives other rows. */
+    uint8_t *inverted[COUNT];
+    float *expected_inverted = malloc(offsets[COUNT] * sizeof(float));
+    CHECK(expected_inverted != NULL);
+    for (int index = 0; index < COUNT; index++) {
+        const h3_image_reference_geometry *g = &geometry[index];
+        size_t bytes = (size_t)3 * (size_t)g->vae_w * (size_t)g->vae_h;
+        inverted[index] = malloc(bytes);
+        CHECK(inverted[index] != NULL);
+        for (size_t at = 0; at < bytes; at++)
+            inverted[index][at] = (uint8_t)(255 - vae_copies[index][at]);
+        h3_reference_latents latents;
+        CHECK(h3_image_vae_encode(vae_directory, "h3_shaders.metal",
+                                  inverted[index], g->vae_h, g->vae_w,
+                                  posterior[index], 0, NULL, NULL, &latents,
+                                  error, sizeof(error)));
+        CHECK(h3_image_edit_condition_rows(latents.latents, aug[index],
+                                           g->latent_h, g->latent_w,
+                                           expected_inverted + offsets[index]));
+        h3_reference_latents_free(&latents);
+    }
+    CHECK(memcmp(expected, expected_inverted, offsets[COUNT] * sizeof(float)));
+    const uint8_t *vae_hook[COUNT] = {inverted[0], inverted[1]};
     const uint8_t *vision_hook[COUNT] = {vision_copies[0], vision_copies[1]};
     const float *posterior_hook[COUNT] = {posterior[0], posterior[1]};
     const float *aug_hook[COUNT] = {aug[0], aug[1]};
@@ -522,12 +557,13 @@ static void test_reference_rows(const char *model_dir) {
     CHECK(result != NULL);
     CHECK(hooks.condition_elements == offsets[COUNT]);
     CHECK(hooks.condition_rows != NULL &&
-          !memcmp(hooks.condition_rows, expected,
+          !memcmp(hooks.condition_rows, expected_inverted,
                   offsets[COUNT] * sizeof(float)));
     free(hooks.condition_rows);
     h3_result_free(result);
 
     for (int index = 0; index < COUNT; index++) {
+        free(inverted[index]);
         free((void *)references[index].path);
         free(vae_copies[index]);
         free(vision_copies[index]);
@@ -535,6 +571,7 @@ static void test_reference_rows(const char *model_dir) {
         free(aug[index]);
     }
     free(expected);
+    free(expected_inverted);
     free(vae_directory);
     h3_free(ctx);
 }

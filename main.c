@@ -130,13 +130,12 @@ static uint64_t parse_u64(const char *value, const char *label) {
     return (uint64_t)parsed;
 }
 
-#define MAX_CLI_REFERENCES 32
+#define MAX_CLI_REFERENCES 12
 
 static h3_reference *append_reference(
         h3_reference references[MAX_CLI_REFERENCES], size_t *count) {
     if (*count >= MAX_CLI_REFERENCES) {
-        fprintf(stderr, "h3: at most %d --ref-* options are accepted\n",
-                MAX_CLI_REFERENCES);
+        fprintf(stderr, "h3: Ref2VA supports at most 12 references\n");
         exit(2);
     }
     h3_reference *reference = &references[(*count)++];
@@ -606,7 +605,12 @@ int main(int argc, char **argv) {
         image_error = "--int8 applies to image models only";
     else if (image && int8_flag && params.ssd_streaming)
         image_error = "--int8 and --ssd-streaming exclude each other";
-    else if (image && video_only) {
+    else if (image && reference_count > H3_IMAGE_MAX_REFERENCES) {
+        snprintf(image_error_text, sizeof(image_error_text),
+                 "at most %d --ref-image options are accepted for image "
+                 "editing, got %zu", H3_IMAGE_MAX_REFERENCES, reference_count);
+        image_error = image_error_text;
+    } else if (image && video_only) {
         snprintf(image_error_text, sizeof(image_error_text),
                  "%s does not apply to image models", video_only);
         image_error = image_error_text;

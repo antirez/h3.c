@@ -153,7 +153,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	h3_real_image_vae_test h3_real_image_vae_encode_test \
 	h3_real_image_dit_block_test h3_real_image_dit_test h3_real_image_dit_large_test \
 	h3_real_image_text_test h3_real_image_e2e_test h3_image_edit_tests \
-	h3_real_image_edit_e2e_test
+	h3_real_image_edit_e2e_test h3
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -200,6 +200,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 			fi; \
 		fi; \
 		./h3_image_edit_tests $$tokenizer $$model || exit 1; \
+		sh tests/check_cli_refs.sh ./h3 $(H3_IMAGE_DIR) || exit 1; \
 	else \
 		echo "skip: FFmpeg is not installed"; \
 	fi

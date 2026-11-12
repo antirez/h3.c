@@ -19,16 +19,18 @@ enum { LATENT_CHANNELS = 24, REFERENCE_CASES = 3, SIZES = 12 };
  * transformer): the encoder is F32, so the rows agree to rounding. */
 #define REFERENCE_ROWS_BOUND 2.4e-5
 
-/* The parity run feeds the fixture's resized copies and noises; the bounds
- * start from the text-to-image end-to-end values. */
+/* PLACEHOLDERS: the parity pair is copied from the text-to-image end-to-end
+ * test and the own-resampling pair is a guess. Replace all four with 1.4x the
+ * values measured in the gated window. The parity run feeds the fixture's
+ * resized copies and noises. */
 typedef struct {
     double psnr, within16, latent;
 } bounds;
-static const bounds BF16_BOUNDS = {26.0, 0.96, 0.107}; /* measured in the gated window */
-static const bounds INT8_BOUNDS = {16.0, 0.74, 0.385}; /* measured in the gated window */
+static const bounds BF16_BOUNDS = {26.0, 0.96, 0.107}; /* placeholder */
+static const bounds INT8_BOUNDS = {16.0, 0.74, 0.385}; /* placeholder */
 /* The same run with h3.c's own resampling of the reference. */
-static const bounds OWN_BF16_BOUNDS = {20.0, 0.85, 0.3}; /* measured in the gated window */
-static const bounds OWN_INT8_BOUNDS = {14.0, 0.65, 0.5}; /* measured in the gated window */
+static const bounds OWN_BF16_BOUNDS = {20.0, 0.85, 0.3}; /* placeholder */
+static const bounds OWN_INT8_BOUNDS = {14.0, 0.65, 0.5}; /* placeholder */
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_edit_e2e.c: %s\n", message);
@@ -92,6 +94,18 @@ static void write_reference(const char *path, const uint8_t *planar,
     if (!h3_ffmpeg_write_png_rgb24(path, interleaved, width, height, error,
                                    sizeof(error))) die(error);
     free(interleaved);
+}
+
+static void require_shape(const h3_st_header *fixture, const char *name,
+                          int height, int width, const char *what) {
+    const h3_st_tensor *tensor = h3_st_find(fixture, name);
+    if (!tensor || tensor->ndim != 3 || tensor->shape[0] != 3 ||
+        tensor->shape[1] != (uint64_t)height ||
+        tensor->shape[2] != (uint64_t)width) {
+        fprintf(stderr, "FAIL tests/test_real_image_edit_e2e.c: fixture "
+                "tensor %s is not 3x%dx%d (%s)\n", name, height, width, what);
+        exit(1);
+    }
 }
 
 static double relative_l2(const float *got, const float *want, size_t count) {
@@ -361,10 +375,23 @@ int main(int argc, char **argv) {
                                     H3_DTYPE_F32, posterior_elements);
     float *aug = read_fixture(&fixture, "reference_aug_noise_0", H3_DTYPE_F32,
                               aug_elements);
+    /* vae_u8 is the VAE copy; vision_u8 must be the image the Qwen vision
+     * tower receives, that is after smart_resize, not the first-stage image
+     * that the processor still resizes. */
+    require_shape(&fixture, "vae_u8", geometry.vae_h, geometry.vae_w,
+                  "the VAE copy");
+    require_shape(&fixture, "vision_u8", geometry.vision_h, geometry.vision_w,
+                  "the vision tower input after smart_resize");
     uint8_t *vae_pixels = read_fixture(&fixture, "vae_u8", H3_DTYPE_U8,
         (size_t)3 * (size_t)geometry.vae_h * (size_t)geometry.vae_w);
     uint8_t *vision_pixels = read_fixture(&fixture, "vision_u8", H3_DTYPE_U8,
         (size_t)3 * (size_t)geometry.vision_h * (size_t)geometry.vision_w);
+    size_t condition_elements = (size_t)geometry.dit_rows * 96;
+    float *want_condition = h3_st_find(&fixture, "condition_rows") ?
+        read_fixture(&fixture, "condition_rows", H3_DTYPE_F32,
+                     condition_elements) : NULL;
+    const h3_st_tensor *token_tensor = h3_st_find(&fixture, "token_ids");
+    size_t want_tokens = token_tensor ? h3_st_tensor_elements(token_tensor) : 0;
     float *want_latent = NULL;
     if (h3_st_find(&fixture, "latents_final"))
         want_latent = read_fixture(&fixture, "latents_final", H3_DTYPE_F32,
@@ -418,8 +445,22 @@ int main(int argc, char **argv) {
                                                  "");
         if (result->width != width || result->height != height ||
             !hooks.rgb || !hooks.latent) die("result has the wrong shape");
-        if (hooks.condition_elements !=
-            (size_t)geometry.dit_rows * 96) die("condition row count");
+        if (hooks.condition_elements != condition_elements)
+            die("condition row count");
+        if (want_condition) {
+            double rows_error = relative_l2(hooks.condition_rows,
+                                            want_condition, condition_elements);
+            printf("  condition rows vs diffusers: rel-L2 %.3g (bound %.3g)\n",
+                   rows_error, REFERENCE_ROWS_BOUND);
+            if (!own && !(rows_error < REFERENCE_ROWS_BOUND))
+                die("condition rows are over the bound");
+        }
+        if (want_tokens) {
+            printf("  text tokens %zu, fixture %zu\n", hooks.text_tokens,
+                   want_tokens);
+            if (hooks.text_tokens != want_tokens)
+                die("text presentation length differs from the fixture");
+        }
         scores got = score(&hooks, want, pixels, want_latent, latent_elements);
         int is_int8 = !strcmp(hooks.weight_mode, "int8");
         const bounds *limit = own ? (is_int8 ? &OWN_INT8_BOUNDS :
@@ -442,6 +483,7 @@ int main(int argc, char **argv) {
     free(noise);
     free(want);
     free(want_latent);
+    free(want_condition);
     free(reference);
     free(posterior);
     free(aug);

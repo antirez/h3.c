@@ -4,6 +4,7 @@
 #include "h3_gpu.h"
 #include "h3_image.h"
 #include "h3_image_vae.h"
+#include "h3_video_encoder.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -75,6 +76,17 @@ int h3_image_vae_encode(const char *weight_directory,
                         h3_image_vae_progress progress, void *progress_opaque,
                         h3_reference_latents *output,
                         char *error, size_t error_size);
+/* The same step with an encoder kept open (h3_image_vae_encoder_open), so a
+ * run with several references loads the weights once. weight_directory still
+ * names the VAE directory for config.json. */
+int h3_image_vae_encode_session(h3_image_vae_encoder *session,
+                                const char *weight_directory,
+                                const uint8_t *rgb_planar, int height,
+                                int width, const float *noise, uint64_t seed,
+                                h3_image_vae_progress progress,
+                                void *progress_opaque,
+                                h3_reference_latents *output,
+                                char *error, size_t error_size);
 void h3_reference_latents_free(h3_reference_latents *latents);
 
 #endif

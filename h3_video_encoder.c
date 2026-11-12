@@ -764,18 +764,43 @@ static int stitch_latents(float **tiles, int channels, int latent_time,
     return 1;
 }
 
-static int encode_visual(const encoder_names *names, int raw_moments,
-                         const char *weight_directory,
-                         const char *shader_source_path,
-                         const float *pixels, int frames, int height, int width,
-                         h3_video_encoder_progress progress,
-                         void *progress_opaque, h3_video_latent *output,
-                         char *error, size_t error_size) {
+static int open_encoder(encoder_context *encoder, const encoder_names *names,
+                        int raw_moments, const char *weight_directory,
+                        const char *shader_source_path,
+                        char *error, size_t error_size) {
+    memset(encoder, 0, sizeof(*encoder));
+    if (!weight_directory || !*weight_directory || !shader_source_path ||
+        !*shader_source_path) {
+        fail(error, error_size, "invalid visual encoder arguments");
+        return 0;
+    }
+    encoder->names = names;
+    encoder->raw_moments = raw_moments;
+    encoder->output_channels = raw_moments ? MOMENT_CHANNELS : LATENT_CHANNELS;
+    encoder->gpu = h3_gpu_create(shader_source_path, error, error_size);
+    if (encoder->gpu)
+        h3_gpu_profile_set_label(encoder->gpu, raw_moments ?
+                                 "image VAE encoder" : "video VAE encoder");
+    if (encoder->gpu)
+        encoder->store = h3_weight_store_open(weight_directory, error,
+                                              error_size);
+    int ok = encoder->gpu && encoder->store &&
+         (raw_moments ||
+          load_normalization(encoder, weight_directory, error, error_size)) &&
+         load_weights(encoder, error, error_size);
+    if (!ok) cleanup(encoder);
+    return ok;
+}
+
+static int encode_with(encoder_context *encoder, const float *pixels,
+                       int frames, int height, int width,
+                       h3_video_encoder_progress progress,
+                       void *progress_opaque, h3_video_latent *output,
+                       char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (output) memset(output, 0, sizeof(*output));
-    if (!weight_directory || !*weight_directory || !shader_source_path ||
-        !*shader_source_path || !pixels || !output || frames < 1 || height < 32 ||
-        width < 32 || height % SPATIAL_RATIO || width % SPATIAL_RATIO) {
+    if (!pixels || !output || frames < 1 || height < 32 || width < 32 ||
+        height % SPATIAL_RATIO || width % SPATIAL_RATIO) {
         fail(error, error_size, "invalid visual encoder arguments");
         return 0;
     }
@@ -787,23 +812,9 @@ static int encode_visual(const encoder_names *names, int raw_moments,
         tile_axis_free(&x_axis);
         return 0;
     }
-    encoder_context encoder = {0};
-    encoder.names = names;
-    encoder.raw_moments = raw_moments;
-    encoder.output_channels = raw_moments ? MOMENT_CHANNELS : LATENT_CHANNELS;
-    encoder.gpu = h3_gpu_create(shader_source_path, error, error_size);
-    if (encoder.gpu)
-        h3_gpu_profile_set_label(encoder.gpu, raw_moments ?
-                                 "image VAE encoder" : "video VAE encoder");
-    if (encoder.gpu)
-        encoder.store = h3_weight_store_open(weight_directory, error, error_size);
-    ok = encoder.gpu && encoder.store &&
-         (raw_moments ||
-          load_normalization(&encoder, weight_directory, error, error_size)) &&
-         load_weights(&encoder, error, error_size);
     int tile_count = y_axis.count * x_axis.count;
-    float **tiles = ok ? calloc((size_t)tile_count, sizeof(*tiles)) : NULL;
-    if (ok && !tiles) {
+    float **tiles = calloc((size_t)tile_count, sizeof(*tiles));
+    if (!tiles) {
         fail(error, error_size, "out of memory allocating visual encoder tiles");
         ok = 0;
     }
@@ -815,7 +826,7 @@ static int encode_visual(const encoder_names *names, int raw_moments,
                 y_axis.length, x_axis.length, error, error_size);
             int current_time = 0;
             if (tile) tiles[completed] = encode_tile(
-                &encoder, tile, frames, y_axis.length, x_axis.length,
+                encoder, tile, frames, y_axis.length, x_axis.length,
                 &current_time, error, error_size);
             free(tile);
             ok = tiles[completed] != NULL &&
@@ -823,17 +834,80 @@ static int encode_visual(const encoder_names *names, int raw_moments,
             if (ok) latent_time = current_time;
             if (ok && progress) progress(completed + 1, tile_count, progress_opaque);
         }
-    if (ok) ok = stitch_latents(tiles, encoder.output_channels, latent_time,
+    if (ok) ok = stitch_latents(tiles, encoder->output_channels, latent_time,
                                 &y_axis, &x_axis, output, error,
                                 error_size) &&
-                 h3_gpu_get_stats(encoder.gpu, &output->gpu_stats);
+                 h3_gpu_get_stats(encoder->gpu, &output->gpu_stats);
     if (tiles) for (int index = 0; index < tile_count; index++) free(tiles[index]);
     free(tiles);
-    cleanup(&encoder);
     tile_axis_free(&y_axis);
     tile_axis_free(&x_axis);
     if (!ok) h3_video_latent_free(output);
     return ok;
+}
+
+static int encode_visual(const encoder_names *names, int raw_moments,
+                         const char *weight_directory,
+                         const char *shader_source_path,
+                         const float *pixels, int frames, int height, int width,
+                         h3_video_encoder_progress progress,
+                         void *progress_opaque, h3_video_latent *output,
+                         char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (output) memset(output, 0, sizeof(*output));
+    if (!pixels || !output || frames < 1 || height < 32 || width < 32 ||
+        height % SPATIAL_RATIO || width % SPATIAL_RATIO) {
+        fail(error, error_size, "invalid visual encoder arguments");
+        return 0;
+    }
+    encoder_context encoder;
+    if (!open_encoder(&encoder, names, raw_moments, weight_directory,
+                      shader_source_path, error, error_size)) return 0;
+    int ok = encode_with(&encoder, pixels, frames, height, width, progress,
+                         progress_opaque, output, error, error_size);
+    cleanup(&encoder);
+    return ok;
+}
+
+struct h3_image_vae_encoder {
+    encoder_context context;
+};
+
+h3_image_vae_encoder *h3_image_vae_encoder_open(const char *weight_directory,
+                                                const char *shader_source_path,
+                                                char *error,
+                                                size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    h3_image_vae_encoder *encoder = calloc(1, sizeof(*encoder));
+    if (!encoder) {
+        fail(error, error_size, "out of memory opening the image VAE encoder");
+        return NULL;
+    }
+    if (!open_encoder(&encoder->context, &image_names, 1, weight_directory,
+                      shader_source_path, error, error_size)) {
+        free(encoder);
+        return NULL;
+    }
+    return encoder;
+}
+
+int h3_image_vae_encoder_moments(h3_image_vae_encoder *encoder,
+                                 const float *pixels, int height, int width,
+                                 h3_video_encoder_progress progress,
+                                 void *progress_opaque, h3_video_latent *output,
+                                 char *error, size_t error_size) {
+    if (!encoder) {
+        fail(error, error_size, "invalid visual encoder arguments");
+        return 0;
+    }
+    return encode_with(&encoder->context, pixels, 1, height, width, progress,
+                       progress_opaque, output, error, error_size);
+}
+
+void h3_image_vae_encoder_close(h3_image_vae_encoder *encoder) {
+    if (!encoder) return;
+    cleanup(&encoder->context);
+    free(encoder);
 }
 
 int h3_video_vae_encode(const char *weight_directory,

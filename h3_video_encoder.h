@@ -35,6 +35,17 @@ int h3_image_vae_encode_moments(const char *weight_directory,
                                 h3_video_encoder_progress progress,
                                 void *progress_opaque, h3_video_latent *output,
                                 char *error, size_t error_size);
+/* The same encoder kept open across images: the weights load once. */
+typedef struct h3_image_vae_encoder h3_image_vae_encoder;
+h3_image_vae_encoder *h3_image_vae_encoder_open(const char *weight_directory,
+                                                const char *shader_source_path,
+                                                char *error, size_t error_size);
+int h3_image_vae_encoder_moments(h3_image_vae_encoder *encoder,
+                                 const float *pixels, int height, int width,
+                                 h3_video_encoder_progress progress,
+                                 void *progress_opaque, h3_video_latent *output,
+                                 char *error, size_t error_size);
+void h3_image_vae_encoder_close(h3_image_vae_encoder *encoder);
 void h3_video_latent_free(h3_video_latent *latent);
 
 #endif

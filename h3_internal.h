@@ -53,8 +53,10 @@ typedef struct {
     const float *const *reference_posterior_noise;
     const float *const *reference_aug_noise;
     /* Planar bytes [3][h][w] used instead of the pixels h3.c resizes itself:
-     * the VAE copy (vae_w x vae_h) and the Qwen vision copy (vision_w x
-     * vision_h) of the reference's geometry. */
+     * the VAE copy (vae_w x vae_h) and the image the Qwen vision tower
+     * receives (vision_w x vision_h of the reference's geometry): the vision
+     * copy after smart_resize, not the first-stage image. The sizes are not
+     * checked here; the caller must match the geometry. */
     const uint8_t *const *vae_pixels;
     const uint8_t *const *vision_pixels;
     /* Edit outputs, malloc'd, the caller frees them: the noised, patchified

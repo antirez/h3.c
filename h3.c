@@ -2009,13 +2009,17 @@ static int h3_edit_decode(h3_ctx *ctx, const h3_image_params *params,
 }
 
 static int h3_edit_check(h3_ctx *ctx, h3_edit_state *edit, int latent_height,
-                         int latent_width, size_t presentation_tokens) {
+                         int latent_width, size_t presentation_tokens,
+                         int size_defaulted) {
     char detail[256];
     if (!h3_image_edit_check_limits(edit->widths, edit->heights, edit->count,
                                     latent_height, latent_width,
                                     presentation_tokens, edit->geometry,
                                     detail, sizeof(detail))) {
-        h3_set_error(ctx, "%s", detail);
+        int canvas_related = strstr(detail, "rows") != NULL;
+        h3_set_error(ctx, "%s%s", detail, size_defaulted && canvas_related ?
+                     " (the size was taken from reference 1; pass --size)" :
+                     "");
         return 0;
     }
     return 1;
@@ -2066,6 +2070,8 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
                                      int profile) {
     char detail[512];
     size_t rows = 0;
+    h3_image_vae_encoder *encoder = NULL;
+    int succeeded = 0;
     for (size_t index = 0; index < edit->count; index++)
         rows += (size_t)edit->geometry[index].dit_rows;
     edit->condition_elements = rows * 96;
@@ -2073,6 +2079,12 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
                                   sizeof(*edit->condition_rows));
     if (!edit->condition_rows) {
         h3_set_error(ctx, "out of memory allocating the reference rows");
+        return 0;
+    }
+    encoder = h3_image_vae_encoder_open(vae_path, "h3_shaders.metal", detail,
+                                        sizeof(detail));
+    if (!encoder) {
+        h3_set_error(ctx, "%s", detail);
         return 0;
     }
     size_t offset = 0;
@@ -2085,7 +2097,7 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
                                   &edit->vision[index])) {
             h3_set_error(ctx, "reference %zu: cannot resize the image",
                          index + 1);
-            return 0;
+            goto done;
         }
         free(edit->sources[index]);
         edit->sources[index] = NULL;
@@ -2094,20 +2106,21 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
         else
             vae_pixels = vae_copy;
         h3_reference_latents latents;
-        int ok = h3_image_vae_encode(
-            vae_path, "h3_shaders.metal", vae_pixels, g->vae_h, g->vae_w,
+        int encoded = h3_image_vae_encode_session(
+            encoder, vae_path, vae_pixels, g->vae_h, g->vae_w,
             hooks && hooks->reference_posterior_noise ?
                 hooks->reference_posterior_noise[index] : NULL,
             h3_image_edit_stream(params->seed, 1, index),
             h3_image_vae_encode_bridge, progress, &latents, detail,
             sizeof(detail));
         free(vae_copy);
-        if (!ok) {
+        if (!encoded) {
             if (!progress->cancelled)
                 h3_set_error(ctx, "reference %zu: %s", index + 1, detail);
-            return 0;
+            goto done;
         }
         if (profile) h3_report_peak("reference VAE", &latents.gpu_stats);
+        int ok = 1;
         size_t count = (size_t)H3_IMAGE_LATENT_CHANNELS *
                        (size_t)g->latent_h * (size_t)g->latent_w;
         const float *aug = hooks && hooks->reference_aug_noise ?
@@ -2140,12 +2153,15 @@ static int h3_edit_encode_references(h3_ctx *ctx, const h3_image_params *params,
         }
         free(drawn);
         h3_reference_latents_free(&latents);
-        if (!ok) return 0;
+        if (!ok) goto done;
         offset += (size_t)g->dit_rows * 96;
         edit->layout[index] = h3_image_edit_layout_ref(g);
-        if (progress->cancelled) return 0;
+        if (progress->cancelled) goto done;
     }
-    return 1;
+    succeeded = 1;
+done:
+    h3_image_vae_encoder_close(encoder);
+    return succeeded;
 }
 
 /* Qwen vision tower per reference, then the language layers; the tower and the
@@ -2244,10 +2260,12 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     memset(&edit_state, 0, sizeof(edit_state));
     h3_image_phase_log phase_log = {{{0}}, 0, h3_wall_seconds()};
     int request_width = params->width, request_height = params->height;
+    int size_defaulted = 0;
     if (edit) {
         h3_edit_warn_tags(prompt, params->reference_count);
         if (!h3_edit_decode(ctx, params, &edit_state)) goto cleanup;
         if (!request_width) {
+            size_defaulted = 1;
             request_width = edit_state.widths[0];
             request_height = edit_state.heights[0];
         }
@@ -2262,9 +2280,11 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     const char *canvas_error = h3_image_canvas_error(canvas_height,
                                                      canvas_width);
     if (canvas_error) {
-        h3_set_error(ctx, "%s (%dx%d for a %dx%d request)", canvas_error,
+        h3_set_error(ctx, "%s (%dx%d for a %dx%d request)%s", canvas_error,
                      canvas_width, canvas_height, request_width,
-                     request_height);
+                     request_height, size_defaulted ?
+                     " (the size was taken from reference 1; pass --size)" :
+                     "");
         goto cleanup;
     }
     int latent_height = canvas_height / H3_IMAGE_VAE_SCALE;
@@ -2275,11 +2295,12 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
             (latent_height / 2) * (latent_width / 2));
     if (edit) {
         size_t presentation_tokens = 0;
-        if (!h3_edit_check(ctx, &edit_state, latent_height, latent_width, 0) ||
+        if (!h3_edit_check(ctx, &edit_state, latent_height, latent_width, 0,
+                           size_defaulted) ||
             !h3_edit_presentation_tokens(ctx, prompt, &edit_state,
                                          &presentation_tokens) ||
             !h3_edit_check(ctx, &edit_state, latent_height, latent_width,
-                           presentation_tokens)) goto cleanup;
+                           presentation_tokens, size_defaulted)) goto cleanup;
         if (hooks) hooks->text_tokens = presentation_tokens;
     }
     dit_path = h3_path(ctx->model_dir, "transformer_diffusers");

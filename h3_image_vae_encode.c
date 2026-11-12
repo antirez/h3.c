@@ -216,13 +216,15 @@ void h3_reference_latents_free(h3_reference_latents *latents) {
     memset(latents, 0, sizeof(*latents));
 }
 
-int h3_image_vae_encode(const char *weight_directory,
-                        const char *shader_source_path,
-                        const uint8_t *rgb_planar, int height, int width,
-                        const float *noise, uint64_t seed,
-                        h3_image_vae_progress progress, void *progress_opaque,
-                        h3_reference_latents *output,
-                        char *error, size_t error_size) {
+static int encode_reference(h3_image_vae_encoder *session,
+                            const char *weight_directory,
+                            const char *shader_source_path,
+                            const uint8_t *rgb_planar, int height, int width,
+                            const float *noise, uint64_t seed,
+                            h3_image_vae_progress progress,
+                            void *progress_opaque,
+                            h3_reference_latents *output,
+                            char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (output) memset(output, 0, sizeof(*output));
     if (!weight_directory || !shader_source_path || !rgb_planar || !output ||
@@ -252,10 +254,14 @@ int h3_image_vae_encode(const char *weight_directory,
                              pixel_width, cropped);
         for (size_t index = 0; index < pixel_count; index++)
             pixels[index] = (float)cropped[index] / 255.0f;
-        ok = h3_image_vae_encode_moments(weight_directory, shader_source_path,
-                                         pixels, pixel_height, pixel_width,
-                                         progress, progress_opaque, &encoded,
-                                         error, error_size);
+        ok = session ?
+            h3_image_vae_encoder_moments(session, pixels, pixel_height,
+                                         pixel_width, progress, progress_opaque,
+                                         &encoded, error, error_size) :
+            h3_image_vae_encode_moments(weight_directory, shader_source_path,
+                                        pixels, pixel_height, pixel_width,
+                                        progress, progress_opaque, &encoded,
+                                        error, error_size);
     }
     if (ok && !noise) {
         h3_rng rng;
@@ -298,4 +304,29 @@ int h3_image_vae_encode(const char *weight_directory,
     h3_video_latent_free(&encoded);
     if (!ok) h3_reference_latents_free(output);
     return ok;
+}
+
+int h3_image_vae_encode(const char *weight_directory,
+                        const char *shader_source_path,
+                        const uint8_t *rgb_planar, int height, int width,
+                        const float *noise, uint64_t seed,
+                        h3_image_vae_progress progress, void *progress_opaque,
+                        h3_reference_latents *output,
+                        char *error, size_t error_size) {
+    return encode_reference(NULL, weight_directory, shader_source_path,
+                            rgb_planar, height, width, noise, seed, progress,
+                            progress_opaque, output, error, error_size);
+}
+
+int h3_image_vae_encode_session(h3_image_vae_encoder *session,
+                                const char *weight_directory,
+                                const uint8_t *rgb_planar, int height,
+                                int width, const float *noise, uint64_t seed,
+                                h3_image_vae_progress progress,
+                                void *progress_opaque,
+                                h3_reference_latents *output,
+                                char *error, size_t error_size) {
+    return encode_reference(session, weight_directory, "", rgb_planar, height,
+                            width, noise, seed, progress, progress_opaque,
+                            output, error, error_size);
 }

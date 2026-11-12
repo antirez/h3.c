@@ -359,26 +359,30 @@ image-check: h3 h3_image_png_test
 # weights, so its peak is evictable file pages plus a few GB. Every command
 # can first be run with --plan (harness) to print shapes without a 62 GB model.
 define IMAGE_EDIT_FIXTURES
-G="python3 gated_exec.py --swap-mb 14000 --timeout 7200 --"   PY="python -I"
+GATED=/private/tmp/claude-501/-Users-ronica-projects/6bc281dc-2caa-4d62-b4ea-14cf2c92d0cd/scratchpad/gated_exec.py
+G="python3 $$GATED --swap-mb 14000 --timeout 7200 --"   PY="python -I"
 H="$$PY tools/h3_image_reference.py --device cpu --out-dir misc/fixtures"
- 1. (done) $$H --stage edit_vae                 light, 2 GB VAE, about 1 min
+ 1. $$H --stage edit_vae                        only for the M5c reference-encoder test, not for steps 2-8; light, about 1 min
  2. $$G $$H --stage edit_text_small             62 GB text encoder, N=84: 5-15 min, 4 GB anon + page cache
  3. $$G $$H --stage edit_step                   BF16 DiT x 6 steps, S=404: about 30 min, 6 GB anon + page cache
- 4. $$G $$H --stage edit_f32truth               F32 blocks, S=404: about 5 min, 4 GB anon + page cache
+ 4. $$G $$H --stage edit_f32truth               F32, each block converted once for all six steps: about 5 min, 4 GB anon + page cache
  5. $$G $$H --stage edit_text                   62 GB text encoder, N=1044: 10-30 min, 6 GB anon + page cache
- 6. $$G $$H --stage edit_e2e                    F32 steps-outer, S=2324: about 20 min, 8 GB anon + page cache
+ 6. $$G $$H --stage edit_e2e                    F32 steps-outer, 300 block conversions, S=2324: 25-35 min, 8 GB anon + page cache
     ($$H --stage edit_e2e --bf16-reference adds the BF16 image, hours; optional)
- 7. $$G make h3_real_image_edit_text_test && $$G ./h3_real_image_edit_text_test $(H3_IMAGE_DIR) \
+ 7. make h3_real_image_edit_text_test && H3_MEASURE=1 $$G ./h3_real_image_edit_text_test $(H3_IMAGE_DIR) \
       misc/fixtures/h3_image_edit_text.safetensors misc/fixtures/h3_image_edit_text_small.safetensors
       2 vision-tower and 2 text passes: 10-20 min, about 8 GB (ring of layers) + page cache
- 8. rm -f h3_image_edit_dit_velocity.bin; for mode in stream bf16 int8; do $$G ./h3_real_image_edit_dit_test \
+ 8. make h3_real_image_edit_dit_test && rm -f h3_image_edit_dit_velocity.bin; for mode in stream bf16 int8; do \
+      H3_MEASURE=1 $$G ./h3_real_image_edit_dit_test \
       $(H3_IMAGE_DIR)/transformer_diffusers misc/fixtures/h3_image_edit_step.safetensors \
       misc/fixtures/h3_image_edit_text_small.safetensors $$mode h3_image_edit_dit_velocity.bin \
       misc/fixtures/h3_image_edit_step_f32.safetensors; done
       two loads per mode: stream 5-10 min and 4 GiB, bf16 5-10 min and 38 GiB, int8 5-10 min and 20 GiB
+    H3_MEASURE=1 makes every placeholder bound only print PASS or OVER and the run continue; exact checks still fail.
  9. M5c.1/M5c.2: make image-edit-check, then the edit end-to-end test on misc/fixtures/h3_image_edit_e2e_512.safetensors
-    After steps 2-8 replace the placeholders marked "measured in the gated window" in
-    tests/test_real_image_edit_text.c and tests/test_real_image_edit_dit.c by 1.4x the printed values.
+    After steps 7-8 replace the placeholders marked "measured in the gated window" in
+    tests/test_real_image_edit_text.c and tests/test_real_image_edit_dit.c by 1.4x the printed values,
+    then run both without H3_MEASURE (make test does).
 endef
 export IMAGE_EDIT_FIXTURES
 image-edit-fixtures:

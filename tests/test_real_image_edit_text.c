@@ -30,6 +30,34 @@ static void require(int condition, const char *message) {
     if (!condition) die(message);
 }
 
+/* H3_MEASURE=1: every bound only reports and the run continues, so one gated
+ * pass measures all of them. Exact checks always fail the run, but in
+ * measure mode a failed one is recorded and the next case still runs. */
+static int measure;
+static int over_count, exact_failures;
+
+static void bound(const char *what, double value, double limit) {
+    int ok = value < limit;
+    if (!ok) over_count++;
+    if (measure) {
+        printf("  [%s] %s: %.6g, bound < %.6g\n", ok ? "PASS" : "OVER", what,
+               value, limit);
+        return;
+    }
+    if (!ok) {
+        fprintf(stderr, "FAIL tests/test_real_image_edit_text.c: %s is %.6g, "
+                "bound < %.6g\n", what, value, limit);
+        exit(1);
+    }
+}
+
+static void exact(int condition, const char *message) {
+    if (condition) return;
+    if (!measure) die(message);
+    fprintf(stderr, "  [FAIL] %s\n", message);
+    exact_failures++;
+}
+
 static void *read_fixture(const h3_st_header *fixture, const char *name,
                           h3_dtype dtype, size_t elements) {
     char error[512];
@@ -177,21 +205,29 @@ static void check_presentation(const h3_tokenizer *tokenizer,
                 &fixture_data->grid_w, 1, &presentation, error,
                 sizeof(error)), error);
     size_t tokens = fixture_data->tokens;
-    require(presentation.count == tokens, "presentation length differs");
-    for (size_t index = 0; index < tokens; index++) {
-        require((int32_t)presentation.ids[index] ==
-                fixture_data->token_ids[index], "token ids differ");
-        require(presentation.tags[index] == fixture_data->tags[index],
-                "token tags differ");
-        require((int32_t)presentation.mm_token_type_ids[index] ==
-                fixture_data->mm_types[index], "mm token types differ");
+    exact(presentation.count == tokens, "presentation length differs");
+    int ids_ok = presentation.count == tokens, tags_ok = ids_ok,
+        types_ok = ids_ok, positions_ok = ids_ok;
+    for (size_t index = 0; ids_ok && index < tokens; index++) {
+        ids_ok = (int32_t)presentation.ids[index] ==
+                 fixture_data->token_ids[index];
+        tags_ok = tags_ok &&
+                  presentation.tags[index] == fixture_data->tags[index];
+        types_ok = types_ok && (int32_t)presentation.mm_token_type_ids[index] ==
+                   fixture_data->mm_types[index];
     }
-    for (size_t index = 0; index < 3 * tokens; index++)
-        require((int32_t)presentation.positions[index] ==
-                fixture_data->positions[index], "rope positions differ");
+    for (size_t index = 0; positions_ok && index < 3 * tokens; index++)
+        positions_ok = (int32_t)presentation.positions[index] ==
+                       fixture_data->positions[index];
+    exact(ids_ok, "token ids differ");
+    exact(tags_ok, "token tags differ");
+    exact(types_ok, "mm token types differ");
+    exact(positions_ok, "rope positions differ");
     h3_edit_presentation_free(&presentation);
     printf("%s (a) presentation: %zu ids, tags, token types and positions "
-           "identical\n", fixture_data->name, tokens);
+           "%s\n", fixture_data->name, tokens,
+           ids_ok && tags_ok && types_ok && positions_ok ? "identical" :
+                                                            "DIFFER");
 }
 
 static float *pixels_from_u8(const uint8_t *planar, size_t count) {
@@ -223,9 +259,8 @@ static void check_vision(const fixture_case *fixture_data,
                                      vision_tokens * TEXT_DIM);
     printf("%s (b) vision merged: rel-L2 %.6g, rel-max %.6g, max abs %.6g\n",
            fixture_data->name, merged.rel_l2, merged.rel_max, merged.max_abs);
-    require(merged.rel_l2 < VISION_REL_L2_BOUND &&
-            merged.rel_max < VISION_REL_MAX_BOUND,
-            "vision merged rows are off");
+    bound("vision merged rel-L2", merged.rel_l2, VISION_REL_L2_BOUND);
+    bound("vision merged rel-max", merged.rel_max, VISION_REL_MAX_BOUND);
     for (unsigned index = 0; index < H3_VISION_DEEPSTACKS; index++) {
         difference stack = compare_bf16(
             output->deepstack[index],
@@ -234,9 +269,9 @@ static void check_vision(const fixture_case *fixture_data,
         printf("%s (b) vision deepstack %u: rel-L2 %.6g, rel-max %.6g, max "
                "abs %.6g\n", fixture_data->name, index, stack.rel_l2,
                stack.rel_max, stack.max_abs);
-        require(stack.rel_l2 < VISION_REL_L2_BOUND &&
-                stack.rel_max < VISION_REL_MAX_BOUND,
-                "vision deepstack rows are off");
+        bound("vision deepstack rel-L2", stack.rel_l2, VISION_REL_L2_BOUND);
+        bound("vision deepstack rel-max", stack.rel_max,
+              VISION_REL_MAX_BOUND);
     }
 }
 
@@ -268,8 +303,8 @@ static void compare_embeddings(const char *label, const fixture_case *fixture_da
     printf("%s %s: language rows (%zu) rel-L2 %.6g, vision rows (%zu) rel-L2 "
            "%.6g\n", fixture_data->name, label, rows[1], language, rows[0],
            vision);
-    require(language < bound_language, "language rows are off");
-    require(vision < bound_vision, "vision rows are off");
+    bound("language rows rel-L2", language, bound_language);
+    bound("vision rows rel-L2", vision, bound_vision);
 }
 
 /* (c) The full presentation around the tower's output. */
@@ -284,9 +319,9 @@ static void check_embeddings(const h3_tokenizer *tokenizer,
                 tokenizer, encoder_directory, "h3_shaders.metal",
                 fixture_data->prompt, vision, 1, progress, NULL, &text, error,
                 sizeof(error)), error);
-    require(text.tags != NULL &&
-            !memcmp(text.tags, fixture_data->tags, fixture_data->tokens),
-            "embedding tags differ from the fixture");
+    exact(text.tags != NULL &&
+          !memcmp(text.tags, fixture_data->tags, fixture_data->tokens),
+          "embedding tags differ from the fixture");
     compare_embeddings("(c) prompt_embeds", fixture_data, &text,
                        LANGUAGE_ROWS_BOUND, VISION_ROWS_BOUND);
     h3_text_embedding_free(&text);
@@ -428,6 +463,8 @@ int main(int argc, char **argv) {
             printf("skip: fixture %s is not installed\n", argv[index]);
             return 0;
         }
+    measure = getenv("H3_MEASURE") && *getenv("H3_MEASURE") &&
+              strcmp(getenv("H3_MEASURE"), "0");
     char tokenizer_path[1024], encoder_directory[1024], error[512];
     snprintf(tokenizer_path, sizeof(tokenizer_path), "%s/tokenizer/tokenizer.json",
              argv[1]);
@@ -439,6 +476,15 @@ int main(int argc, char **argv) {
     run_case(tokenizer, encoder_directory, "small", argv[3], 0);
     run_case(tokenizer, encoder_directory, "1024-token", argv[2], 1);
     h3_tokenizer_free(tokenizer);
+    if (exact_failures) {
+        fprintf(stderr, "FAIL tests/test_real_image_edit_text.c: %d exact "
+                "check(s) failed\n", exact_failures);
+        return 1;
+    }
+    if (over_count) {
+        printf("measure mode: %d bound(s) OVER\n", over_count);
+        return 0;
+    }
     puts("ok: edit text presentation, vision tower and prompt embeddings "
          "match the diffusers reference");
     return 0;

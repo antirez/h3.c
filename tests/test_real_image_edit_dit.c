@@ -32,7 +32,7 @@ enum {
 #define REFINED_TRUTH_BOUND 7e-3       /* measured in the gated window */
 #define TIME_EMBEDDING_BOUND 1e-4      /* measured in the gated window */
 #define BLOCK_MEDIAN_BOUND 2e-2        /* measured in the gated window */
-#define ROW_Q99_BOUND 0.5              /* measured in the gated window */
+#define ROW_Q99_BOUND 0.15             /* measured in the gated window */
 #define HEAD_MATCH_BOUND 1e-5
 #define HEAD_MISMATCH_BOUND 1e-3
 #define CONDITION_MOVE_MIN 1e-2
@@ -60,6 +60,26 @@ static void die(const char *message) {
 
 static void require(int condition, const char *message) {
     if (!condition) die(message);
+}
+
+/* H3_MEASURE=1: every bound only reports and the run continues, so one gated
+ * pass measures all of them. Exact checks use require() and always fail. */
+static int measure;
+static int over_count;
+
+static void bound(const char *what, double value, double limit, int greater) {
+    int ok = greater ? value > limit : value < limit;
+    if (!ok) over_count++;
+    if (measure) {
+        printf("  [%s] %s: %.6g, bound %s %.6g\n", ok ? "PASS" : "OVER", what,
+               value, greater ? ">" : "<", limit);
+        return;
+    }
+    if (!ok) {
+        fprintf(stderr, "FAIL tests/test_real_image_edit_dit.c: %s is %.6g, "
+                "bound %s %.6g\n", what, value, greater ? ">" : "<", limit);
+        exit(1);
+    }
 }
 
 static void *read_fixture(const h3_st_header *fixture, const char *name,
@@ -497,8 +517,7 @@ static void check_block0(const char *weight_directory,
     double time_l2 = compare_f32(computed, temb, 2 * TIME_DIM);
     printf("block 0: time embeddings of [t_step, 0.999]: rel-L2 %.6g\n",
            time_l2);
-    require(time_l2 < TIME_EMBEDDING_BOUND,
-            "time embeddings differ from the reference");
+    bound("block 0 time embedding rel-L2", time_l2, TIME_EMBEDDING_BOUND, 0);
     release(&computed);
     h3_gpu_tensor *time = own(h3_gpu_tensor_from_f32(gpu, temb, 2 * TIME_DIM),
                               "temb upload");
@@ -552,10 +571,8 @@ static void check_block0(const char *weight_directory,
     printf("block 0 (%zu rows, two time rows): vs BF16 fixture rel-L2 %.6g; "
            "vs F32 run median row %.6g, q99 row %.6g\n", sequence,
            l2_reference, median_truth, q99_truth);
-    require(median_truth < BLOCK_MEDIAN_BOUND,
-            "block 0 median row error against the F32 run is over the bound");
-    require(q99_truth < ROW_Q99_BOUND,
-            "block 0 q99 row error against the F32 run is over the bound");
+    bound("block 0 median row vs F32", median_truth, BLOCK_MEDIAN_BOUND, 0);
+    bound("block 0 q99 row vs F32", q99_truth, ROW_Q99_BOUND, 0);
 
     free(positions); free(indices); free(temb); free(timesteps); free(input);
     free(want); free(want_f32); free(rows); free(cosines); free(sines);
@@ -659,6 +676,66 @@ static void load_condition_rows(const h3_st_header *step_fixture,
     free(latents); free(aug_noise); free(noised); free(fixture_rows);
 }
 
+/* Exact: h3's rotary positions of the packed sequence equal the fixture's
+ * float32 position_ids (float64 in the reference, rounded to float32), to
+ * within one float32 ulp. */
+static void check_positions(const h3_st_header *step_fixture,
+                            const edit_case *edit) {
+    char error[256];
+    h3_layout_ref reference = {H3_LAYOUT_REF_IMAGE, 1, edit->reference_height,
+                               edit->reference_width, 0};
+    h3_layout layout;
+    require(h3_layout_build_image((int)edit->tokens, edit->latent_height,
+                                  edit->latent_width, &reference, 1, &layout,
+                                  error, sizeof(error)), error);
+    require(layout.seq_len == edit->sequence, "layout length differs");
+    float *want = read_fixture(step_fixture, "position_ids", H3_DTYPE_F32,
+                               edit->sequence * 3);
+    double worst = 0.0;
+    for (size_t row = 0; row < edit->sequence; row++) {
+        const h3_position *got = &layout.positions[row];
+        double values[3] = {got->t, got->h, got->w};
+        for (size_t axis = 0; axis < 3; axis++) {
+            float expected = want[row * 3 + axis];
+            float rounded = (float)values[axis];
+            double delta = fabs((double)rounded - (double)expected);
+            double ulp = fabs((double)nextafterf(expected, INFINITY) -
+                              (double)expected);
+            if (delta > worst) worst = delta;
+            require(delta <= ulp, "rotary positions differ from the fixture");
+        }
+    }
+    printf("rotary positions: %zu rows x 3 axes equal the fixture's "
+           "position_ids (largest difference %.3g)\n", edit->sequence, worst);
+    free(want);
+    h3_layout_free(&layout);
+}
+
+/* Exact: the reference time row is the float32 0.999 (0x3F7FBE77) at every
+ * step and the step row is float32 1 - sigma. */
+static void check_time_values(const h3_st_header *step_fixture) {
+    h3_sigma_schedule schedule;
+    require(h3_image_schedule_build(&schedule), "cannot build the schedule");
+    uint32_t aug_bits;
+    float aug = H3_REFERENCE_NOISE_AUG;
+    memcpy(&aug_bits, &aug, sizeof(aug_bits));
+    require(aug_bits == 0x3F7FBE77u, "the reference noise level is not 0.999f");
+    for (int step = 0; step < FIXTURE_STEPS; step++) {
+        char name[32];
+        snprintf(name, sizeof(name), "timestep_step%d", step);
+        float *times = read_fixture(step_fixture, name, H3_DTYPE_F32, 2);
+        uint32_t bits;
+        memcpy(&bits, &times[1], sizeof(bits));
+        require(bits == 0x3F7FBE77u, "a fixture reference time row is not "
+                "0.999f");
+        require(times[0] == 1.0f - schedule.video[step],
+                "a fixture step time differs from 1 - sigma");
+        free(times);
+    }
+    puts("time rows: reference row is 0x3F7FBE77 (0.999f) and step rows are "
+         "1 - sigma at all six steps");
+}
+
 int main(int argc, char **argv) {
     if (argc == 1) {
         printf("skip: usage %s WEIGHT_DIR EDIT_STEP_FIXTURE "
@@ -679,6 +756,8 @@ int main(int argc, char **argv) {
     }
     const char *weight_directory = argv[1];
     const char *mode = argv[4];
+    measure = getenv("H3_MEASURE") && *getenv("H3_MEASURE") &&
+              strcmp(getenv("H3_MEASURE"), "0");
     const char *exchange = argc > 5 && strcmp(argv[5], "-") ? argv[5] : NULL;
     const char *truth_path = argc > 6 ? argv[6] : NULL;
     int stream = !strcmp(mode, "stream");
@@ -731,6 +810,8 @@ int main(int argc, char **argv) {
     size_t reference_elements = edit.reference_rows * PATCH;
 
     load_condition_rows(&step_fixture, &edit);
+    check_positions(&step_fixture, &edit);
+    check_time_values(&step_fixture);
 
     int32_t *adaln = read_fixture(&step_fixture, "adaln_indices", H3_DTYPE_I32,
                                   edit.sequence);
@@ -845,14 +926,15 @@ int main(int argc, char **argv) {
                                  edit.tokens, HIDDEN);
     printf("refined text vs reference: rel-L2 %.6g, max abs %.6g, median row "
            "%.6g\n", refined.l2, refined.maximum, refined.row_median);
-    require(refined.l2 < REFINED_TEXT_BOUND, "refined text is off");
+    bound("refined text rel-L2 vs reference", refined.l2, REFINED_TEXT_BOUND,
+          0);
     if (refined_truth) {
         comparison against = compare(refined_got_f32, refined_truth,
                                      edit.tokens, HIDDEN);
         printf("refined text vs F32 truth: rel-L2 %.6g, median row %.6g\n",
                against.l2, against.row_median);
-        require(against.l2 < REFINED_TRUTH_BOUND,
-                "refined text is far from the F32 truth");
+        bound("refined text rel-L2 vs F32 truth", against.l2,
+              REFINED_TRUTH_BOUND, 0);
     }
 
     /* (3) Six teacher-forced steps: the velocity of the generated rows. */
@@ -876,14 +958,14 @@ int main(int argc, char **argv) {
                "%.6g, q99 row %.6g, worst row %.6g (%.2f s)\n", steps[index],
                result.l2, result.maximum, result.row_median, result.row_q99,
                result.row_worst, elapsed);
-        require(result.l2 < (int8 ? INT8_VELOCITY_BOUND[index] :
-                                    BF16_VELOCITY_BOUND[index]),
-                "velocity rel-L2 over the bound");
-        require(result.row_median < (int8 ? INT8_ROW_MEDIAN_BOUND[index] :
-                                            BF16_ROW_MEDIAN_BOUND[index]),
-                "velocity median row error over the bound");
-        require(result.row_q99 < ROW_Q99_BOUND,
-                "velocity q99 row error over the bound");
+        bound("velocity rel-L2 vs reference", result.l2,
+              int8 ? INT8_VELOCITY_BOUND[index] : BF16_VELOCITY_BOUND[index],
+              0);
+        bound("velocity median row vs reference", result.row_median,
+              int8 ? INT8_ROW_MEDIAN_BOUND[index] :
+                     BF16_ROW_MEDIAN_BOUND[index], 0);
+        bound("velocity q99 row vs reference", result.row_q99, ROW_Q99_BOUND,
+              0);
         if (truth[index]) {
             comparison against = compare(velocity[index], truth[index],
                                          edit.rows, PATCH);
@@ -891,17 +973,13 @@ int main(int argc, char **argv) {
                    "row %.6g, q99 row %.6g, worst row %.6g\n", steps[index],
                    against.l2, against.maximum, against.row_median,
                    against.row_q99, against.row_worst);
-            require(against.l2 < (int8 ? INT8_TRUTH_BOUND[index] :
-                                         BF16_TRUTH_BOUND[index]),
-                    "velocity rel-L2 against the F32 truth over the bound");
-            require(against.row_median < (int8 ?
-                        INT8_TRUTH_MEDIAN_BOUND[index] :
-                        BF16_TRUTH_MEDIAN_BOUND[index]),
-                    "velocity median row error against the truth over the "
-                    "bound");
-            require(against.row_q99 < ROW_Q99_BOUND,
-                    "velocity q99 row error against the truth over the "
-                    "bound");
+            bound("velocity rel-L2 vs F32 truth", against.l2,
+                  int8 ? INT8_TRUTH_BOUND[index] : BF16_TRUTH_BOUND[index], 0);
+            bound("velocity median row vs F32 truth", against.row_median,
+                  int8 ? INT8_TRUTH_MEDIAN_BOUND[index] :
+                         BF16_TRUTH_MEDIAN_BOUND[index], 0);
+            bound("velocity q99 row vs F32 truth", against.row_q99,
+                  ROW_Q99_BOUND, 0);
         }
         /* (4) Head binding on the generated rows' final hidden state. */
         require(h3_dit_read_final_hidden(dit, hidden, edit.rows * HIDDEN),
@@ -913,10 +991,9 @@ int main(int argc, char **argv) {
             int right = (int)head == steps[index];
             printf("step %d velocity vs head %u: rel-L2 %.3g%s\n",
                    steps[index], head, distance, right ? " (its head)" : "");
-            require(right ? distance < HEAD_MATCH_BOUND :
-                            distance > HEAD_MISMATCH_BOUND,
-                    right ? "velocity does not match the head of its step" :
-                            "velocity matches a head of another step");
+            bound(right ? "velocity vs the head of its step" :
+                          "velocity vs a head of another step", distance,
+                  right ? HEAD_MATCH_BOUND : HEAD_MISMATCH_BOUND, !right);
         }
     }
 
@@ -951,10 +1028,13 @@ int main(int argc, char **argv) {
     comparison moved = compare(again, velocity[0], edit.rows, PATCH);
     printf("step 0 with zeroed reference rows vs with them: rel-L2 %.6g "
            "(must exceed %g)\n", moved.l2, CONDITION_MOVE_MIN);
-    require(moved.l2 > CONDITION_MOVE_MIN,
-            "zeroing the reference rows did not move the velocity: the "
-            "condition rows do not reach the attention");
+    bound("condition binding: step 0 velocity moved by", moved.l2,
+          CONDITION_MOVE_MIN, 1);
     h3_dit_free(zeroed);
+    if (over_count) {
+        printf("measure mode: %d bound(s) OVER\n", over_count);
+        return 0;
+    }
     printf("ok: image edit DiT %s matches the diffusers reference\n", mode);
     return 0;
 }

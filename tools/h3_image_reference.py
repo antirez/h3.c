@@ -58,7 +58,8 @@ The edit_text, edit_text_small, edit_step, edit_f32truth and edit_e2e stages are
                    refined_text, hidden_in/hidden_out/hidden_out_f32 of block 0 [S,5376], temb_step0 [2,2688]
   edit_f32truth    float32 velocities of the generated rows for the edit_step inputs, blocks outer
   edit_e2e         the whole edit with the pipeline's sizing (VAE copy 1024x1024, R = 1024) on a 512x512 canvas, float32
-                   steps-outer Euler loop; text from the edit_text fixture; image_u8, latents_final, noises
+                   steps-outer Euler loop; text from the edit_text fixture; image_u8, latents_final, noises, condition_rows, token_ids,
+                   vision_u8 (what the processor patchifies: after smart_resize) and vision_first_u8 (before it)
 --plan builds everything those stages need except the 62 GB models (image, resize, processor, presentation, packed
 sequence, timestep and AdaLN indices, the 2 GB VAE for edit_step and edit_f32truth), prints every shape with N, R, P
 and S and writes nothing.
@@ -1152,7 +1153,7 @@ def print_layout_plan(layout):
     )
 
 
-def edit_inputs(args, kind):
+def edit_inputs(args, kind, step_fixture=None):
     """Everything edit_step, edit_f32truth and edit_e2e feed the transformer, except the large models.
 
     kind "step": the 256x256 image goes to the VAE directly (16x16 latent, 64 rows) and the text comes from the
@@ -1173,7 +1174,10 @@ def edit_inputs(args, kind):
         assert text_tags.tolist() == text["token_tags"], f"{fixture} was made with another prompt or image"
     reference_image = text["vae_copy"]
     result = {"text": text, "prompt_embeds": prompt_embeds, "text_tags": text_tags}
-    if small or not args.plan:
+    if step_fixture is not None:
+        result["condition_rows"] = step_fixture["condition_rows"]
+        grid = tuple(step_fixture["reference_latents_0"].shape[-2:])
+    elif small or not args.plan:
         scheduler = MiniMaxH3Scheduler.from_pretrained(args.checkpoint, subfolder="scheduler")
         vae = load_vae(args, torch.device("cpu"))
         with torch.no_grad():
@@ -1293,7 +1297,8 @@ def stage_edit_step(args, device):
         show("noise_pred_stepN (planned)", torch.empty(layout["reference_rows"] + layout["target_rows"], PATCH_ROWS))
         show("temb_step0 (planned)", torch.empty(2, 2688))
         show("refined_text (planned)", torch.empty(layout["text_rows"], 5376, dtype=torch.bfloat16))
-        show("hidden_in/hidden_out/hidden_out_f32 (planned)", torch.empty(layout["sequence_length"], 5376))
+        show("hidden_in/hidden_out (planned)", torch.empty(layout["sequence_length"], 5376, dtype=torch.bfloat16))
+        show("hidden_out_f32 (planned)", torch.empty(layout["sequence_length"], 5376))
         return
     recorded = run_edit_transformer(
         args, device, inputs, edit_noise_rows(args, *inputs["canvas"]), last_step=max(STEP_FIXTURE_STEPS), capture_block0=True
@@ -1348,9 +1353,15 @@ class EditF32:
     def start(self, generated_rows):
         return torch.cat([self.refined, self.proj_in(torch.cat([self.condition_rows, generated_rows]))], 0)
 
-    def run_block(self, index, hidden, step):
+    def load_block(self, index):
         self.block.load_state_dict(self.weights.prefixed(f"transformer_blocks.{index}."))
+
+    def apply_block(self, hidden, step):
         return self.block(hidden[None], self.temb[step], self.adaln_indices, self.rotary)[0]
+
+    def run_block(self, index, hidden, step):
+        self.load_block(index)
+        return self.apply_block(hidden, step)
 
     def velocity(self, hidden, step):
         norm_out = MiniMaxH3ImageAdaLayerNormOut(5376, 2688, 1e-5)
@@ -1367,8 +1378,9 @@ def f32_edit_velocities(weights, inputs, step_latents, blocks=50):
     with torch.no_grad():
         hidden = {step: state.start(rows) for step, rows in step_latents.items()}
         for index in range(blocks):
+            state.load_block(index)
             for step in hidden:
-                hidden[step] = state.run_block(index, hidden[step], step)
+                hidden[step] = state.apply_block(hidden[step], step)
         return state.refined, {step: state.velocity(hidden[step], step) for step in hidden}
 
 
@@ -1393,7 +1405,8 @@ def stage_edit_f32truth(args, _device):
     Unlike the text-to-image stage it builds temb [2, 2688] from [t_step, 0.999] and passes the real adaln_indices
     (timestep_indices * 3 + token_tags) to every block call and the real timestep_indices to norm_out.
     """
-    inputs = edit_inputs(args, "step")
+    step_fixture = None if args.plan else load_fixture(args, "edit_step")
+    inputs = edit_inputs(args, "step", step_fixture)
     layout = inputs["layout"]
     if args.plan:
         print_inputs_plan("edit_f32truth", inputs)
@@ -1401,7 +1414,6 @@ def stage_edit_f32truth(args, _device):
         show("noise_pred_f32_stepN (planned)", torch.empty(layout["target_rows"], PATCH_ROWS))
         show("refined_text_f32 (planned)", torch.empty(layout["text_rows"], 5376))
         return
-    step_fixture = load_fixture(args, "edit_step")
     assert torch.equal(step_fixture["adaln_indices"].long(), layout["adaln_indices"]), "adaln_indices differ from the fixture"
     assert torch.equal(step_fixture["timestep_indices"].long(), layout["plan"][0][2]), "timestep_indices differ from the fixture"
     weights = WeightMap(os.path.join(args.checkpoint, "transformer_diffusers"))
@@ -1418,6 +1430,26 @@ def stage_edit_f32truth(args, _device):
     save_fixture(args, "edit_f32truth", {**tensors, **edit_settings(args, *inputs["canvas"], 1)})
 
 
+def vision_after_smart_resize(image, processor):
+    """The image the Qwen processor actually patchifies: the first-stage vision copy after smart_resize."""
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+
+    ip = processor.image_processor
+    width, height = image.size
+    factor = ip.patch_size * ip.merge_size
+    new_h, new_w = smart_resize(
+        height, width, factor=factor, min_pixels=ip.size["shortest_edge"], max_pixels=ip.size["longest_edge"]
+    )
+    if (new_h, new_w) == (height, width):
+        return image
+    import torchvision.transforms.v2.functional as F
+
+    resized = F.resize(
+        pil_to_u8(image), [new_h, new_w], interpolation=F.InterpolationMode.BICUBIC, antialias=True
+    )
+    return Image.fromarray(resized.permute(1, 2, 0).numpy())
+
+
 def stage_edit_e2e(args, device):
     """The whole edit on one 256x256 reference: VAE copy 1024x1024, 512x512 canvas, explicit noises, float32 truth.
 
@@ -1429,6 +1461,7 @@ def stage_edit_e2e(args, device):
     layout = inputs["layout"]
     if args.plan:
         print_inputs_plan("edit_e2e", inputs)
+        show("vision_u8 after smart_resize", pil_to_u8(vision_after_smart_resize(inputs["text"]["vision_image"], inputs["text"]["processor"])))
         show("noise (planned)", torch.empty(LATENT_CHANNELS, *[side // VAE_RATIO for side in inputs["canvas"]]))
         show("image_u8 (planned)", torch.empty(3, *inputs["canvas"], dtype=torch.uint8))
         return
@@ -1448,7 +1481,8 @@ def stage_edit_e2e(args, device):
         "condition_rows": inputs["condition_rows"],
         "reference_u8": pil_to_u8(inputs["text"]["reference"]),
         "vae_u8": pil_to_u8(inputs["text"]["vae_copy"]),
-        "vision_u8": pil_to_u8(inputs["text"]["vision_image"]),
+        "vision_first_u8": pil_to_u8(inputs["text"]["vision_image"]),
+        "vision_u8": pil_to_u8(vision_after_smart_resize(inputs["text"]["vision_image"], inputs["text"]["processor"])),
         "token_ids": torch.tensor(inputs["text"]["token_ids"], dtype=torch.int32),
         "prompt": torch.tensor(list(args.prompt.encode("utf-8")), dtype=torch.uint8),
         **edit_settings(args, *inputs["canvas"], 1),

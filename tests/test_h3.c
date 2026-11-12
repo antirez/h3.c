@@ -5,6 +5,7 @@
 #include "h3_image.h"
 #include "h3_image_pipeline.h"
 #include "h3_image_vae.h"
+#include "h3_image_vae_encode.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
 #include "h3_vae_tiles.h"
@@ -1039,6 +1040,184 @@ static void test_image_vae_config_parse(void) {
     CHECK(error[0] != '\0');
 }
 
+static void test_reference_size_rule(void) {
+    /* width, height, then the expected size with the reference bounds
+     * (1024, 2048) and with the vision bounds (1024, 1024). */
+    const struct { int width, height, reference_w, reference_h, vision_w,
+                   vision_h; } cases[] = {
+        {256, 256, 1024, 1024, 1024, 1024},
+        /* 260 * 4 / 32 = 32.5 rounds to 32, not 33 */
+        {260, 256, 1024, 1024, 1024, 1024},
+        {1023, 1500, 1024, 1504, 1024, 1504},
+        {1024, 1024, 1024, 1024, 1024, 1024},
+        {1024, 1100, 1024, 1100, 1024, 1100},
+        {1100, 1050, 1100, 1050, 1088, 1024},
+        {2048, 3000, 2048, 3000, 1024, 1504},
+        {2049, 2049, 2048, 2048, 1024, 1024},
+        {2100, 4000, 2048, 3904, 1024, 1952},
+        {3000, 2100, 2912, 2048, 1472, 1024},
+        {500, 3000, 1024, 6144, 1024, 6144},
+        {250, 370, 1024, 1504, 1024, 1504},
+        {370, 250, 1504, 1024, 1504, 1024},
+        {32, 32, 1024, 1024, 1024, 1024},
+        {1030, 1050, 1030, 1050, 1024, 1056},
+        {4096, 2160, 3872, 2048, 1952, 1024},
+        {1500, 1500, 1500, 1500, 1024, 1024},
+        {777, 513, 1536, 1024, 1536, 1024},
+        {1920, 1080, 1920, 1080, 1824, 1024},
+        {1080, 1920, 1080, 1920, 1024, 1824}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int width = 0, height = 0;
+        CHECK(h3_reference_bound_short_edge(
+            cases[index].width, cases[index].height,
+            H3_REFERENCE_MIN_SHORT_EDGE, H3_REFERENCE_MAX_SHORT_EDGE,
+            H3_REFERENCE_CANVAS_MULTIPLE, &width, &height));
+        CHECK(width == cases[index].reference_w &&
+              height == cases[index].reference_h);
+        CHECK(h3_reference_bound_short_edge(
+            cases[index].width, cases[index].height,
+            H3_VISION_MIN_SHORT_EDGE, H3_VISION_MAX_SHORT_EDGE,
+            H3_REFERENCE_CANVAS_MULTIPLE, &width, &height));
+        CHECK(width == cases[index].vision_w && height == cases[index].vision_h);
+    }
+    int width, height;
+    CHECK(!h3_reference_bound_short_edge(0, 256, 1024, 2048, 32, &width, &height));
+    CHECK(!h3_reference_bound_short_edge(256, 256, 1024, 2048, 0, &width, &height));
+    CHECK(!h3_reference_bound_short_edge(33, 2000000000, 1024, 2048, 32, &width,
+                                         &height));
+}
+
+static void test_reference_resize_lanczos(void) {
+    /* PIL Image.resize((w, h), LANCZOS) of this 6x5 planar image. */
+    enum { W = 6, H = 5 };
+    const uint8_t input[3 * H * W] = {
+        0, 53, 106, 159, 212, 9, 37, 97, 157, 217, 21, 81, 74, 141, 208, 19, 86,
+        153, 111, 185, 3, 77, 151, 225, 148, 229, 54, 135, 216, 41, 61, 114,
+        167, 220, 17, 70, 98, 158, 218, 22, 82, 142, 135, 202, 13, 80, 147, 214,
+        172, 246, 64, 138, 212, 30, 209, 34, 115, 196, 21, 102, 122, 175, 228,
+        25, 78, 131, 159, 219, 23, 83, 143, 203, 196, 7, 74, 141, 208, 19, 233,
+        51, 125, 199, 17, 91, 14, 95, 176, 1, 82, 163
+    };
+    const uint8_t down_3x2[18] = {
+        65, 146, 93, 150, 96, 142, 134, 126, 103, 160, 109, 124, 156, 101, 127,
+        104, 107, 99
+    };
+    const uint8_t vertical_6x3[54] = {
+        12, 67, 136, 191, 127, 28, 74, 141, 155, 72, 68, 171, 136, 215, 24, 103,
+        200, 123, 73, 124, 197, 133, 33, 107, 135, 220, 66, 62, 165, 161, 197,
+        125, 85, 182, 106, 65, 129, 203, 139, 39, 113, 168, 214, 60, 56, 159,
+        155, 72, 108, 67, 164, 88, 47, 126
+    };
+    const uint8_t horizontal_4x5[60] = {
+        14, 87, 192, 82, 48, 159, 149, 44, 94, 179, 48, 133, 152, 67, 79, 210,
+        191, 112, 157, 111, 70, 171, 150, 34, 117, 191, 49, 123, 174, 79, 80,
+        201, 213, 124, 158, 102, 139, 93, 138, 59, 139, 203, 50, 114, 196, 91,
+        81, 192, 127, 33, 182, 88, 161, 105, 139, 50, 38, 143, 34, 139
+    };
+    const uint8_t up_10x9[270] = {
+        0, 11, 49, 86, 106, 125, 210, 237, 90, 0, 6, 23, 62, 91, 130, 179, 200,
+        156, 65, 22, 27, 48, 91, 117, 170, 230, 159, 38, 43, 82, 51, 68, 119,
+        190, 209, 162, 66, 16, 71, 124, 69, 88, 141, 216, 179, 48, 11, 86, 139,
+        158, 82, 121, 163, 137, 72, 21, 40, 123, 201, 235, 102, 160, 191, 67, 0,
+        60, 127, 160, 197, 212, 126, 186, 220, 96, 19, 90, 184, 202, 136, 81,
+        137, 194, 233, 131, 56, 107, 207, 221, 92, 0, 54, 73, 110, 126, 183,
+        255, 163, 12, 25, 77, 65, 80, 123, 176, 203, 185, 102, 31, 54, 92, 88,
+        103, 152, 228, 200, 71, 22, 73, 115, 132, 109, 138, 175, 170, 102, 24,
+        25, 110, 183, 213, 122, 175, 202, 84, 2, 56, 111, 147, 196, 219, 133,
+        213, 255, 106, 0, 73, 185, 217, 152, 92, 167, 208, 226, 130, 69, 118,
+        197, 195, 86, 6, 214, 165, 94, 78, 129, 182, 155, 77, 61, 71, 238, 134,
+        7, 38, 159, 216, 118, 0, 57, 136, 117, 122, 162, 255, 222, 58, 3, 73,
+        110, 119, 121, 155, 203, 208, 142, 53, 32, 89, 146, 171, 140, 195, 227,
+        117, 27, 58, 95, 129, 185, 214, 174, 168, 127, 41, 12, 75, 166, 203,
+        159, 116, 219, 127, 7, 22, 92, 123, 193, 208, 88, 0, 255, 160, 1, 22,
+        142, 205, 184, 98, 40, 25, 230, 156, 62, 78, 159, 195, 112, 12, 58, 121,
+        77, 72, 89, 151, 156, 82, 30, 50, 117, 162, 0, 15, 99, 191, 147, 2, 0,
+        96, 158, 173
+    };
+    const struct { int width, height; const uint8_t *want; } cases[] = {
+        {3, 2, down_3x2}, {6, 3, vertical_6x3}, {4, 5, horizontal_4x5},
+        {10, 9, up_10x9}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        uint8_t got[270];
+        size_t count = (size_t)3 * cases[index].width * cases[index].height;
+        CHECK(h3_reference_resize_lanczos(input, H, W, cases[index].height,
+                                          cases[index].width, got));
+        CHECK(memcmp(got, cases[index].want, count) == 0);
+    }
+    uint8_t same[3 * H * W];
+    CHECK(h3_reference_resize_lanczos(input, H, W, H, W, same));
+    CHECK(memcmp(same, input, sizeof(same)) == 0);
+}
+
+static void test_reference_pipeline_steps(void) {
+    /* Top-left crop of two planes of 3 rows by 4 columns to 2 by 3. */
+    const uint8_t planes[24] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111
+    };
+    uint8_t cropped[12];
+    h3_reference_crop_u8(planes, 2, 3, 4, 2, 3, cropped);
+    const uint8_t want_bytes[12] = {0, 1, 2, 4, 5, 6, 100, 101, 102, 104, 105, 106};
+    CHECK(memcmp(cropped, want_bytes, sizeof(want_bytes)) == 0);
+    float floats[24], cropped_floats[12];
+    for (int index = 0; index < 24; index++) floats[index] = (float)index;
+    h3_reference_crop_f32(floats, 2, 3, 4, 2, 2, cropped_floats);
+    const float want_floats[8] = {0, 1, 4, 5, 12, 13, 16, 17};
+    CHECK(memcmp(cropped_floats, want_floats, sizeof(want_floats)) == 0);
+
+    /* float16 rounding: ties go to even, overflow to infinity. */
+    const struct { float input, want; } rounding[] = {
+        {0.0f, 0.0f}, {1.0f, 1.0f}, {0.100000001f, 0.0999755859f},
+        {-0.100000001f, -0.0999755859f}, {1.00048828f, 1.0f},
+        {1.00024414f, 1.0f}, {1.00073242f, 1.00097656f}, {65504.0f, 65504.0f},
+        {9.99999994e-09f, 0.0f}, {6.09999988e-05f, 6.09755516e-05f},
+        {3.14159274f, 3.140625f}, {-2.71828175f, -2.71875f}, {2049.0f, 2048.0f},
+        {2050.0f, 2050.0f}, {2051.0f, 2052.0f}, {0.333333343f, 0.333251953f},
+        {5.96046448e-08f, 5.96046448e-08f}, {2.98023224e-08f, 0.0f}
+    };
+    for (size_t index = 0; index < sizeof(rounding) / sizeof(rounding[0]); index++)
+        CHECK(h3_round_to_f16(rounding[index].input) == rounding[index].want);
+    CHECK(isinf(h3_round_to_f16(65520.0f)) && h3_round_to_f16(65520.0f) > 0.0f);
+    CHECK(isinf(h3_round_to_f16(100000.0f)));
+
+    /* Posterior sample: log-variance -40 clamps to -30 and 30 to 20. */
+    const float moments[8] = {0.5f, -2.0f, 1.0f, 0.25f, 0.0f, -40.0f, 30.0f, 2.0f};
+    const float noise[4] = {1.5f, -0.5f, 0.001f, 2.0f};
+    const float want_sample[4] = {2.0f, -2.00000024f, 23.0264664f, 5.68656349f};
+    float sample[4];
+    h3_posterior_sample(moments, noise, 4, sample);
+    for (int index = 0; index < 4; index++)
+        CHECK(close_enough(sample[index], want_sample[index],
+                           1e-6 * fabs(want_sample[index])));
+
+    /* (z - mean) / std with latents_mean / latents_std of channels 0 and 1. */
+    float latents[6] = {2.0f, -1.5f, 0.3333333f, 2.0f, -1.5f, 0.3333333f};
+    const float mean[2] = {0.858090341091156f, -0.9606591463088989f};
+    const float deviation[2] = {1.2223774194717407f, 1.2767263650894165f};
+    h3_reference_normalize(latents, 2, 3, mean, deviation);
+    const float want_normal[6] = {
+        0.9341710805892944f, -1.9291017055511475f, -0.42929214239120483f,
+        2.3189456462860107f, -0.42244043946266174f, 1.013523817062378f
+    };
+    for (int index = 0; index < 6; index++)
+        CHECK(latents[index] == want_normal[index]);
+
+    /* scale_noise is t * x + (1.0f - t) * noise in float32; 1.0f - 0.999f is
+     * 0.000999987125, not 0.001. */
+    const float clean[4] = {0.5f, -1.25f, 2.0f, 0.0f};
+    const float mixed_noise[4] = {1.0f, 0.75f, -0.5f, 3.0f};
+    const float want_mixed[4] = {0.500499964f, -1.24800003f, 1.99750006f,
+                                 0.00299996138f};
+    float mixed[4];
+    CHECK(H3_REFERENCE_NOISE_AUG == 0.999f);
+    h3_reference_scale_noise(clean, mixed_noise, H3_REFERENCE_NOISE_AUG, 4, mixed);
+    CHECK(memcmp(mixed, want_mixed, sizeof(mixed)) == 0);
+    h3_reference_scale_noise(clean, mixed_noise, 1.0f, 4, mixed);
+    CHECK(memcmp(mixed, clean, sizeof(mixed)) == 0);
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -1092,6 +1271,9 @@ int main(void) {
     test_image_vae_tiles();
     test_image_unpack_2d();
     test_image_vae_config_parse();
+    test_reference_size_rule();
+    test_reference_resize_lanczos();
+    test_reference_pipeline_steps();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

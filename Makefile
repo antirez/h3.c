@@ -16,7 +16,7 @@ LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
 	h3_terminal.c h3_vision_encoder.c h3_multimodal.c h3_image.c \
 	h3_vae_tiles.c h3_image_vae.c h3_image_vae_encode.c h3_image_pipeline.c \
-	h3_image_edit.c
+	h3_image_edit.c h3_image_cache.c
 LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
@@ -74,6 +74,9 @@ h3_image_png_test: tests/test_image_png.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_image_edit_tests: tests/test_image_edit.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_image_cache_tests: tests/test_image_cache.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_real_video_encoder_test: tests/test_real_video_encoder.o $(LIB_OBJ)
@@ -159,7 +162,8 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	h3_real_image_vae_test h3_real_image_vae_encode_test \
 	h3_real_image_dit_block_test h3_real_image_dit_test h3_real_image_dit_large_test \
 	h3_real_image_text_test h3_real_image_e2e_test h3_image_edit_tests \
-	h3_real_image_edit_e2e_test h3_real_image_edit_text_test h3_real_image_edit_dit_test h3
+	h3_real_image_edit_e2e_test h3_real_image_edit_text_test h3_real_image_edit_dit_test \
+	h3_image_cache_tests h3
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -175,6 +179,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		echo "skip: released tokenizer is not installed"; \
 	fi
 	./h3_edit_presentation_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
+	./h3_image_cache_tests
 	@if test -f misc/fixtures/h3_text_bf16.safetensors; then \
 		./h3_text_tests misc/fixtures/h3_text_bf16.safetensors; \
 	else \
@@ -486,7 +491,7 @@ clean:
 		h3_real_image_vae_encode_test \
 		h3_real_image_dit_block_test h3_real_image_dit_test \
 		h3_real_image_dit_large_test h3_real_image_text_test h3_real_image_e2e_test h3_image_png_test \
-		h3_image_edit_tests h3_real_image_edit_e2e_test \
+		h3_image_edit_tests h3_image_cache_tests h3_real_image_edit_e2e_test \
 		h3_real_image_edit_text_test h3_real_image_edit_dit_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

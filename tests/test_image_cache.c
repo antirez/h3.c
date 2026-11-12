@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static int tests_run;
@@ -295,10 +296,89 @@ static void test_round_trip(void) {
     h3_text_embedding_free(&other);
 }
 
+static void set_age(const char *path, int seconds_ago) {
+    struct timeval times[2];
+    gettimeofday(&times[0], NULL);
+    times[0].tv_sec -= seconds_ago;
+    times[1] = times[0];
+    CHECK(utimes(path, times) == 0);
+}
+
+static int exists(const char *path) {
+    struct stat status;
+    return stat(path, &status) == 0;
+}
+
+static void test_eviction(void) {
+    const char *cache = path_in("evict");
+    char files[5][1024], file[1024];
+    char keys[5][16];
+    h3_text_embedding text = make_text(3, 1, 1);
+    h3_text_embedding loaded;
+    struct stat status;
+    uint64_t limit = 0;
+
+    for (int index = 0; index < 5; index++) {
+        snprintf(keys[index], sizeof(keys[index]), "entry %d", index);
+        CHECK(h3_image_cache_path(cache, keys[index], files[index],
+                                  sizeof(files[index])));
+    }
+    CHECK(h3_image_cache_store(cache, keys[0], &text,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+    CHECK(stat(files[0], &status) == 0);
+    limit = 3 * (uint64_t)status.st_size;
+    /* Entry 0 is the oldest, entry 3 the newest; the cap holds three. */
+    set_age(files[0], 400);
+    for (int index = 1; index < 4; index++) {
+        CHECK(h3_image_cache_store(cache, keys[index], &text,
+                                   H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                                   sizeof(file)));
+        set_age(files[index], 400 - 100 * index);
+    }
+    /* A hit on entry 0 makes it the newest: entry 1 is now the oldest. */
+    CHECK(h3_image_cache_load(cache, keys[0], &loaded, file, sizeof(file)));
+    h3_text_embedding_free(&loaded);
+    CHECK(h3_image_cache_store(cache, keys[4], &text, limit, file,
+                               sizeof(file)));
+    CHECK(exists(files[0]) && !exists(files[1]) && !exists(files[2]) &&
+          exists(files[3]) && exists(files[4]));
+
+    set_age(files[0], 300);
+    set_age(files[3], 100);
+    set_age(files[4], 50);
+    h3_text_embedding other = make_text(3, 2, 1);
+    CHECK(h3_image_cache_store(cache, keys[1], &other,
+                               2 * (uint64_t)status.st_size, file,
+                               sizeof(file)));
+    CHECK(!exists(files[0]) && !exists(files[3]) && exists(files[4]) &&
+          exists(files[1]));
+    CHECK(h3_image_cache_store(cache, keys[2], &text, 1, file, sizeof(file)));
+    CHECK(!exists(files[2]));
+    h3_text_embedding_free(&text);
+    h3_text_embedding_free(&other);
+}
+
+static void test_limit(void) {
+    unsetenv("H3_CACHE_BYTES");
+    CHECK(h3_image_cache_limit() == H3_EDIT_CACHE_DEFAULT_BYTES);
+    setenv("H3_CACHE_BYTES", "12345", 1);
+    CHECK(h3_image_cache_limit() == 12345);
+    setenv("H3_CACHE_BYTES", "-5", 1);
+    CHECK(h3_image_cache_limit() == H3_EDIT_CACHE_DEFAULT_BYTES);
+    setenv("H3_CACHE_BYTES", "12x", 1);
+    CHECK(h3_image_cache_limit() == H3_EDIT_CACHE_DEFAULT_BYTES);
+    setenv("H3_CACHE_BYTES", "0", 1);
+    CHECK(h3_image_cache_limit() == H3_EDIT_CACHE_DEFAULT_BYTES);
+    unsetenv("H3_CACHE_BYTES");
+}
+
 int main(void) {
     make_directory();
     test_key();
     test_round_trip();
+    test_eviction();
+    test_limit();
     remove_directory();
     printf("ok: %d image cache checks\n", tests_run);
     return 0;

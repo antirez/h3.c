@@ -258,6 +258,62 @@ static int make_directories(const char *dir) {
     return stat(dir, &status) == 0 && S_ISDIR(status.st_mode);
 }
 
+typedef struct {
+    char name[NAME_MAX + 1];
+    struct timespec modified;
+    uint64_t bytes;
+} cache_entry;
+
+static int older_first(const void *a, const void *b) {
+    const cache_entry *x = a, *y = b;
+    if (x->modified.tv_sec != y->modified.tv_sec)
+        return x->modified.tv_sec < y->modified.tv_sec ? -1 : 1;
+    if (x->modified.tv_nsec != y->modified.tv_nsec)
+        return x->modified.tv_nsec < y->modified.tv_nsec ? -1 : 1;
+    return strcmp(x->name, y->name);
+}
+
+static void evict(const char *dir, uint64_t limit) {
+    DIR *directory = opendir(dir);
+    if (!directory) return;
+    cache_entry *entries = NULL;
+    size_t count = 0, capacity = 0;
+    uint64_t total = 0;
+    struct dirent *item;
+    size_t suffix = strlen(CACHE_SUFFIX);
+    while ((item = readdir(directory))) {
+        size_t length = strlen(item->d_name);
+        if (length <= suffix ||
+            strcmp(item->d_name + length - suffix, CACHE_SUFFIX)) continue;
+        char path[PATH_MAX];
+        struct stat status;
+        if (snprintf(path, sizeof(path), "%s/%s", dir, item->d_name) >=
+                (int)sizeof(path) ||
+            stat(path, &status) != 0 || !S_ISREG(status.st_mode)) continue;
+        if (count == capacity) {
+            size_t grown = capacity ? capacity * 2 : 16;
+            cache_entry *bigger = realloc(entries, grown * sizeof(*entries));
+            if (!bigger) break;
+            entries = bigger;
+            capacity = grown;
+        }
+        snprintf(entries[count].name, sizeof(entries[count].name), "%s",
+                 item->d_name);
+        entries[count].modified = status.st_mtimespec;
+        entries[count].bytes = (uint64_t)status.st_size;
+        total += entries[count].bytes;
+        count++;
+    }
+    closedir(directory);
+    qsort(entries, count, sizeof(*entries), older_first);
+    for (size_t index = 0; index < count && total > limit; index++) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", dir, entries[index].name);
+        if (unlink(path) == 0) total -= entries[index].bytes;
+    }
+    free(entries);
+}
+
 static int write_entry(FILE *file, const char *key,
                        const h3_text_embedding *text) {
     uint8_t header[CACHE_HEADER_BYTES];
@@ -307,7 +363,7 @@ int h3_image_cache_store(const char *dir, const char *key,
         unlink(temporary);
         return 0;
     }
-    (void)limit;
+    evict(dir, limit);
     return 1;
 }
 

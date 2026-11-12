@@ -576,6 +576,71 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
     return ok;
 }
 
+int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
+                              int width, int height,
+                              char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!path || !*path || !rgb || width < 1 || height < 1) {
+        fail(error, error_size, "invalid FFmpeg PNG output arguments");
+        return 0;
+    }
+    size_t pixels = (size_t)width * (size_t)height;
+    if (pixels > SIZE_MAX / 3) {
+        fail(error, error_size, "PNG image size overflows");
+        return 0;
+    }
+    if (!make_parents(path, error, error_size)) return 0;
+    int stream[2];
+    if (pipe(stream) != 0) {
+        fail(error, error_size, "cannot create FFmpeg pipe: %s", strerror(errno));
+        return 0;
+    }
+    char size[64];
+    snprintf(size, sizeof(size), "%dx%d", width, height);
+    char *arguments[] = {
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", size,
+        "-i", "pipe:0", "-frames:v", "1", "-c:v", "png",
+        "-f", "image2", "-update", "1", (char *)path, NULL
+    };
+    posix_spawn_file_actions_t actions;
+    int code = posix_spawn_file_actions_init(&actions);
+    if (!code) code = posix_spawn_file_actions_adddup2(&actions, stream[0], STDIN_FILENO);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[0]);
+    if (!code) code = posix_spawn_file_actions_addclose(&actions, stream[1]);
+    pid_t child = -1;
+    if (!code) code = posix_spawnp(&child, ffmpeg_program(), &actions, NULL,
+                                    arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(stream[0]);
+    if (code) {
+        close(stream[1]);
+        fail(error, error_size, "cannot start FFmpeg: %s", strerror(code));
+        return 0;
+    }
+    struct sigaction ignore, previous;
+    memset(&ignore, 0, sizeof(ignore));
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    sigaction(SIGPIPE, &ignore, &previous);
+    int ok = write_all(stream[1], rgb, pixels * 3, error, error_size);
+    close(stream[1]);
+    sigaction(SIGPIPE, &previous, NULL);
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        if (ok) fail(error, error_size, "cannot wait for FFmpeg: %s",
+                     strerror(errno));
+        return 0;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (ok) fail(error, error_size, "FFmpeg exited with status %d",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        return 0;
+    }
+    return ok;
+}
+
 typedef struct {
     int descriptor;
     const uint8_t *data;

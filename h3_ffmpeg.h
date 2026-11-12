@@ -38,6 +38,11 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
                           int frame_count, int width, int height, int fps,
                           char *error, size_t error_size);
 
+/* Write one interleaved RGB24 image [height][width][3] as a PNG. */
+int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
+                              int width, int height,
+                              char *error, size_t error_size);
+
 /* Encode RGB24 video and channel-major F32 PCM through two concurrent pipes.
  * No intermediate uncompressed media file is created. */
 int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,

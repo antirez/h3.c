@@ -87,6 +87,7 @@ int main(int argc, char **argv) {
         "MiniMax-H3-Image/vae_diffusers";
     const char *fixture_path = argc > 2 ? argv[2] :
         "misc/fixtures/h3_image_edit_vae.safetensors";
+    const char *shader = argc > 3 ? argv[3] : "h3_shaders.metal";
     char error[512];
     h3_st_header fixture;
     if (!h3_st_read_header(fixture_path, &fixture, error, sizeof(error)))
@@ -153,7 +154,7 @@ int main(int argc, char **argv) {
             H3_DTYPE_F32, latent_plane / 4 * 96);
 
         h3_reference_latents got;
-        if (!h3_image_vae_encode(weights, "h3_shaders.metal", resized,
+        if (!h3_image_vae_encode(weights, shader, resized,
                                  resized_h, resized_w, noise, 0, progress,
                                  NULL, &got, error, sizeof(error)))
             die(error);
@@ -198,8 +199,23 @@ int main(int argc, char **argv) {
                    (1024.0 * 1024.0 * 1024.0), got.gpu_stats.gpu_seconds);
 
         if (index == 0) {
+            size_t moment_bytes = 48 * moments_plane * sizeof(float);
+            for (int repeat = 0; repeat < 2; repeat++) {
+                h3_reference_latents again;
+                if (!h3_image_vae_encode(weights, shader, resized, resized_h,
+                                         resized_w, noise, 0, NULL, NULL,
+                                         &again, error, sizeof(error)))
+                    die(error);
+                int identical = !memcmp(again.moments, got.moments,
+                                        moment_bytes);
+                printf("  repeat encode %d: moments %s\n", repeat + 1,
+                       identical ? "identical" : "DIFFER");
+                if (!identical)
+                    die("encoding the same image twice gave different moments");
+                h3_reference_latents_free(&again);
+            }
             h3_reference_latents seeded;
-            if (!h3_image_vae_encode(weights, "h3_shaders.metal", resized,
+            if (!h3_image_vae_encode(weights, shader, resized,
                                      resized_h, resized_w, NULL, 7, NULL, NULL,
                                      &seeded, error, sizeof(error)))
                 die(error);

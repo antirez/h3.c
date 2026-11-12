@@ -30,7 +30,9 @@ enum {
 #define REFINED_TRUTH_BOUND 9.18e-3
 #define TIME_EMBEDDING_BOUND 4.38e-7
 #define BLOCK_MEDIAN_BOUND 6.08e-3
-#define ROW_Q99_BOUND 0.387
+#define BF16_ROW_Q99_BOUND 0.258
+#define INT8_ROW_Q99_BOUND 0.387
+#define BLOCK_Q99_BOUND 0.0112
 #define HEAD_MATCH_BOUND 1e-5
 #define HEAD_MISMATCH_BOUND 1e-3
 #define CONDITION_MOVE_MIN 1e-2
@@ -570,7 +572,7 @@ static void check_block0(const char *weight_directory,
            "vs F32 run median row %.6g, q99 row %.6g\n", sequence,
            l2_reference, median_truth, q99_truth);
     bound("block 0 median row vs F32", median_truth, BLOCK_MEDIAN_BOUND, 0);
-    bound("block 0 q99 row vs F32", q99_truth, ROW_Q99_BOUND, 0);
+    bound("block 0 q99 row vs F32", q99_truth, BLOCK_Q99_BOUND, 0);
 
     free(positions); free(indices); free(temb); free(timesteps); free(input);
     free(want); free(want_f32); free(rows); free(cosines); free(sines);
@@ -962,8 +964,8 @@ int main(int argc, char **argv) {
         bound("velocity median row vs reference", result.row_median,
               int8 ? INT8_ROW_MEDIAN_BOUND[index] :
                      BF16_ROW_MEDIAN_BOUND[index], 0);
-        bound("velocity q99 row vs reference", result.row_q99, ROW_Q99_BOUND,
-              0);
+        bound("velocity q99 row vs reference", result.row_q99,
+              int8 ? INT8_ROW_Q99_BOUND : BF16_ROW_Q99_BOUND, 0);
         if (truth[index]) {
             comparison against = compare(velocity[index], truth[index],
                                          edit.rows, PATCH);
@@ -977,7 +979,7 @@ int main(int argc, char **argv) {
                   int8 ? INT8_TRUTH_MEDIAN_BOUND[index] :
                          BF16_TRUTH_MEDIAN_BOUND[index], 0);
             bound("velocity q99 row vs F32 truth", against.row_q99,
-                  ROW_Q99_BOUND, 0);
+                  int8 ? INT8_ROW_Q99_BOUND : BF16_ROW_Q99_BOUND, 0);
         }
         /* (4) Head binding on the generated rows' final hidden state. */
         require(h3_dit_read_final_hidden(dit, hidden, edit.rows * HIDDEN),

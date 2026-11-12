@@ -112,6 +112,9 @@ h3_real_image_dit_block_test: tests/test_real_image_dit_block.o $(LIB_OBJ)
 h3_real_image_dit_test: tests/test_real_image_dit.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_real_image_dit_large_test: tests/test_real_image_dit_large.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_image_text_test: tests/test_real_image_text.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -130,7 +133,8 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test \
 	h3_real_image_vae_test h3_real_image_dit_block_test \
-	h3_real_image_dit_test h3_real_image_text_test h3_real_image_e2e_test
+	h3_real_image_dit_test h3_real_image_dit_large_test \
+	h3_real_image_text_test h3_real_image_e2e_test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -262,6 +266,24 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 		echo "skip: image DiT weights/step fixtures are not installed"; \
 	fi
 
+	@for latent in 128 192; do \
+		fixture=misc/fixtures/h3_image_dit_step_large_$${latent}x$${latent}.safetensors; \
+		if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
+		   test -f $$fixture && \
+		   test -f misc/fixtures/h3_image_text_256.safetensors; then \
+			rm -f h3_image_dit_large_velocity.bin; \
+			for mode in bf16 stream int8; do \
+				./h3_real_image_dit_large_test \
+					$(H3_IMAGE_DIR)/transformer_diffusers \
+					misc/fixtures/h3_image_text_256.safetensors $$fixture \
+					$$mode h3_image_dit_large_velocity.bin || exit 1; \
+			done; \
+			rm -f h3_image_dit_large_velocity.bin; \
+		else \
+			echo "skip: large-canvas DiT fixture $$fixture is not installed"; \
+		fi; \
+	done
+
 # Two default-mode runs of the fixture prompt must give a valid 512x512 PNG
 # and identical bytes. It runs the 62 GB text encoder and transformer, so on
 # the development Mac run it through the guard wrapper (gated_exec.py), not
@@ -310,6 +332,6 @@ clean:
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test h3_real_image_vae_test \
 		h3_real_image_dit_block_test h3_real_image_dit_test \
-		h3_real_image_text_test h3_real_image_e2e_test h3_image_png_test \
+		h3_real_image_dit_large_test h3_real_image_text_test h3_real_image_e2e_test h3_image_png_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

@@ -8,6 +8,8 @@ FRAMEWORKS := -framework Foundation -framework Metal \
 	-framework Accelerate
 LDLIBS := $(FRAMEWORKS) -licucore -lm
 
+H3_IMAGE_DIR ?= MiniMax-H3-Image
+
 LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 	h3_dit_schedule.c h3_dit.c
 
@@ -186,9 +188,9 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: Ref2VA video presentation fixture is not installed"; \
 	fi
-	@if test -f MiniMax-H3-Image/vae_diffusers/diffusion_pytorch_model.safetensors && \
+	@if test -f $(H3_IMAGE_DIR)/vae_diffusers/diffusion_pytorch_model.safetensors && \
 	         test -f misc/fixtures/h3_image_vae_decode.safetensors; then \
-		./h3_real_image_vae_test MiniMax-H3-Image/vae_diffusers \
+		./h3_real_image_vae_test $(H3_IMAGE_DIR)/vae_diffusers \
 			misc/fixtures/h3_image_vae_decode.safetensors; \
 	else \
 		echo "skip: image VAE weights/fixture are not installed"; \

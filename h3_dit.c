@@ -1903,6 +1903,10 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
                           const char *shader_source_path,
                           const h3_text_embedding *text,
                           int latent_height, int latent_width,
+                          const h3_layout_ref *references,
+                          size_t reference_count,
+                          const float *condition_rows,
+                          size_t condition_elements,
                           unsigned active_blocks,
                           int ssd_streaming,
                           int use_slower_bf16_mlp,
@@ -1935,11 +1939,37 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
              IMAGE_MAX_LATENT);
         return NULL;
     }
+    if (reference_count && !references) {
+        fail(error, error_size, "image DiT references are missing");
+        return NULL;
+    }
+    size_t reference_rows = 0;
+    for (size_t index = 0; index < reference_count; index++) {
+        const h3_layout_ref *reference = &references[index];
+        if (reference->latent_h < 1 || reference->latent_w < 1 ||
+            reference->latent_h > IMAGE_MAX_LATENT ||
+            reference->latent_w > IMAGE_MAX_LATENT) {
+            fail(error, error_size,
+                 "image reference %zu latent size must be 1 to %d per side",
+                 index + 1, IMAGE_MAX_LATENT);
+            return NULL;
+        }
+        reference_rows += (size_t)reference->latent_h *
+                          (size_t)reference->latent_w / 4;
+    }
+    if (condition_elements / VIDEO_PATCH != reference_rows ||
+        condition_elements % VIDEO_PATCH ||
+        (condition_elements && !condition_rows)) {
+        fail(error, error_size,
+             "image reference condition rows do not match the references");
+        return NULL;
+    }
     h3_layout layout;
     h3_sigma_schedule sigmas;
     memset(&sigmas, 0, sizeof(sigmas));
     if (!h3_layout_build_image((int)text->tokens, latent_height, latent_width,
-                               NULL, 0, &layout, error, error_size))
+                               references, reference_count, &layout, error,
+                               error_size))
         return NULL;
     h3_dit *dit = NULL;
     if (h3_image_schedule_build(&sigmas))
@@ -1954,8 +1984,8 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
                        use_slower_uncached_int8_scales,
                        use_slower_dynamic_fc1_k,
                        use_slower_grouped_quantizer, use_int8_row_fc2,
-                       NULL, 0, NULL, 0, 1, progress, progress_opaque,
-                       error, error_size);
+                       condition_rows, condition_elements, NULL, 0, 1,
+                       progress, progress_opaque, error, error_size);
     else
         fail(error, error_size, "cannot build the image sigma schedule");
     h3_layout_free(&layout);

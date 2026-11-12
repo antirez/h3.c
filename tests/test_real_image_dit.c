@@ -404,8 +404,8 @@ int main(int argc, char **argv) {
                tokens, random_size, random_size);
         h3_dit *random_dit = h3_dit_load_image(
             weight_directory, "h3_shaders.metal", &text, random_size,
-            random_size, 50, stream, bf16, bf16, bf16, 0, 0, 0, 0, 0, 0, 0, 0,
-            progress, NULL, error, sizeof(error));
+            random_size, NULL, 0, NULL, 0, 50, stream, bf16, bf16, bf16, 0, 0,
+            0, 0, 0, 0, 0, 0, progress, NULL, error, sizeof(error));
         require(random_dit != NULL, error);
         run_random(random_dit, mode, bf16 ? 0u : stream ? 1u : 2u, tokens,
                    random_size, exchange);
@@ -490,8 +490,8 @@ int main(int argc, char **argv) {
     double started = seconds_now();
     h3_dit *dit = h3_dit_load_image(
         weight_directory, "h3_shaders.metal", &text, latent_height,
-        latent_width, 50, stream, bf16, bf16, bf16, 0, 0, 0, 0, 0, 0, 0, 0,
-        progress, NULL, error, sizeof(error));
+        latent_width, NULL, 0, NULL, 0, 50, stream, bf16, bf16, bf16, 0, 0, 0,
+        0, 0, 0, 0, 0, progress, NULL, error, sizeof(error));
     if (!dit) die(error);
     printf("load: %.1f s\n", seconds_now() - started);
     require(h3_dit_image_rows(dit) == rows, "image row count mismatch");

@@ -1301,6 +1301,50 @@ static void test_image_edit_layout(void) {
                                  sizeof(error)));
 }
 
+static void test_image_dit_reference_arguments(void) {
+    uint16_t value = 0;
+    h3_text_embedding text = {3, 5120, &value, {0}, NULL};
+    float rows[8 * 96];
+    memset(rows, 0, sizeof(rows));
+    char error[256];
+#define LOAD(refs, count, cond, elements) \
+    h3_dit_load_image("/nonexistent-h3-weights", "h3_shaders.metal", &text, 4, \
+                      4, refs, count, cond, elements, 50, 0, 0, 0, 0, 0, 0, 0, \
+                      0, 0, 0, 0, 0, NULL, NULL, error, sizeof(error))
+    const h3_layout_ref four = {H3_LAYOUT_REF_IMAGE, 1, 4, 4, 0};
+    CHECK(LOAD(NULL, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "references are missing") != NULL);
+    CHECK(LOAD(&four, 1, rows, 0) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, rows, 3 * 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, rows, 4 * 96 + 1) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, NULL, 4 * 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(NULL, 0, rows, 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    const h3_layout_ref zero = {H3_LAYOUT_REF_IMAGE, 1, 0, 4, 0};
+    CHECK(LOAD(&zero, 1, rows, 0) == NULL);
+    CHECK(strstr(error, "reference 1 latent size") != NULL);
+    const h3_layout_ref wide[2] = {four, {H3_LAYOUT_REF_IMAGE, 1, 4, 1026, 0}};
+    CHECK(LOAD(wide, 2, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "reference 2 latent size") != NULL);
+    const h3_layout_ref odd = {H3_LAYOUT_REF_IMAGE, 1, 3, 4, 0};
+    CHECK(LOAD(&odd, 1, rows, 3 * 96) == NULL);
+    CHECK(strstr(error, "reference latent canvas") != NULL);
+    const h3_layout_ref audio = {H3_LAYOUT_REF_AUDIO, 1, 4, 4, 4};
+    CHECK(LOAD(&audio, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "only image references") != NULL);
+    /* Valid arguments get past validation and fail on the missing weights. */
+    CHECK(LOAD(&four, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "do not match") == NULL &&
+          strstr(error, "reference") == NULL && error[0] != '\0');
+    CHECK(LOAD(NULL, 0, NULL, 0) == NULL);
+    CHECK(strstr(error, "do not match") == NULL && error[0] != '\0');
+#undef LOAD
+}
+
 static void test_reference_resize_lanczos(void) {
     /* PIL Image.resize((w, h), LANCZOS) of this 6x5 planar image. */
     enum { W = 6, H = 5 };
@@ -1493,6 +1537,7 @@ int main(void) {
     test_image_edit_streams();
     test_image_edit_limits();
     test_image_edit_layout();
+    test_image_dit_reference_arguments();
     test_reference_resize_lanczos();
     test_reference_pipeline_steps();
     test_metal_probe();

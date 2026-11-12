@@ -76,14 +76,24 @@ h3_dit *h3_dit_load_conditioned(
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size);
 
-/* Load the text-to-image transformer (diffusers MiniMax-H3-Image layout). The
- * packed layout is [text | latent rows] for a latent_height x latent_width
- * canvas; the schedule is the fixed six-step grid. `active_blocks` thins the
- * 50 blocks as for video. Options have the video loaders' meaning. */
+/* Load the image transformer (diffusers MiniMax-H3-Image layout). The packed
+ * layout is [text | reference rows | latent rows] for a latent_height x
+ * latent_width canvas; the schedule is the fixed six-step grid.
+ * `references` are reference_count image references (H3_LAYOUT_REF_IMAGE,
+ * one latent frame each, even sides of at most 1024) and condition_rows their
+ * noised, patchified F32 rows, [R, 96] with R the sum of the references'
+ * latent_h * latent_w / 4 (condition_elements = R * 96), written once at load
+ * and held for all steps. Pass NULL, 0, NULL, 0 for text-to-image.
+ * `active_blocks` thins the 50 blocks as for video. Options have the video
+ * loaders' meaning. */
 h3_dit *h3_dit_load_image(const char *weight_directory,
                           const char *shader_source_path,
                           const h3_text_embedding *text,
                           int latent_height, int latent_width,
+                          const h3_layout_ref *references,
+                          size_t reference_count,
+                          const float *condition_rows,
+                          size_t condition_elements,
                           unsigned active_blocks,
                           int ssd_streaming,
                           int use_slower_bf16_mlp,

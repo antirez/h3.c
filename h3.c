@@ -1998,6 +1998,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                         !params->ssd_streaming;
     dit = h3_dit_load_image(
         dit_path, "h3_shaders.metal", &text, latent_height, latent_width,
+        NULL, 0, NULL, 0,
         (unsigned)params->dit_layers, params->ssd_streaming,
         resident_bf16 || params->use_slower_bf16_mlp,
         resident_bf16 || params->use_slower_bf16_qkv,

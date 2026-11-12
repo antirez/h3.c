@@ -499,6 +499,46 @@ static void test_image_canvas(void) {
     CHECK(!h3_image_canvas(1024, 1024, 4194304, NULL, &canvas_w));
 }
 
+static void test_image_canvas_limits(void) {
+    const struct { int width, height, min_area; int accepted; } cases[] = {
+        {1024, 1024, 4194304, 1}, {4096, 4096, 4194304, 1},
+        {2048, 8192, 1024, 1}, {16384, 1024, 1024, 1},
+        {10000, 100, 4194304, 0}, {16384, 64, 4194304, 0},
+        {16384, 16384, 4194304, 0}, {8192, 4096, 1024, 0},
+        {4128, 4128, 1024, 0}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int canvas_w, canvas_h;
+        CHECK(h3_image_canvas(cases[index].height, cases[index].width,
+                              cases[index].min_area, &canvas_h, &canvas_w));
+        const char *reason = h3_image_canvas_error(canvas_h, canvas_w);
+        CHECK((reason == NULL) == cases[index].accepted);
+        if (reason) CHECK(strchr(reason, '\n') == NULL);
+    }
+}
+
+static void test_image_parse_size(void) {
+    int width = 7, height = 7;
+    CHECK(h3_image_parse_size("512x768", &width, &height));
+    CHECK(width == 512 && height == 768);
+    CHECK(h3_image_parse_size("1X2", &width, &height));
+    CHECK(width == 1 && height == 2);
+    CHECK(h3_image_parse_size("2147483647x1", &width, &height));
+    CHECK(width == 2147483647);
+    const char *const bad[] = {
+        "", "x", "512", "512x", "x512", " 512x512", "512x512 ", "512 x512",
+        "512x 512", "512x+512", "+512x512", "-512x512", "512x-512", "0x512",
+        "512x0", "512x512x512", "512x512\n", "2147483648x1", "1x99999999999",
+        "5_12x512", "0x1p3x512"
+    };
+    for (size_t index = 0; index < sizeof(bad) / sizeof(bad[0]); index++) {
+        width = height = 7;
+        CHECK(!h3_image_parse_size(bad[index], &width, &height));
+        CHECK(width == 7 && height == 7);
+    }
+    CHECK(!h3_image_parse_size(NULL, &width, &height));
+}
+
 static void test_image_layout(void) {
     h3_layout layout;
     char error[256];
@@ -1034,6 +1074,8 @@ int main(void) {
     test_dit_row_conversions();
     test_image_schedule();
     test_image_canvas();
+    test_image_canvas_limits();
+    test_image_parse_size();
     test_image_layout();
     test_image_rope_inv_freq();
     test_image_timestep_features();

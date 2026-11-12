@@ -382,6 +382,13 @@ static char *h3_path(const char *root, const char *relative) {
     return result;
 }
 
+static int h3_is_file_in(const char *root, const char *relative) {
+    char *path = h3_path(root, relative);
+    int exists = path && h3_is_file(path);
+    free(path);
+    return exists;
+}
+
 static int h3_require_file(h3_ctx *ctx, const char *relative) {
     char *path = h3_path(ctx->model_dir, relative);
     if (!path) {
@@ -439,6 +446,19 @@ h3_ctx *h3_load_dir(const char *model_dir) {
     ctx->image = !h3_is_file(video_config) && h3_is_file(image_config);
     free(video_config);
     free(image_config);
+    char *image_directory = h3_path(model_dir, "transformer_diffusers");
+    struct stat image_status;
+    int partial_image = !ctx->image && image_directory &&
+        stat(image_directory, &image_status) == 0 &&
+        S_ISDIR(image_status.st_mode) &&
+        !h3_is_file_in(model_dir, "FL2VA/transformer/config.json");
+    free(image_directory);
+    if (partial_image &&
+        !h3_require_file(ctx, "transformer_diffusers/config.json")) {
+        snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
+        h3_free(ctx);
+        return NULL;
+    }
     if (ctx->image) {
         if (!h3_require_file(ctx, "vae_diffusers/config.json") ||
             !h3_require_file(ctx, "tokenizer/tokenizer.json") ||
@@ -1855,7 +1875,16 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "cannot compute the generation canvas");
         return NULL;
     }
-    int latent_height = canvas_height / 16, latent_width = canvas_width / 16;
+    const char *canvas_error = h3_image_canvas_error(canvas_height,
+                                                     canvas_width);
+    if (canvas_error) {
+        h3_set_error(ctx, "%s (%dx%d for a %dx%d request)", canvas_error,
+                     canvas_width, canvas_height, params->width,
+                     params->height);
+        return NULL;
+    }
+    int latent_height = canvas_height / H3_IMAGE_VAE_SCALE;
+    int latent_width = canvas_width / H3_IMAGE_VAE_SCALE;
     fprintf(stderr, "h3: image %dx%d requested, generating on a %dx%d canvas "
             "(latent %dx%d, %d image tokens)\n", params->width, params->height,
             canvas_width, canvas_height, latent_width, latent_height,

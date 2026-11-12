@@ -1,6 +1,7 @@
 #include "h3_image.h"
 
 #include <math.h>
+#include <stdint.h>
 
 int h3_image_schedule_build(h3_sigma_schedule *schedule) {
     static const double sample_sigmas[H3_IMAGE_STEPS + 1] = {
@@ -33,6 +34,39 @@ int h3_image_canvas(int height, int width, int min_area,
     *canvas_height = (int)fmax(multiple, scaled_height);
     *canvas_width = (int)fmax(multiple, scaled_width);
     return 1;
+}
+
+static const char *parse_dimension(const char *text, long *value) {
+    if (*text < '0' || *text > '9') return NULL;
+    long parsed = 0;
+    while (*text >= '0' && *text <= '9') {
+        parsed = parsed * 10 + (*text - '0');
+        if (parsed > INT32_MAX) return NULL;
+        text++;
+    }
+    *value = parsed;
+    return text;
+}
+
+int h3_image_parse_size(const char *text, int *width, int *height) {
+    long parsed_width, parsed_height;
+    if (!text || !width || !height) return 0;
+    const char *middle = parse_dimension(text, &parsed_width);
+    if (!middle || (*middle != 'x' && *middle != 'X')) return 0;
+    const char *end = parse_dimension(middle + 1, &parsed_height);
+    if (!end || *end || parsed_width < 1 || parsed_height < 1) return 0;
+    *width = (int)parsed_width;
+    *height = (int)parsed_height;
+    return 1;
+}
+
+const char *h3_image_canvas_error(int canvas_height, int canvas_width) {
+    if (canvas_height / H3_IMAGE_VAE_SCALE > H3_IMAGE_MAX_LATENT_SIDE ||
+        canvas_width / H3_IMAGE_VAE_SCALE > H3_IMAGE_MAX_LATENT_SIDE)
+        return "the generation canvas is more than 16384 pixels on a side";
+    if ((long long)canvas_height * canvas_width > H3_IMAGE_MAX_CANVAS_AREA)
+        return "the generation canvas is larger than 4096x4096 pixels";
+    return NULL;
 }
 
 static void rope_inv_freq(float *out, int count, int index_step, float base,

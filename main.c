@@ -1,6 +1,7 @@
 #include "h3.h"
 #include "h3_cli.h"
 #include "h3_host.h"
+#include "h3_image.h"
 #include "h3_terminal.h"
 
 #include <errno.h>
@@ -398,24 +399,14 @@ int main(int argc, char **argv) {
                 params.height = parse_int(optarg, "height");
                 height_given = 1;
                 break;
-            case OPT_SIZE: {
-                char *middle = NULL;
-                long parsed_width = strtol(optarg, &middle, 10);
-                long parsed_height = 0;
-                char *end = NULL;
-                if (middle != optarg && (*middle == 'x' || *middle == 'X'))
-                    parsed_height = strtol(middle + 1, &end, 10);
-                if (!end || end == middle + 1 || *end || parsed_width < 1 ||
-                    parsed_height < 1 || parsed_width > INT32_MAX ||
-                    parsed_height > INT32_MAX) {
+            case OPT_SIZE:
+                if (!h3_image_parse_size(optarg, &params.width,
+                                         &params.height)) {
                     fprintf(stderr, "h3: --size must be WxH: %s\n", optarg);
                     return 2;
                 }
-                params.width = (int)parsed_width;
-                params.height = (int)parsed_height;
                 width_given = height_given = 1;
                 break;
-            }
             case OPT_IMAGE: image_flag = 1; break;
             case OPT_MIN_AREA:
                 min_area = parse_int(optarg, "min generation area");
@@ -576,6 +567,10 @@ int main(int argc, char **argv) {
     }
     params.references = references;
     params.reference_count = reference_count;
+    if (output && !*output) {
+        fprintf(stderr, "h3: -o needs a path\n");
+        return 2;
+    }
     if (profile) setenv("H3_PROFILE", "1", 1);
     h3_ctx *ctx = h3_load_dir(model_dir);
     if (!ctx) {
@@ -701,8 +696,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         h3_result_free(result);
-        if (params.output_path && *params.output_path)
-            fprintf(stderr, "h3: wrote %s\n", params.output_path);
+        fprintf(stderr, "h3: wrote %s\n", params.output_path);
         if (cli.frames_dir)
             fprintf(stderr, "h3: wrote frames to %s\n", cli.frames_dir);
     } else if (!info) {

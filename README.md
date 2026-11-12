@@ -415,8 +415,9 @@ not apply, and the interactive session stays video-only.
 ```
 
 Requests below `--min-generation-area` (default 4194304) are generated on a
-larger canvas and resized back; `--min-generation-area 1024` generates on the
-requested size. `--ssd-streaming` keeps only two BF16 blocks resident.
+larger canvas and resized back. `--min-generation-area 1024` stops the
+enlarging, but the canvas is still rounded to a multiple of 32 (the model's
+grid), so a 1000x1000 request is generated on 992x992 and resized to 1000x1000. `--ssd-streaming` keeps only two BF16 blocks resident.
 
 ## Tests and runtime requirements
 

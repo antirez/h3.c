@@ -7,6 +7,9 @@
 
 #define H3_IMAGE_STEPS 6
 #define H3_IMAGE_MAX_SIDE 16384
+#define H3_IMAGE_VAE_SCALE 16
+#define H3_IMAGE_MAX_LATENT_SIDE 1024
+#define H3_IMAGE_MAX_CANVAS_AREA 16777216
 #define H3_IMAGE_MIN_AREA_LOW 1024
 #define H3_IMAGE_MIN_AREA_HIGH 16777216
 #define H3_IMAGE_DIT_ROPE_FREQS 16
@@ -21,6 +24,14 @@ int h3_image_schedule_build(h3_sigma_schedule *schedule);
  * [H3_IMAGE_MIN_AREA_LOW, H3_IMAGE_MIN_AREA_HIGH]. */
 int h3_image_canvas(int height, int width, int min_area,
                     int *canvas_height, int *canvas_width);
+
+/* Parse "WxH" (or "WXH"): two plain decimal integers in [1, INT32_MAX], no
+ * sign, no whitespace, nothing after. */
+int h3_image_parse_size(const char *text, int *width, int *height);
+
+/* NULL when a canvas can be generated, else a one-line reason: a latent side
+ * above H3_IMAGE_MAX_LATENT_SIDE or an area above H3_IMAGE_MAX_CANVAS_AREA. */
+const char *h3_image_canvas_error(int canvas_height, int canvas_width);
 
 /* Whether the first half of the image checkpoint's FC1 (ff.net.0.proj) rows is
  * the SwiGLU gate, the order the fused kernels expect. 0 means the loader swaps

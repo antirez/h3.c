@@ -18,6 +18,7 @@ MiniMax-H3-Image classes), transformers, torch and safetensors.
 """
 
 import argparse
+import copy
 import gc
 import json
 import os
@@ -216,6 +217,13 @@ def run_transformer(args, device, prompt_embeds, last_step, capture_block0=False
         recorded["temb"] = temb.detach().float().cpu()
         recorded["adaln_indices"] = adaln_indices.detach().to(torch.int32).cpu()
         recorded["hidden_out"] = output[0].detach().cpu()
+        reference = copy.deepcopy(module).float().cpu()
+        reference._forward_hooks.clear()
+        rotary = tuple(part.detach().float().cpu() for part in hook_args[3])
+        recorded["hidden_out_f32"] = reference(
+            hidden_in.detach().float().cpu(), recorded["temb"], adaln_indices.detach().long().cpu(), rotary
+        )[0].detach()
+        del reference
         if stop_after_block0:
             raise StopForward
 
@@ -288,6 +296,7 @@ def save_block0(args, recorded):
             "adaln_indices": recorded["adaln_indices"],
             "position_ids": recorded["position_ids"],
             "hidden_out": recorded["hidden_out"],
+            "hidden_out_f32": recorded["hidden_out_f32"],
             "step": scalar(0),
             **settings(args, height, width),
         },

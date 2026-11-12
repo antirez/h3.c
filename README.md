@@ -430,6 +430,28 @@ Three weight modes, measured at 512x512 on an M5 Max:
 BF16 and streaming give bit-identical latents; int8 gives a different but
 equally plausible picture. `--int8` and `--ssd-streaming` exclude each other.
 
+Large canvases, one seed, M5 Max with 128 GB, `--profile` (footprint is the
+process physical footprint, which includes MPSGraph transients; swap stayed
+flat in every run):
+
+| canvas | image tokens | mode | per step | whole run | peak footprint |
+|---|---|---|---|---|---|
+| 2048x2048 | 4096 | BF16 | 3.1 s | 40 s | 37.1 GiB |
+| 3072x3072 | 9216 | BF16 | 10.9 s | 100 s | 38.4 GiB |
+| 4096x4096 | 16384 | BF16 | 20.9 s | 163 s | 40.1 GiB |
+| 4096x4096 | 16384 | `--int8` | 13.8 s | 118 s | 24.3 GiB |
+| 4096x4096 | 16384 | `--ssd-streaming` | 20.7 s | 150 s | 9.5 GiB |
+| 6272x2688 | 16464 | BF16 | 20.6 s | 160 s | 40.1 GiB |
+| 8192x4096 | 32768 | BF16 | 61 s | 418 s | 43.9 GiB |
+
+The attention scores are not materialised (the footprint grows by about
+0.25 MiB per token over the 36 GiB of weights, not by 56 S^2 elements), so the
+limit is time: the attention cost grows with the square of the token count.
+8192x4096 (33554432 pixels) is the largest canvas measured and the limit; a
+larger canvas is refused before any weight is loaded, and neither `--int8` nor
+`--ssd-streaming` raises it. The image VAE decode takes 12 s at 4096x4096 and
+24 s at 8192x4096. BF16 and streaming write byte-identical PNGs at 4096x4096.
+
 ## Tests and runtime requirements
 
 ```sh

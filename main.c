@@ -36,7 +36,8 @@ static void usage(const char *program) {
         "  -o, --output PATH      Output MP4, or PNG for images (default:\n"
         "                         outputs/h3.mp4, outputs/h3.png)\n"
         "      --image            Require an image directory (error otherwise)\n"
-        "      --size WxH         Output size (image default: 1024x1024)\n"
+        "      --size WxH         Output size (image default: 1024x1024; the generation\n"
+        "                         canvas is limited to 33554432 pixels, 8192x4096)\n"
         "      --min-generation-area N  Image canvas area floor (default: 4194304,\n"
         "                         range 1024..16777216; 1024 disables enlarging)\n"
         "      --width N          Output width (default: 864)\n"
@@ -77,7 +78,7 @@ static void usage(const char *program) {
         "      --frames-dir PATH  Write generated frames as PPM files\n"
         "      --show             Display a frame after every denoising step (M5)\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
-        "      --profile          Print per-phase Metal timing and allocation data\n"
+        "      --profile          Print per-phase timing, allocation and memory data\n"
         "      --info             Inspect model/device without mapping weights\n"
         "  -h, --help             Show this help\n",
         program, program, program, program);

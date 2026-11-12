@@ -9,7 +9,7 @@
 #define H3_IMAGE_MAX_SIDE 16384
 #define H3_IMAGE_VAE_SCALE 16
 #define H3_IMAGE_MAX_LATENT_SIDE 1024
-#define H3_IMAGE_MAX_CANVAS_AREA 16777216
+#define H3_IMAGE_MAX_CANVAS_AREA 33554432
 #define H3_IMAGE_MIN_AREA_LOW 1024
 #define H3_IMAGE_MIN_AREA_HIGH 16777216
 #define H3_IMAGE_DIT_ROPE_FREQS 16
@@ -30,7 +30,10 @@ int h3_image_canvas(int height, int width, int min_area,
 int h3_image_parse_size(const char *text, int *width, int *height);
 
 /* NULL when a canvas can be generated, else a one-line reason: a latent side
- * above H3_IMAGE_MAX_LATENT_SIDE or an area above H3_IMAGE_MAX_CANVAS_AREA. */
+ * above H3_IMAGE_MAX_LATENT_SIDE or an area above H3_IMAGE_MAX_CANVAS_AREA
+ * (8192x4096 pixels, 32768 image tokens, the largest size measured: resident
+ * BF16 needs 44 GiB there and about seven minutes; memory is not the limit,
+ * the quadratic attention time is). */
 const char *h3_image_canvas_error(int canvas_height, int canvas_width);
 
 /* Whether the first half of the image checkpoint's FC1 (ff.net.0.proj) rows is

@@ -250,6 +250,17 @@ static void test_edit_copies(void) {
     CHECK(h3_image_edit_copies(flat, 1024, 1024, &g, &vae, &vision));
     CHECK(!memcmp(vae, flat, (size_t)3 * 1024 * 1024));
     CHECK(!memcmp(vision, flat, (size_t)3 * 1024 * 1024));
+    /* Without a vision output only the VAE copy is made, and it is the same. */
+    uint8_t *vae_only = NULL;
+    CHECK(h3_image_edit_copies(flat, 1024, 1024, &g, &vae_only, NULL));
+    CHECK(!memcmp(vae_only, vae, (size_t)3 * 1024 * 1024));
+    free(vae_only);
+    geometry_of(250, 370, &g);
+    uint8_t *small = picture(250, 370);
+    CHECK(h3_image_edit_copies(small, 250, 370, &g, &vae_only, NULL));
+    CHECK(vae_only != NULL);
+    free(vae_only);
+    free(small);
     free(vae);
     free(vision);
     free(flat);

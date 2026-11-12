@@ -27,27 +27,31 @@ int h3_image_edit_copies(const uint8_t *planar, int width, int height,
                          uint8_t **vae, uint8_t **vision) {
     if (vae) *vae = NULL;
     if (vision) *vision = NULL;
-    if (!planar || !geometry || !vae || !vision || width < 1 || height < 1)
-        return 0;
-    int first_w, first_h;
-    if (!h3_image_edit_bound_short_edge(width, height,
-                                        H3_VISION_MIN_SHORT_EDGE,
-                                        H3_VISION_MAX_SHORT_EDGE, &first_w,
-                                        &first_h)) return 0;
+    if (!planar || !geometry || !vae || width < 1 || height < 1) return 0;
     uint8_t *vae_copy = resized_copy(planar, width, height, geometry->vae_w,
                                      geometry->vae_h);
-    uint8_t *first = resized_copy(planar, width, height, first_w, first_h);
-    uint8_t *vision_copy = first ?
-        resized_copy(first, first_w, first_h, geometry->vision_w,
-                     geometry->vision_h) : NULL;
-    free(first);
-    if (!vae_copy || !vision_copy) {
+    uint8_t *vision_copy = NULL;
+    if (vae_copy && vision) {
+        int first_w, first_h;
+        uint8_t *first = NULL;
+        if (h3_image_edit_bound_short_edge(width, height,
+                                           H3_VISION_MIN_SHORT_EDGE,
+                                           H3_VISION_MAX_SHORT_EDGE, &first_w,
+                                           &first_h))
+            first = resized_copy(planar, width, height, first_w, first_h);
+        if (first)
+            vision_copy = resized_copy(first, first_w, first_h,
+                                       geometry->vision_w,
+                                       geometry->vision_h);
+        free(first);
+    }
+    if (!vae_copy || (vision && !vision_copy)) {
         free(vae_copy);
         free(vision_copy);
         return 0;
     }
     *vae = vae_copy;
-    *vision = vision_copy;
+    if (vision) *vision = vision_copy;
     return 1;
 }
 

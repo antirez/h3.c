@@ -8,9 +8,10 @@
 
 /* The two resized copies of an upright reference, planar bytes [3][h][w], each
  * malloc'd (the caller frees them): the VAE copy (geometry vae_w x vae_h) and
- * the Qwen vision copy (vision_w x vision_h). Both resize with the PIL
- * Lanczos port; the vision copy's second stage (smart_resize) is bicubic in
- * the reference and Lanczos here. A size that does not change is copied. */
+ * the Qwen vision copy (vision_w x vision_h); a NULL vision makes only the VAE
+ * copy. Both resize with the PIL Lanczos port; the vision copy's second stage
+ * (smart_resize) is bicubic in the reference and Lanczos here. A size that
+ * does not change is copied. */
 int h3_image_edit_copies(const uint8_t *planar, int width, int height,
                          const h3_image_reference_geometry *geometry,
                          uint8_t **vae, uint8_t **vision);

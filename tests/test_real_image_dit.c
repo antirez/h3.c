@@ -15,19 +15,22 @@ enum { HIDDEN = 5376, TEXT_DIM = 5120, PATCH = 96 };
  * F32 run of the same checkpoint (not part of the fixtures) it is 2.2e-2 off
  * at step 0 and 1.9e-2 at step 3 in global rel-L2; this implementation in BF16
  * is 2.0e-2 and 1.4e-2 off, so it is closer to the truth than the reference
- * is, and 2.8e-2 and 1.8e-2 off the reference itself. The BF16 bounds sit
- * about 1.8x above that. The int8 run is 4.0e-2 and 3.4e-2 off the F32 truth
- * and 4.4e-2 and 3.5e-2 off the reference; its bounds are 2x the latter. The
- * refined text of the fixture is 4.1e-3 from the F32 run of the refiner and
- * this implementation is 4.9e-3 from it, so its bound is about twice that.
- * A wrong head, half swap or modulation moves the velocity by far
- * more than these bounds. The median over rows is a second criterion that the
- * rows with the largest values cannot dominate. */
+ * is, and 2.8e-2 and 1.8e-2 off the reference itself. The BF16 bounds are per
+ * step, about 1.4x above that. The int8 run is 4.0e-2 and 3.4e-2 off the F32
+ * truth and 4.4e-2 and 3.5e-2 off the reference; its bounds are 2x the latter.
+ * The refined text of the fixture is 4.1e-3 from the F32 run of the refiner
+ * and this implementation is 4.9e-3 from it, so its bound is about twice that.
+ * The six heads are close to each other: fed the same hidden state, a wrong
+ * head differs from the right one by 6e-2 to 9e-2 at step 0 (caught by the
+ * step 0 bound) but only by 1.1e-2 to 5e-2 at step 3, which these bounds catch
+ * only in part. Head selection is pinned by the host tests; the median over
+ * rows is a second criterion that the rows with the largest values cannot
+ * dominate. */
 #define REFINED_TEXT_BOUND 1e-2
-#define BF16_VELOCITY_BOUND 5e-2
-#define BF16_ROW_MEDIAN_BOUND 4.5e-2
-#define INT8_VELOCITY_BOUND 9e-2
-#define INT8_ROW_MEDIAN_BOUND 8.5e-2
+static const double BF16_VELOCITY_BOUND[2] = {4e-2, 2.5e-2};
+static const double BF16_ROW_MEDIAN_BOUND[2] = {3.5e-2, 2e-2};
+static const double INT8_VELOCITY_BOUND[2] = {9e-2, 7e-2};
+static const double INT8_ROW_MEDIAN_BOUND[2] = {8.5e-2, 5e-2};
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_dit.c: %s\n", message);
@@ -233,9 +236,6 @@ int main(int argc, char **argv) {
            refined.l2, refined.maximum, refined.row_median);
     require(refined.l2 < REFINED_TEXT_BOUND, "refined text is off");
 
-    double velocity_bound = int8 ? INT8_VELOCITY_BOUND : BF16_VELOCITY_BOUND;
-    double median_bound = int8 ? INT8_ROW_MEDIAN_BOUND :
-                                 BF16_ROW_MEDIAN_BOUND;
     float *velocity = malloc(elements * sizeof(*velocity));
     require(velocity != NULL, "oom");
     for (int index = 0; index < 2; index++) {
@@ -249,8 +249,11 @@ int main(int argc, char **argv) {
         printf("step %d: velocity rel-L2 %.6g, max abs %.6g, median row "
                "%.6g, worst row %.6g (%.2f s)\n", steps[index], result.l2,
                result.maximum, result.row_median, result.row_worst, elapsed);
-        require(result.l2 < velocity_bound, "velocity rel-L2 over the bound");
-        require(result.row_median < median_bound,
+        require(result.l2 < (int8 ? INT8_VELOCITY_BOUND[index] :
+                                    BF16_VELOCITY_BOUND[index]),
+                "velocity rel-L2 over the bound");
+        require(result.row_median < (int8 ? INT8_ROW_MEDIAN_BOUND[index] :
+                                            BF16_ROW_MEDIAN_BOUND[index]),
                 "velocity median row error over the bound");
         if (exchange && !int8)
             check_exchange(exchange, velocity, elements, mode, steps[index]);

@@ -187,6 +187,9 @@ static void test_layout_tiny(void) {
     h3_layout_summary summary;
     CHECK(h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
     CHECK(!summary.image);
+    CHECK(summary.video_target_start == 28 && summary.audio_target_start == 12);
+    CHECK(summary.video_condition == 0 && summary.audio_condition == 0);
+    CHECK(summary.video_target == 2 && summary.audio_target == 16);
     h3_layout_free(&layout);
 }
 
@@ -216,6 +219,9 @@ static void test_layout_fl2va(void) {
     h3_layout_summary summary;
     CHECK(h3_layout_validate(&layout, 128, &summary, error, sizeof(error)));
     CHECK(!summary.image);
+    CHECK(summary.video_target_start == 1124 && summary.audio_target_start == 938);
+    CHECK(summary.video_condition == 810 && summary.audio_condition == 0);
+    CHECK(summary.video_target == 6885 && summary.audio_target == 186);
     h3_layout_free(&layout);
 }
 
@@ -251,6 +257,9 @@ static void test_layout_ref2va(void) {
     h3_layout_summary summary;
     CHECK(h3_layout_validate(&layout, 192, &summary, error, sizeof(error)));
     CHECK(!summary.image);
+    CHECK(summary.video_target_start == 1402 && summary.audio_target_start == 1216);
+    CHECK(summary.video_condition == 768 && summary.audio_condition == 256);
+    CHECK(summary.video_target == 6885 && summary.audio_target == 186);
     h3_layout_free(&layout);
 }
 
@@ -282,10 +291,15 @@ static void test_layout_validate(void) {
     CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
     h3_layout_free(&layout);
 
-    h3_layout_spec no_audio = {12, 2, 2, 2, 0, 5, NULL, 0, NULL, 0};
-    CHECK(h3_layout_build(&no_audio, &layout, error, sizeof(error)));
-    CHECK(!h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
-    h3_layout_free(&layout);
+    const h3_layout_spec no_audio[2] = {
+        {12, 1, 2, 2, 0, 5, NULL, 0, NULL, 0},
+        {12, 2, 2, 2, 0, 5, NULL, 0, NULL, 0}
+    };
+    for (size_t index = 0; index < 2; index++) {
+        CHECK(h3_layout_build(&no_audio[index], &layout, error, sizeof(error)));
+        CHECK(!h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
+        h3_layout_free(&layout);
+    }
 }
 
 static void write_all(int descriptor, const void *data, size_t size) {

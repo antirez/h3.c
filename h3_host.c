@@ -547,7 +547,9 @@ int h3_layout_validate(const h3_layout *layout, size_t text_tokens,
                        h3_layout_summary *summary, char *error,
                        size_t error_size) {
     h3_layout_builder builder = {NULL, 0, 0, error, error_size};
-    if (!layout || !summary) return 0;
+    if (!layout || !summary) {
+        return h3_builder_fail(&builder, "missing layout or summary");
+    }
     int image = layout->signature[4] == 0;
     if (!text_tokens || layout->signature[0] != (int)text_tokens ||
         !layout->segments || layout->segment_count < (image ? 2u : 3u) ||

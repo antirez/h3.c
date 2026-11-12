@@ -97,7 +97,7 @@ def save_fixture(args, stage, tensors):
     path = os.path.join(args.out_dir, FIXTURE_NAMES[stage])
     save_file({name: tensor.detach().cpu().contiguous() for name, tensor in tensors.items()}, path)
     sidecar = {name: list(tensor.shape) + [str(tensor.dtype)] for name, tensor in tensors.items()}
-    sidecar["prompt"] = args.prompt
+    sidecar["prompt_text"] = args.prompt
     with open(path[: -len(".safetensors")] + ".json", "w") as handle:
         json.dump(sidecar, handle, indent=2)
     print(f"wrote {path}")

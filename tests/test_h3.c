@@ -713,8 +713,7 @@ static void test_image_unpack_2d(void) {
     free(rgb);
 
     /* Raw decoder values 0, 3, -5 per channel: 0 maps to the ImageNet mean,
-     * 3 and -5 clamp to the ends of [0, 1]; 0.9999 is the value that rounds
-     * to 255 but truncates to 254. */
+     * 3 and -5 clamp to the ends of [0, 1]; 0.9999 truncates to 254. */
     const float raw_nine = (0.9999f - 0.485f) / 0.229f;
     float data[3 * 4] = {
         0.0f, 3.0f, -5.0f, raw_nine,
@@ -731,7 +730,23 @@ static void test_image_unpack_2d(void) {
     h3_image_planes_to_u8(&planes, bytes);
     CHECK(bytes[0] == 123 && bytes[1] == 255 && bytes[2] == 0 && bytes[3] == 254);
     CHECK(bytes[4] == 116 && bytes[8] == 103);
-    CHECK(lrintf(0.9999f * 255.0f) == 255);
+}
+
+static void test_image_vae_config_parse(void) {
+    float values[3];
+    char error[256];
+    CHECK(h3_image_vae_parse_float_array("{\"a\": 1, \"m\": [0.5, -1.5,\n 2e1]}",
+                                         "m", values, 3, error, sizeof(error)));
+    CHECK(values[0] == 0.5f && values[1] == -1.5f && values[2] == 20.0f);
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2]}", "m", values, 3,
+                                          error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2, 3, 4]}", "m", values,
+                                          3, error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, NaN, 3]}", "m", values,
+                                          3, error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2, 3]}", "n", values, 3,
+                                          error, sizeof(error)));
+    CHECK(error[0] != '\0');
 }
 
 static void test_metal_probe(void) {
@@ -778,6 +793,7 @@ int main(void) {
     test_image_qkv_interleave();
     test_image_vae_tiles();
     test_image_unpack_2d();
+    test_image_vae_config_parse();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

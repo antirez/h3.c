@@ -24,7 +24,8 @@ enum {
     ROPE_HALF = ROPE_AXES * H3_IMAGE_VAE_ROPE_FREQS,
     PATCH = H3_VAE_SPATIAL_RATIO,
     OUTPUT_PATCH = 3 * PATCH * PATCH,
-    TILE_PIXELS = 256
+    TILE_PIXELS = 256,
+    MAX_LATENT = 1024
 };
 
 typedef struct {
@@ -304,8 +305,9 @@ static int load_weights(vae_context *vae, char *error, size_t error_size) {
     return vae->norm_out_w && vae->norm_out_b && vae->proj_w && vae->proj_b;
 }
 
-static int parse_float_array(const char *json, const char *key, float *values,
-                             size_t count, char *error, size_t error_size) {
+int h3_image_vae_parse_float_array(const char *json, const char *key,
+                                   float *values, size_t count, char *error,
+                                   size_t error_size) {
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *cursor = strstr(json, pattern);
@@ -341,7 +343,12 @@ static int load_latent_normalization(const char *weight_directory,
                                      float *mean, float *deviation,
                                      char *error, size_t error_size) {
     char path[1024];
-    snprintf(path, sizeof(path), "%s/config.json", weight_directory);
+    int length = snprintf(path, sizeof(path), "%s/config.json",
+                          weight_directory);
+    if (length < 0 || (size_t)length >= sizeof(path)) {
+        fail(error, error_size, "image VAE weight directory path is too long");
+        return 0;
+    }
     FILE *file = fopen(path, "rb");
     if (!file || fseek(file, 0, SEEK_END)) {
         fail(error, error_size, "cannot open image VAE config %s: %s", path,
@@ -360,9 +367,9 @@ static int load_latent_normalization(const char *weight_directory,
     }
     json[end] = '\0';
     fclose(file);
-    int ok = parse_float_array(json, "latents_mean", mean, LATENT_CHANNELS,
+    int ok = h3_image_vae_parse_float_array(json, "latents_mean", mean, LATENT_CHANNELS,
                                error, error_size) &&
-             parse_float_array(json, "latents_std", deviation,
+             h3_image_vae_parse_float_array(json, "latents_std", deviation,
                                LATENT_CHANNELS, error, error_size);
     free(json);
     for (int channel = 0; ok && channel < LATENT_CHANNELS; channel++)
@@ -572,10 +579,16 @@ int h3_image_vae_decode(const char *weight_directory,
                         h3_image_planes *output,
                         char *error, size_t error_size) {
     if (output) memset(output, 0, sizeof(*output));
+    if (error && error_size) error[0] = '\0';
     if (!weight_directory || !normalized_latent || !output ||
-        latent_height < 1 || latent_width < 1 ||
-        latent_height > INT32_MAX / PATCH || latent_width > INT32_MAX / PATCH) {
+        latent_height < 1 || latent_width < 1) {
         fail(error, error_size, "invalid image VAE decode arguments");
+        return 0;
+    }
+    if (latent_height > MAX_LATENT || latent_width > MAX_LATENT) {
+        fail(error, error_size,
+             "image VAE latent %dx%d exceeds the %d x %d limit",
+             latent_height, latent_width, MAX_LATENT, MAX_LATENT);
         return 0;
     }
     float mean[LATENT_CHANNELS], deviation[LATENT_CHANNELS];
@@ -646,24 +659,27 @@ int h3_image_vae_decode(const char *weight_directory,
     memset(&stitched, 0, sizeof(stitched));
     ok = ok && h3_vae_stitch_tiles(tiles, &y_axis, &x_axis, 1, &stitched,
                                    error, error_size);
+    free_tiles(tiles, tile_count);
     if (ok) {
         size_t plane = (size_t)stitched.height * (size_t)stitched.width;
         output->data = malloc(plane * 3 * sizeof(*output->data));
-        ok = output->data != NULL &&
-             h3_gpu_get_stats(vae.gpu, &output->gpu_stats);
-        if (ok) {
+        if (!output->data) {
+            fail(error, error_size, "out of memory assembling the image");
+            ok = 0;
+        } else if (!h3_gpu_get_stats(vae.gpu, &output->gpu_stats)) {
+            fail(error, error_size, "cannot read image VAE GPU statistics: %s",
+                 h3_gpu_error(vae.gpu));
+            ok = 0;
+        } else {
             output->height = stitched.height;
             output->width = stitched.width;
             for (size_t pixel = 0; pixel < plane; pixel++)
                 for (size_t channel = 0; channel < 3; channel++)
                     output->data[channel * plane + pixel] =
                         stitched.rgb[pixel * 3 + channel];
-        } else {
-            fail(error, error_size, "out of memory assembling the image");
         }
     }
     free(stitched.rgb);
-    free_tiles(tiles, tile_count);
     h3_vae_tile_axis_free(&y_axis);
     h3_vae_tile_axis_free(&x_axis);
     cleanup(&vae);

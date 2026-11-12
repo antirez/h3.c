@@ -32,6 +32,12 @@ int h3_image_vae_decode(const char *weight_directory,
                         char *error, size_t error_size);
 void h3_image_planes_free(h3_image_planes *planes);
 
+/* Parse the JSON array `"key": [v0, ..., v(count-1)]` of exactly count finite
+ * numbers. */
+int h3_image_vae_parse_float_array(const char *json, const char *key,
+                                   float *values, size_t count, char *error,
+                                   size_t error_size);
+
 /* One decoder tile: patch rows [latent_height * latent_width][768], component
  * (channel * 16 + y) * 16 + x, to interleaved [y][x][3] pixels. */
 void h3_image_vae_unpack_patches(const float *rows, int latent_height,

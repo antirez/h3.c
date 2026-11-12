@@ -356,6 +356,15 @@ def load_vae(args, device):
     ).to(device).eval()
 
 
+NONSQUARE_LATENT = (10, 37)
+
+
+def nonsquare_latents(args):
+    shape = (1, LATENT_CHANNELS, *NONSQUARE_LATENT)
+    generator = torch.Generator("cpu").manual_seed(args.seed)
+    return randn_tensor(shape, generator=generator, device=torch.device("cpu"), dtype=torch.float32)
+
+
 def run_vae(args, latents):
     # The VAE reference is F32 on the CPU, whatever device the other stages use.
     device = torch.device("cpu")
@@ -364,9 +373,11 @@ def run_vae(args, latents):
         _, image = decode_latents(vae, latents, device)
         crop = latents[..., :16, :16].contiguous()
         raw_1, image_1 = decode_latents(vae, crop, device)
+        nonsquare = nonsquare_latents(args)
+        _, image_nonsquare = decode_latents(vae, nonsquare, device)
     del vae
     release(device)
-    return image, crop, raw_1, image_1
+    return image, crop, raw_1, image_1, nonsquare, image_nonsquare
 
 
 def vae_latents(args):
@@ -380,7 +391,7 @@ def vae_latents(args):
 
 def stage_vae(args, _device):
     latents = vae_latents(args)
-    image, crop, raw_1, image_1 = run_vae(args, latents)
+    image, crop, raw_1, image_1, nonsquare, image_nonsquare = run_vae(args, latents)
     height, width = canvas(args)
     save_fixture(
         args,
@@ -391,13 +402,15 @@ def stage_vae(args, _device):
             "latents_1": crop[0],
             "image_1": image_1[0],
             "image_1_raw": raw_1[0],
+            "latents_nonsquare": nonsquare[0],
+            "image_nonsquare_u8": to_uint8(image_nonsquare)[0],
             **settings(args, height, width),
         },
     )
 
 
 def save_e2e(args, token_ids, noise, final):
-    image, _, _, _ = run_vae(args, final[None])
+    image = run_vae(args, final[None])[0]
     height, width = canvas(args)
     save_fixture(
         args,

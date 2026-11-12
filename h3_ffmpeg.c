@@ -504,9 +504,19 @@ int h3_ffmpeg_read_audio_f32(const char *path, int max_samples,
     return 1;
 }
 
-int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
-                          int frame_count, int width, int height, int fps,
-                          char *error, size_t error_size) {
+/* The output argument is "file:" + path so that FFmpeg reads a leading '-' as
+ * part of the name and never as an option or a protocol (pipe:, tcp://). */
+static char *output_target(const char *path) {
+    size_t size = strlen(path) + 6;
+    char *target = malloc(size);
+    if (target) snprintf(target, size, "file:%s", path);
+    return target;
+}
+
+static int write_rgb24(const char *path, const char *target,
+                       const uint8_t *frames,
+                       int frame_count, int width, int height, int fps,
+                       char *error, size_t error_size, int *started) {
     if (error && error_size) error[0] = '\0';
     if (!path || !*path || !frames || frame_count < 1 || width < 2 ||
         height < 2 || fps < 1 || width % 2 || height % 2) {
@@ -520,6 +530,7 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
         return 0;
     }
     if (!make_parents(path, error, error_size)) return 0;
+    *started = 1;
     int stream[2];
     if (pipe(stream) != 0) {
         fail(error, error_size, "cannot create FFmpeg pipe: %s", strerror(errno));
@@ -534,7 +545,7 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
         "-video_size", size, "-framerate", rate,
         "-i", "pipe:0", "-an", "-c:v", "libx264",
         "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart", (char *)path, NULL
+        "-movflags", "+faststart", (char *)target, NULL
     };
     posix_spawn_file_actions_t actions;
     int code = posix_spawn_file_actions_init(&actions);
@@ -576,9 +587,9 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
     return ok;
 }
 
-int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
-                              int width, int height,
-                              char *error, size_t error_size) {
+static int write_png_rgb24(const char *path, const char *target,
+                           const uint8_t *rgb, int width, int height,
+                           char *error, size_t error_size, int *started) {
     if (error && error_size) error[0] = '\0';
     if (!path || !*path || !rgb || width < 1 || height < 1) {
         fail(error, error_size, "invalid FFmpeg PNG output arguments");
@@ -590,6 +601,7 @@ int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
         return 0;
     }
     if (!make_parents(path, error, error_size)) return 0;
+    *started = 1;
     int stream[2];
     if (pipe(stream) != 0) {
         fail(error, error_size, "cannot create FFmpeg pipe: %s", strerror(errno));
@@ -601,7 +613,7 @@ int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", size,
         "-i", "pipe:0", "-frames:v", "1", "-c:v", "png",
-        "-f", "image2", "-update", "1", (char *)path, NULL
+        "-f", "image2", "-update", "1", (char *)target, NULL
     };
     posix_spawn_file_actions_t actions;
     int code = posix_spawn_file_actions_init(&actions);
@@ -675,11 +687,12 @@ static int close_action(posix_spawn_file_actions_t *actions, int descriptor,
            posix_spawn_file_actions_addclose(actions, descriptor);
 }
 
-int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
-                                 int frame_count, int width, int height,
-                                 int fps, const float *pcm, int samples,
-                                 int channels, int sample_rate,
-                                 char *error, size_t error_size) {
+static int write_av_rgb24_f32(const char *path, const char *target,
+                              const uint8_t *frames,
+                              int frame_count, int width, int height,
+                              int fps, const float *pcm, int samples,
+                              int channels, int sample_rate,
+                              char *error, size_t error_size, int *started) {
     if (error && error_size) error[0] = '\0';
     if (!path || !*path || !frames || frame_count < 1 || width < 2 ||
         height < 2 || fps < 1 || width % 2 || height % 2 || !pcm ||
@@ -696,6 +709,7 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
         return 0;
     }
     if (!make_parents(path, error, error_size)) return 0;
+    *started = 1;
     size_t pcm_elements = (size_t)samples * (size_t)channels;
     float *interleaved = malloc(pcm_elements * sizeof(*interleaved));
     if (!interleaved) {
@@ -739,7 +753,7 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart", (char *)path, NULL
+        "-movflags", "+faststart", (char *)target, NULL
     };
     posix_spawn_file_actions_t actions;
     int code = posix_spawn_file_actions_init(&actions);
@@ -817,4 +831,55 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
         return 0;
     }
     return 1;
+}
+
+int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
+                          int frame_count, int width, int height, int fps,
+                          char *error, size_t error_size) {
+    char *target = path ? output_target(path) : NULL;
+    if (!target) {
+        fail(error, error_size, "invalid FFmpeg RGB output arguments");
+        return 0;
+    }
+    int started = 0;
+    int ok = write_rgb24(path, target, frames, frame_count, width, height,
+                         fps, error, error_size, &started);
+    if (!ok && started) unlink(path);
+    free(target);
+    return ok;
+}
+
+int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
+                              int width, int height,
+                              char *error, size_t error_size) {
+    char *target = path ? output_target(path) : NULL;
+    if (!target) {
+        fail(error, error_size, "invalid FFmpeg PNG output arguments");
+        return 0;
+    }
+    int started = 0;
+    int ok = write_png_rgb24(path, target, rgb, width, height, error,
+                             error_size, &started);
+    if (!ok && started) unlink(path);
+    free(target);
+    return ok;
+}
+
+int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
+                                 int frame_count, int width, int height,
+                                 int fps, const float *pcm, int samples,
+                                 int channels, int sample_rate,
+                                 char *error, size_t error_size) {
+    char *target = path ? output_target(path) : NULL;
+    if (!target) {
+        fail(error, error_size, "invalid FFmpeg A/V output arguments");
+        return 0;
+    }
+    int started = 0;
+    int ok = write_av_rgb24_f32(path, target, frames, frame_count, width,
+                                height, fps, pcm, samples, channels,
+                                sample_rate, error, error_size, &started);
+    if (!ok && started) unlink(path);
+    free(target);
+    return ok;
 }

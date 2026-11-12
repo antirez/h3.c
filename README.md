@@ -417,7 +417,18 @@ not apply, and the interactive session stays video-only.
 Requests below `--min-generation-area` (default 4194304) are generated on a
 larger canvas and resized back. `--min-generation-area 1024` stops the
 enlarging, but the canvas is still rounded to a multiple of 32 (the model's
-grid), so a 1000x1000 request is generated on 992x992 and resized to 1000x1000. `--ssd-streaming` keeps only two BF16 blocks resident.
+grid), so a 1000x1000 request is generated on 992x992 and resized to 1000x1000.
+
+Three weight modes, measured at 512x512 on an M5 Max:
+
+| mode | flag | GPU buffers | whole run | exactness |
+|---|---|---|---|---|
+| resident BF16 | (default) | about 36 GiB | 18 s | reference quality |
+| resident int8 | `--int8` (Metal 4) | about 18.6 GiB | 20 s | about twice the per-step error |
+| SSD streaming | `--ssd-streaming` | about 1.5 GiB | 34 s (reads 216 GiB) | identical to BF16 |
+
+BF16 and streaming give bit-identical latents; int8 gives a different but
+equally plausible picture. `--int8` and `--ssd-streaming` exclude each other.
 
 ## Tests and runtime requirements
 

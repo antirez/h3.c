@@ -392,6 +392,23 @@ static void write_png(const char *path, const uint8_t *planar, int width,
     free(interleaved);
 }
 
+static void test_set_directory(void) {
+    h3_ctx *ctx = fake_context("model");
+    CHECK(ctx->cache_dir == NULL);
+    h3_cache_set_directory(ctx, "first");
+    CHECK(ctx->cache_dir && !strcmp(ctx->cache_dir, "first"));
+    h3_cache_set_directory(ctx, "second");
+    CHECK(!strcmp(ctx->cache_dir, "second"));
+    h3_cache_set_directory(ctx, "");
+    CHECK(ctx->cache_dir == NULL);
+    h3_cache_set_directory(ctx, "third");
+    h3_cache_set_directory(ctx, NULL);
+    CHECK(ctx->cache_dir == NULL);
+    h3_cache_set_directory(NULL, "ignored");
+    free(ctx->model_dir);
+    free(ctx);
+}
+
 static int at_vae_open(const h3_ctx *ctx) {
     return strstr(h3_last_error(ctx), "vae_diffusers") != NULL;
 }
@@ -547,6 +564,7 @@ int main(int argc, char **argv) {
     test_round_trip();
     test_eviction();
     test_limit();
+    test_set_directory();
     if (argc > 1) test_wiring(argv[1]);
     else printf("skip: the wiring test needs TOKENIZER_JSON\n");
     remove_directory();

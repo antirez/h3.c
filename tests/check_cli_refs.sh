@@ -25,6 +25,8 @@ if [ -n "$image_dir" ] && [ -f "$image_dir/transformer_diffusers/config.json" ];
     n=0
     while [ $n -lt 9 ]; do args="$args --ref-image x.png"; n=$((n + 1)); done
     expect 2 "at most 8 --ref-image options" "$h3" -d "$image_dir" -p p $args
+    # --no-cache is an image option: it parses, so the next check speaks.
+    expect 2 "the interactive session is video-only" "$h3" -d "$image_dir" --no-cache
 else
     echo "skip: image model directory is not installed"
 fi

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +58,9 @@ static void usage(const char *program) {
         "      --core-reuse N     Core refresh: 1 exact, 4 fast, 6 aggressive\n"
         "      --token-reduction  Pair video tokens in middle DiT blocks\n"
         "      --ssd-streaming    Stream original BF16 DiT layers from SSD\n"
+        "      --no-cache         Images: do not read or write the text embedding\n"
+        "                         cache ($H3_CACHE_DIR, default ~/.h3_cache/edit;\n"
+        "                         $H3_CACHE_BYTES caps it, default 2 GiB)\n"
         "      --int8             Images: resident int8 DiT (about 18.6 GiB GPU buffers,\n"
         "                         about twice the per-step error of BF16)\n"
         "      --use-int8-row-fc2 Faster one-scale int8 FC2 (M5)\n"
@@ -322,7 +326,8 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO, OPT_IMAGE, OPT_SIZE, OPT_MIN_AREA, OPT_INT8 };
+           OPT_PROFILE, OPT_INFO, OPT_IMAGE, OPT_SIZE, OPT_MIN_AREA, OPT_INT8,
+           OPT_NO_CACHE };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
@@ -377,6 +382,7 @@ int main(int argc, char **argv) {
         {"info", no_argument, NULL, OPT_INFO},
         {"image", no_argument, NULL, OPT_IMAGE},
         {"int8", no_argument, NULL, OPT_INT8},
+        {"no-cache", no_argument, NULL, OPT_NO_CACHE},
         {"size", required_argument, NULL, OPT_SIZE},
         {"min-generation-area", required_argument, NULL, OPT_MIN_AREA},
         {"help", no_argument, NULL, 'h'},
@@ -388,6 +394,7 @@ int main(int argc, char **argv) {
     const char *video_only = NULL;
     int image_flag = 0;
     int int8_flag = 0;
+    int no_cache_flag = 0;
     int width_given = 0, height_given = 0;
     int min_area = H3_IMAGE_DEFAULT_MIN_AREA;
     int min_area_given = 0;
@@ -426,6 +433,7 @@ int main(int argc, char **argv) {
                 break;
             case OPT_IMAGE: image_flag = 1; break;
             case OPT_INT8: int8_flag = 1; break;
+            case OPT_NO_CACHE: no_cache_flag = 1; break;
             case OPT_MIN_AREA:
                 min_area = parse_int(optarg, "min generation area");
                 min_area_given = 1;
@@ -603,6 +611,8 @@ int main(int argc, char **argv) {
         image_error = "--min-generation-area applies to image models only";
     else if (!image && int8_flag)
         image_error = "--int8 applies to image models only";
+    else if (!image && no_cache_flag)
+        image_error = "--no-cache applies to image models only";
     else if (image && int8_flag && params.ssd_streaming)
         image_error = "--int8 and --ssd-streaming exclude each other";
     else if (image && reference_count > H3_IMAGE_MAX_REFERENCES) {
@@ -649,6 +659,16 @@ int main(int argc, char **argv) {
             image_params.width = image_params.height = 0;
         }
         image_params.min_generation_area = min_area;
+        if (!no_cache_flag) {
+            const char *home = getenv("HOME");
+            const char *configured = getenv("H3_CACHE_DIR");
+            char fallback[PATH_MAX];
+            if (!configured && home && *home &&
+                snprintf(fallback, sizeof(fallback), "%s/.h3_cache/edit",
+                         home) < (int)sizeof(fallback))
+                configured = fallback;
+            h3_cache_set_directory(ctx, configured);
+        }
         image_params.seed = params.seed;
         image_params.output_path = output ? output : "outputs/h3.png";
         image_params.dit_layers = params.dit_layers;

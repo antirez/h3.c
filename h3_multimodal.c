@@ -406,8 +406,20 @@ static int build_edit_ids(const h3_tokenizer *tokenizer, const char *prompt,
             return 0;
         }
     }
-    return tokenize_append_limited(tokenizer, prompt, H3_EDIT_PIECE_TOKENS,
-                                   ids, error, error_size);
+    size_t prompt_start = ids->count;
+    if (!tokenize_append_limited(tokenizer, prompt, H3_EDIT_PIECE_TOKENS,
+                                 ids, error, error_size)) return 0;
+    for (size_t index = prompt_start; index < ids->count; index++) {
+        uint32_t id = ids->values[index];
+        if (id == H3_VISION_START || id == H3_VISION_END ||
+            id == H3_IMAGE_PAD || id == H3_VIDEO_PAD) {
+            fail(error, error_size,
+                 "the prompt contains a vision special token such as "
+                 "<|image_pad|>, which it may not");
+            return 0;
+        }
+    }
+    return 1;
 }
 
 int h3_multimodal_edit_presentation(const h3_tokenizer *tokenizer,

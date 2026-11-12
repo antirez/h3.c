@@ -1301,6 +1301,55 @@ static void test_image_edit_layout(void) {
                                  sizeof(error)));
 }
 
+static void test_image_edit_sequence_cap(void) {
+    char error[256];
+    h3_image_reference_geometry geometry[8];
+    /* The largest vision copy: 1024x16384 is 16777216 pixels, 16384 tokens. */
+    int tall_w[1] = {1024}, tall_h[1] = {16384};
+    CHECK(h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128, 0, geometry,
+                                     error, sizeof(error)));
+    CHECK(geometry[0].vision_tokens == 16384 && geometry[0].dit_rows == 16384);
+    /* label "Picture 1: " 5 tokens + 16384 + 2 + a 3-token prompt */
+    size_t presentation = 5 + 16384 + 2 + 3;
+    CHECK(!h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128,
+                                      presentation, NULL, error, sizeof(error)));
+    CHECK(strstr(error, "packed sequence of 36874 rows") != NULL);
+    CHECK(h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128,
+                                     presentation - 10, NULL, error,
+                                     sizeof(error)));
+    /* eight 1024x3072 references: 24576 + 4096 rows pass, the text does not */
+    int w[8], h[8];
+    for (int index = 0; index < 8; index++) w[index] = 1024, h[index] = 3072;
+    CHECK(h3_image_edit_check_limits(w, h, 8, 128, 128, 0, geometry, error,
+                                     sizeof(error)));
+    CHECK(geometry[7].vision_tokens == 3072);
+    presentation = 3;
+    for (int index = 0; index < 8; index++)
+        presentation += 5 + (size_t)geometry[index].vision_tokens + 2;
+    CHECK(!h3_image_edit_check_limits(w, h, 8, 128, 128, presentation, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "above 36864") != NULL);
+}
+
+static void test_image_edit_layout_ref_mapping(void) {
+    h3_image_reference_geometry g;
+    CHECK(h3_image_edit_reference_geometry(1500, 1024, &g));
+    CHECK(g.latent_h == 64 && g.latent_w == 92);
+    h3_layout_ref reference = h3_image_edit_layout_ref(&g);
+    CHECK(reference.kind == H3_LAYOUT_REF_IMAGE && reference.latent_t == 1);
+    CHECK(reference.latent_h == 64 && reference.latent_w == 92);
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build_image(2, 4, 4, &reference, 1, &layout, error,
+                                sizeof(error)));
+    CHECK(layout.img_cond_rows == (size_t)g.dit_rows);
+    /* w runs fastest: 46 merged columns share one h value */
+    CHECK(layout.positions[2].h == layout.positions[2 + 45].h);
+    CHECK(layout.positions[2].h != layout.positions[2 + 46].h);
+    CHECK(layout.positions[2].w != layout.positions[3].w);
+    h3_layout_free(&layout);
+}
+
 static void test_image_dit_reference_arguments(void) {
     uint16_t value = 0;
     h3_text_embedding text = {3, 5120, &value, {0}, NULL};
@@ -1537,6 +1586,8 @@ int main(void) {
     test_image_edit_streams();
     test_image_edit_limits();
     test_image_edit_layout();
+    test_image_edit_sequence_cap();
+    test_image_edit_layout_ref_mapping();
     test_image_dit_reference_arguments();
     test_reference_resize_lanczos();
     test_reference_pipeline_steps();

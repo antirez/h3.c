@@ -208,7 +208,7 @@ uint64_t h3_image_edit_stream(uint64_t seed, int role, size_t index) {
 
 int h3_image_edit_check_limits(const int *widths, const int *heights,
                                size_t reference_count, int canvas_latent_height,
-                               int canvas_latent_width, size_t text_tokens,
+                               int canvas_latent_width, size_t presentation_tokens,
                                h3_image_reference_geometry *geometry,
                                char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
@@ -238,11 +238,17 @@ int h3_image_edit_check_limits(const int *widths, const int *heights,
                       H3_IMAGE_EDIT_MAX_ROWS);
     }
     /* 36864 is unverified: the largest measured sequence is 33069 rows. */
-    if (text_tokens && (int64_t)text_tokens + rows > H3_IMAGE_EDIT_MAX_SEQUENCE)
+    if (presentation_tokens &&
+        (int64_t)presentation_tokens + rows > H3_IMAGE_EDIT_MAX_SEQUENCE)
         EDIT_FAIL("the packed sequence of %lld rows is above %d",
-                  (long long)((int64_t)text_tokens + rows),
+                  (long long)((int64_t)presentation_tokens + rows),
                   H3_IMAGE_EDIT_MAX_SEQUENCE);
     return 1;
 }
 
 #undef EDIT_FAIL
+
+h3_layout_ref h3_image_edit_layout_ref(const h3_image_reference_geometry *geometry) {
+    return (h3_layout_ref){H3_LAYOUT_REF_IMAGE, 1, geometry->latent_h,
+                           geometry->latent_w, 0};
+}

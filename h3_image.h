@@ -83,8 +83,10 @@ uint64_t h3_image_edit_stream(uint64_t seed, int role, size_t index);
 
 /* Everything an edit can reject before a weight loads. widths/heights are the
  * pixel sizes of the references after EXIF orientation; canvas_latent_* is
- * the generated image's latent grid; text_tokens is the text row count, or 0
- * to skip the sequence check. For each reference i (1-based in the message):
+ * the generated image's latent grid; presentation_tokens is the full text
+ * presentation length N: the "Picture i: " label tokens, plus vision_tokens +
+ * 2 for each reference, plus the prompt tokens; 0 skips the sequence check.
+ * For each reference i (1-based in the message):
  * both sides at least 32 and a vision aspect ratio of at most 200, a latent
  * side of at most H3_IMAGE_MAX_LATENT_SIDE, and a running R + P of at most
  * H3_IMAGE_EDIT_MAX_ROWS; then N + R + P of at most
@@ -93,9 +95,13 @@ uint64_t h3_image_edit_stream(uint64_t seed, int role, size_t index);
  * message on the first failure. */
 int h3_image_edit_check_limits(const int *widths, const int *heights,
                                size_t reference_count, int canvas_latent_height,
-                               int canvas_latent_width, size_t text_tokens,
+                               int canvas_latent_width, size_t presentation_tokens,
                                h3_image_reference_geometry *geometry,
                                char *error, size_t error_size);
+
+/* The layout reference of an edit reference: latent_h and latent_w map to the
+ * h and w fields, one latent frame. */
+h3_layout_ref h3_image_edit_layout_ref(const h3_image_reference_geometry *geometry);
 
 /* Whether the first half of the image checkpoint's FC1 (ff.net.0.proj) rows is
  * the SwiGLU gate, the order the fused kernels expect. 0 means the loader swaps

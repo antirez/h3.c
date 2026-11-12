@@ -111,6 +111,53 @@ static void test_presentation(const h3_tokenizer *tokenizer) {
                        two_types, two_positions);
     h3_edit_presentation_free(&presentation);
 
+    /* Tall (12, 4) and wide (2, 30) grids: 12 and 15 merged tokens. */
+    const uint32_t tw_ids[] = {
+        24669, 220, 16, 25, 220, 151652,
+        151655, 151655, 151655, 151655, 151655, 151655,
+        151655, 151655, 151655, 151655, 151655, 151655, 151653,
+        24669, 220, 17, 25, 220, 151652,
+        151655, 151655, 151655, 151655, 151655, 151655, 151655, 151655,
+        151655, 151655, 151655, 151655, 151655, 151655, 151655, 151653, 6023};
+    const uint8_t tw_tags[] = {
+        1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    const uint8_t tw_types[] = {
+        0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0};
+    const uint32_t tw_positions[] = {
+        0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 12, 13, 14, 15,
+        16, 17, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19,
+        19, 34, 35,
+        0, 1, 2, 3, 4, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19,
+        19, 19, 34, 35,
+        0, 1, 2, 3, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+        33, 34, 35};
+    const int tw_h[] = {12, 2}, tw_w[] = {4, 30};
+    CHECK(h3_multimodal_edit_presentation(tokenizer, "hi", tw_h, tw_w, 2,
+                                          &presentation, error, sizeof(error)));
+    check_presentation(&presentation, COUNT(tw_ids), tw_ids, tw_tags,
+                       tw_types, tw_positions);
+    h3_edit_presentation_free(&presentation);
+
+    /* A prompt may not carry vision special tokens. */
+    CHECK(!h3_multimodal_edit_presentation(tokenizer, "hi <|image_pad|> x",
+                                           one_h, one_w, 1, &presentation,
+                                           error, sizeof(error)));
+    CHECK(strstr(error, "vision special token") != NULL);
+    CHECK(presentation.ids == NULL);
+    CHECK(!h3_multimodal_edit_presentation(tokenizer, "<|vision_start|>",
+                                           one_h, one_w, 1, &presentation,
+                                           error, sizeof(error)));
+    CHECK(!h3_multimodal_edit_presentation(tokenizer, "<|vision_end|>",
+                                           one_h, one_w, 1, &presentation,
+                                           error, sizeof(error)));
+    CHECK(!h3_multimodal_edit_presentation(tokenizer, "<|video_pad|>",
+                                           one_h, one_w, 1, &presentation,
+                                           error, sizeof(error)));
+
     /* A 5000-token prompt keeps 4096 tokens; the label keeps all of its own.
      * "word" is token 1158 and " word" token 3409. */
     size_t words = 5000;

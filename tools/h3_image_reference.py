@@ -6,7 +6,7 @@ safetensors fixture per stage into misc/fixtures/. Every fixture also holds the
 scalar settings it was produced with, as small int32 tensors, so a C test needs
 nothing else.
 
-Stages: text, block0, step, f32truth, denoise, vae, e2e (or all).
+Stages: text, block0, step, f32truth, denoise, vae, e2e (or all), and step_large (not in all).
 `all` loads the text encoder once and the transformer once: one six-step run
 records block 0, steps 0 and 3 and the final latents.
 
@@ -570,6 +570,126 @@ def stage_all(args, device):
     save_e2e(args, token_ids, noise, final)
 
 
+def large_step_path(args, canvas_height, canvas_width):
+    return os.path.join(
+        args.out_dir, f"h3_image_dit_step_large_{canvas_height // VAE_RATIO}x{canvas_width // VAE_RATIO}.safetensors"
+    )
+
+
+def blockwise_step0(weights, prompt_embeds, rows, latent_height, latent_width, with_bf16):
+    """Step-0 velocity of the full transformer for the rows: float32, and bfloat16 when with_bf16.
+
+    Both runs go one transformer block at a time from the same memory-mapped weights, so the
+    memory stays at one block per dtype whatever the sequence length. The bfloat16 run casts
+    the way the diffusers model does: float32 proj_in, time embedder and heads, bfloat16 text
+    stream, blocks and output norm. It is about ten times slower than float32 on the CPU
+    (63 s against 6.5 s per block at 4.4k rows), so it is off by default.
+    """
+    import time
+
+    cpu = torch.device("cpu")
+    text_tokens = prompt_embeds.shape[0]
+    position_ids, token_tags, _, _ = packed_layout(text_tokens, latent_height, latent_width, cpu)
+    sequence_length = position_ids.shape[0]
+    cos, sin = MiniMaxH3ImageRotaryPosEmbed(16, 10000.0)(position_ids.float())
+    block_args = dict(
+        hidden_size=5376,
+        num_attention_heads=56,
+        attention_head_dim=128,
+        ffn_dim=14336,
+        time_embed_dim=2688,
+        norm_eps=1e-5,
+        qk_norm_eps=1e-5,
+    )
+    with torch.no_grad():
+        refined_f32 = f32_refined_text(weights, prompt_embeds)
+        if with_bf16:
+            refiner_bf16 = MiniMaxH3ImageTokenRefiner(
+                hidden_size=5376,
+                num_attention_heads=56,
+                attention_head_dim=128,
+                ffn_dim=14336,
+                num_layers=2,
+                norm_eps=1e-5,
+                qk_norm_eps=1e-5,
+                final_norm_eps=1e-5,
+            )
+            refiner_bf16.load_state_dict(weights.prefixed("token_refiner."))
+            refiner_bf16 = refiner_bf16.bfloat16()
+            projected = torch.nn.functional.linear(
+                prompt_embeds.bfloat16(),
+                weights.tensor("context_embedder.weight").bfloat16(),
+                weights.tensor("context_embedder.bias").bfloat16(),
+            )
+            refined_bf16 = refiner_bf16(projected[None])[0]
+            del refiner_bf16
+        proj_in = torch.nn.Linear(96, 5376)
+        proj_in.load_state_dict(weights.prefixed("proj_in."))
+        embedder = TimestepEmbedding(256, 5376, out_dim=2688)
+        embedder.load_state_dict(weights.prefixed("time_embedder."))
+        time_proj = Timesteps(256, flip_sin_to_cos=True, downscale_freq_shift=0)
+        image = proj_in(rows)
+        hidden_f32 = torch.cat([refined_f32, image], 0)
+        if with_bf16:
+            hidden_bf16 = torch.cat([refined_bf16, image.bfloat16()], 0)
+        timestep = torch.tensor([1.0 - SAMPLE_SIGMAS[0]], dtype=torch.float32)
+        temb = embedder(time_proj(timestep))
+        block = MiniMaxH3ImageTransformerBlock(**block_args)
+        started = time.time()
+        for index in range(50):
+            tick = time.time()
+            block.float()
+            block.load_state_dict(weights.prefixed(f"transformer_blocks.{index}."))
+            hidden_f32 = block(hidden_f32[None], temb, token_tags, (cos, sin))[0]
+            middle = time.time()
+            if with_bf16:
+                block.bfloat16()
+                hidden_bf16 = block(hidden_bf16[None], temb, token_tags, (cos, sin))[0]
+            print(
+                f"block {index}: f32 {middle - tick:.1f}s bf16 {time.time() - middle:.1f}s total {time.time() - started:.0f}s",
+                flush=True,
+            )
+        norm_out = MiniMaxH3ImageAdaLayerNormOut(5376, 2688, 1e-5)
+        norm_out.load_state_dict(weights.prefixed("norm_out."))
+        head = torch.nn.Linear(5376, 96)
+        head.load_state_dict(weights.prefixed("pdd_proj_out.0."))
+        zeros = torch.zeros(sequence_length, dtype=torch.long)
+        velocity_f32 = head(norm_out(hidden_f32[None], temb, zeros)[0])[text_tokens:]
+        velocity_bf16 = None
+        if with_bf16:
+            norm_out.bfloat16()
+            velocity_bf16 = head(norm_out(hidden_bf16[None], temb, zeros)[0].float())[text_tokens:]
+    return refined_f32, velocity_f32, velocity_bf16
+
+
+def stage_step_large(args, _device):
+    """Step-0 fixture for a big canvas: seeded noise and the float32 truth velocity (CPU)."""
+    height, width = canvas(args)
+    latent_height, latent_width = height // VAE_RATIO, width // VAE_RATIO
+    prompt_embeds = load_fixture(args, "text")["prompt_embeds"]
+    rows = patchify_video_latents(noise_latents(args, height, width), PATCH_SIZE)
+    rows = rows.reshape(-1, rows.shape[-1]).contiguous()
+    weights = WeightMap(os.path.join(args.checkpoint, "transformer_diffusers"))
+    refined, velocity_f32, velocity_bf16 = blockwise_step0(
+        weights, prompt_embeds, rows, latent_height, latent_width, args.bf16_reference
+    )
+    tensors = {
+        "refined_text_f32": refined,
+        "latents_in_step0": rows,
+        "noise_pred_f32_step0": velocity_f32,
+        "step0": scalar(0),
+        **settings(args, height, width),
+    }
+    if velocity_bf16 is not None:
+        tensors["noise_pred_step0"] = velocity_bf16
+        error = (torch.linalg.norm(velocity_bf16 - velocity_f32) / torch.linalg.norm(velocity_f32)).item()
+        print(f"bf16 reference vs f32 truth rel-L2 {error:.4g}")
+    path = large_step_path(args, height, width)
+    os.makedirs(args.out_dir, exist_ok=True)
+    save_file({name: tensor.detach().cpu().contiguous() for name, tensor in tensors.items()}, path)
+    print(f"wrote {path}")
+
+
 STAGES = {
     "text": stage_text,
     "block0": stage_block0,
@@ -578,6 +698,7 @@ STAGES = {
     "denoise": stage_denoise,
     "vae": stage_vae,
     "e2e": stage_e2e,
+    "step_large": stage_step_large,
 }
 
 
@@ -592,6 +713,7 @@ def main():
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--min-generation-area", type=int, default=1024)
+    parser.add_argument("--bf16-reference", action="store_true", help="step_large: also run the slow CPU bfloat16 pass")
     args = parser.parse_args()
 
     device = pick_device(args.device)

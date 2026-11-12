@@ -127,7 +127,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test \
 	h3_real_image_vae_test h3_real_image_dit_block_test \
-	h3_real_image_dit_test h3_real_image_text_test
+	h3_real_image_dit_test h3_real_image_text_test h3_real_image_e2e_test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \

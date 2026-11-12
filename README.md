@@ -403,6 +403,21 @@ Standalone audio must accompany an image or video reference. Audio references
 must be 2–15 seconds; at most three audio inputs are accepted and their total
 decoded duration is capped at 15 seconds.
 
+### 9. Generate an image
+
+A MiniMax-H3-Image directory (it has `transformer_diffusers/`) selects
+text-to-image. The model always runs six steps; the video sampler options do
+not apply, and the interactive session stays video-only.
+
+```sh
+./h3 -d MiniMax-H3-Image -p "a red fox in snow" --size 1024x768 --seed 42 \
+  -o outputs/fox.png
+```
+
+Requests below `--min-generation-area` (default 4194304) are generated on a
+larger canvas and resized back; `--min-generation-area 1024` generates on the
+requested size. `--ssd-streaming` keeps only two BF16 blocks resident.
+
 ## Tests and runtime requirements
 
 ```sh

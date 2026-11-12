@@ -100,6 +100,9 @@ tests/bench_dit_864.o: tests/bench_dit.c
 h3_real_image_vae_test: tests/test_real_image_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_real_image_dit_block_test: tests/test_real_image_dit_block.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -111,7 +114,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_real_audio_encoder_test h3_av_mux_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test \
-	h3_real_image_vae_test
+	h3_real_image_vae_test h3_real_image_dit_block_test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -195,6 +198,13 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: image VAE weights/fixture are not installed"; \
 	fi
+	@if test -f $(H3_IMAGE_DIR)/transformer_diffusers/diffusion_pytorch_model-00001-of-00012.safetensors && \
+	         test -f misc/fixtures/h3_image_dit_block0.safetensors; then \
+		./h3_real_image_dit_block_test $(H3_IMAGE_DIR)/transformer_diffusers \
+			misc/fixtures/h3_image_dit_block0.safetensors; \
+	else \
+		echo "skip: image DiT weights/block-0 fixture are not installed"; \
+	fi
 
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors
@@ -229,5 +239,6 @@ clean:
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test h3_real_image_vae_test \
+		h3_real_image_dit_block_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

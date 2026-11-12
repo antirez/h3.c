@@ -21,6 +21,11 @@ int h3_image_schedule_build(h3_sigma_schedule *schedule);
 int h3_image_canvas(int height, int width, int min_area,
                     int *canvas_height, int *canvas_width);
 
+/* Whether the first half of the image checkpoint's FC1 (ff.net.0.proj) rows is
+ * the SwiGLU gate, the order the fused kernels expect. 0 means the loader swaps
+ * the halves. */
+#define H3_IMAGE_FC1_GATE_FIRST 0
+
 /* DiT rotary frequencies, used when the checkpoint has no rope.inv_freq. */
 void h3_image_dit_inv_freq(float *out);
 /* Image VAE decoder rotary frequencies. */

@@ -123,6 +123,14 @@ static char *key_of(h3_ctx *ctx, const char *prompt, size_t count,
     return key;
 }
 
+static void set_age(const char *path, int seconds_ago) {
+    struct timeval times[2];
+    gettimeofday(&times[0], NULL);
+    times[0].tv_sec -= seconds_ago;
+    times[1] = times[0];
+    CHECK(utimes(path, times) == 0);
+}
+
 static void test_key(void) {
     char model[512];
     snprintf(model, sizeof(model), "%s/model", directory);
@@ -194,6 +202,99 @@ static void test_key(void) {
                          heights);
     CHECK(!strcmp(key, again));
     free(again);
+
+    /* Everything that can change the embedding changes the key. */
+    int other_vision_w[2] = {64, 96}, other_vision_h[2] = {64, 64};
+    char *vision = h3_image_cache_key(ctx, "make <Picture 1> red", 2, widths,
+                                      heights,
+                                      (const uint8_t *const *)sources,
+                                      other_vision_w, other_vision_h);
+    CHECK(vision && strcmp(key, vision));
+    free(vision);
+
+    CHECK(mkdir(path_in("model/text_encoder"), 0755) == 0);
+    write_file(path_in("model/text_encoder/a.safetensors"), "weights", 7);
+    char *with_weights = key_of(ctx, "make <Picture 1> red", 2, sources,
+                                widths, heights);
+    CHECK(strcmp(key, with_weights));
+    set_age(path_in("model/text_encoder/a.safetensors"), 5000);
+    char *older = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                         heights);
+    CHECK(strcmp(with_weights, older));
+    write_file(path_in("model/text_encoder/b.safetensors"), "more", 4);
+    char *more = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                        heights);
+    CHECK(strcmp(older, more));
+    CHECK(unlink(path_in("model/text_encoder/b.safetensors")) == 0);
+    free(with_weights);
+    free(older);
+    free(more);
+
+    CHECK(mkdir(path_in("model2"), 0755) == 0);
+    h3_ctx *elsewhere = fake_context(path_in("model2"));
+    char *model_key = key_of(elsewhere, "make <Picture 1> red", 2, sources,
+                             widths, heights);
+    CHECK(strcmp(key, model_key));
+    free(model_key);
+    free(elsewhere->model_dir);
+    free(elsewhere);
+
+    strcpy(ctx->device.name, "Apple M5");
+    char *device = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                          heights);
+    CHECK(strcmp(key, device));
+    free(device);
+    ctx->device.name[0] = '\0';
+
+    unsetenv("H3_NAX");
+    char *plain_env = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                             heights);
+    setenv("H3_PROFILE", "1", 1);
+    setenv("H3_CACHE_DIR", "/nowhere", 1);
+    char *ignored = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                           heights);
+    CHECK(!strcmp(plain_env, ignored));
+    unsetenv("H3_PROFILE");
+    unsetenv("H3_CACHE_DIR");
+    setenv("H3_NAX", "0", 1);
+    char *nax = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                       heights);
+    CHECK(strcmp(plain_env, nax));
+    unsetenv("H3_NAX");
+    free(plain_env);
+    free(ignored);
+    free(nax);
+
+    h3_image_cache_set_build_id("build one");
+    char *build_one = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                             heights);
+    h3_image_cache_set_build_id("build two");
+    char *build_two = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                             heights);
+    CHECK(strcmp(build_one, build_two));
+    h3_image_cache_set_build_id(NULL);
+    char *executable = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                              heights);
+    CHECK(strcmp(build_one, executable) && strcmp(build_two, executable));
+    free(build_one);
+    free(build_two);
+    free(executable);
+
+    /* The shader file is read from the working directory. */
+    char saved[1024];
+    CHECK(getcwd(saved, sizeof(saved)) != NULL);
+    CHECK(mkdir(path_in("shaders"), 0755) == 0);
+    CHECK(chdir(path_in("shaders")) == 0);
+    write_file("h3_shaders.metal", "kernel one", 10);
+    char *shader_one = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                              heights);
+    write_file("h3_shaders.metal", "kernel two", 10);
+    char *shader_two = key_of(ctx, "make <Picture 1> red", 2, sources, widths,
+                              heights);
+    CHECK(chdir(saved) == 0);
+    CHECK(strcmp(shader_one, shader_two));
+    free(shader_one);
+    free(shader_two);
 
     char expected_start[32];
     snprintf(expected_start, sizeof(expected_start), "edit-cache=%d|",
@@ -298,14 +399,6 @@ static void test_round_trip(void) {
     h3_text_embedding_free(&other);
 }
 
-static void set_age(const char *path, int seconds_ago) {
-    struct timeval times[2];
-    gettimeofday(&times[0], NULL);
-    times[0].tv_sec -= seconds_ago;
-    times[1] = times[0];
-    CHECK(utimes(path, times) == 0);
-}
-
 static int exists(const char *path) {
     struct stat status;
     return stat(path, &status) == 0;
@@ -359,6 +452,33 @@ static void test_eviction(void) {
     CHECK(!exists(files[2]));
     h3_text_embedding_free(&text);
     h3_text_embedding_free(&other);
+}
+
+static void test_store_hygiene(void) {
+    const char *cache = path_in("hygiene/sub");
+    char file[1024];
+    struct stat status;
+    h3_text_embedding text = make_text(2, 4, 1);
+    CHECK(!h3_image_cache_store("", "key", &text, H3_EDIT_CACHE_DEFAULT_BYTES,
+                                file, sizeof(file)));
+    CHECK(h3_image_cache_store(cache, "key", &text,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+    CHECK(stat(file, &status) == 0 && (status.st_mode & 0777) == 0600);
+    CHECK(stat(cache, &status) == 0 && (status.st_mode & 0777) == 0700);
+
+    /* A temporary file left by a crashed store goes after an hour. */
+    char old_file[1024], new_file[1024];
+    snprintf(old_file, sizeof(old_file), "%s/abc.h3ec.tmp.1", cache);
+    snprintf(new_file, sizeof(new_file), "%s/abc.h3ec.tmp.2", cache);
+    write_file(old_file, "x", 1);
+    write_file(new_file, "x", 1);
+    set_age(old_file, 7200);
+    CHECK(h3_image_cache_store(cache, "key", &text,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+    CHECK(stat(old_file, &status) != 0 && stat(new_file, &status) == 0);
+    h3_text_embedding_free(&text);
 }
 
 static void test_limit(void) {
@@ -447,12 +567,8 @@ static void test_wiring(const char *tokenizer_json) {
     char *text_key = h3_image_cache_key(ctx, "a red fox", 0, NULL, NULL, NULL,
                                         NULL, NULL);
     CHECK(edit_key && text_key);
-    h3_text_embedding stored = make_text(7, 6, 1);
     h3_text_embedding plain = make_text(3, 8, 0);
     char file[1024];
-    CHECK(h3_image_cache_store(cache, edit_key, &stored,
-                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
-                               sizeof(file)));
     CHECK(h3_image_cache_store(cache, text_key, &plain,
                                H3_EDIT_CACHE_DEFAULT_BYTES, file,
                                sizeof(file)));
@@ -465,11 +581,36 @@ static void test_wiring(const char *tokenizer_json) {
     params.min_generation_area = 1024;
     params.seed = 1;
     h3_image_hooks hooks;
+    ctx->cache_dir = strdup(cache);
+    CHECK(ctx->cache_dir != NULL);
+
+    /* An empty cache: a lookup miss. The run reports the presentation length,
+     * which an entry must match. */
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.cache_result == H3_CACHE_MISS && at_vae_open(ctx));
+    size_t rows = hooks.text_tokens;
+    CHECK(rows > 0);
+
+    /* An entry of another length under the right key is not trusted. */
+    h3_text_embedding wrong = make_text(rows + 1, 6, 1);
+    CHECK(h3_image_cache_store(cache, edit_key, &wrong,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.stop_after_lookup = 1;
+    CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
+    CHECK(hooks.cache_result == H3_CACHE_MISS && hooks.text.values == NULL &&
+          at_vae_open(ctx));
+    h3_text_embedding_free(&wrong);
 
     /* A hit returns the stored embedding before any weight loads, whatever
      * the seed and the size. */
-    ctx->cache_dir = strdup(cache);
-    CHECK(ctx->cache_dir != NULL);
+    h3_text_embedding stored = make_text(rows, 6, 1);
+    CHECK(h3_image_cache_store(cache, edit_key, &stored,
+                               H3_EDIT_CACHE_DEFAULT_BYTES, file,
+                               sizeof(file)));
     for (int run = 0; run < 3; run++) {
         params.seed = run == 0 ? 1 : 987654321;
         params.width = params.height = run == 2 ? 128 : 0;
@@ -479,6 +620,7 @@ static void test_wiring(const char *tokenizer_json) {
                                                          &hooks);
         CHECK(result != NULL);
         CHECK(same_text(&stored, &hooks.text));
+        CHECK(hooks.cache_result == H3_CACHE_HIT);
         CHECK(hooks.text_tokens > 0 && hooks.condition_rows == NULL &&
               hooks.latent == NULL && hooks.rgb == NULL);
         h3_text_embedding_free(&hooks.text);
@@ -490,6 +632,7 @@ static void test_wiring(const char *tokenizer_json) {
     memset(&hooks, 0, sizeof(hooks));
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
     CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    CHECK(hooks.cache_result == H3_CACHE_HIT);
 
     /* Another prompt, another reference, a disabled cache and test hooks that
      * replace pixels all miss: the run reaches the reference VAE. */
@@ -498,6 +641,7 @@ static void test_wiring(const char *tokenizer_json) {
     CHECK(h3_generate_image_with_hooks(ctx, "Keep <Picture 1> as it is, by day.",
                                        &params, &hooks) == NULL);
     CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    CHECK(hooks.cache_result == H3_CACHE_MISS);
     const char *other_path = path_in("wire_other.png");
     uint8_t *other = picture(64, 64, 5);
     write_png(other_path, other, 64, 64);
@@ -508,6 +652,7 @@ static void test_wiring(const char *tokenizer_json) {
     hooks.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
     CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    CHECK(hooks.cache_result == H3_CACHE_MISS);
     params.references = &reference;
 
     char *kept = ctx->cache_dir;
@@ -516,6 +661,7 @@ static void test_wiring(const char *tokenizer_json) {
     hooks.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
     CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    CHECK(hooks.cache_result == H3_CACHE_NOT_USED);
     ctx->cache_dir = kept;
 
     const uint8_t *vae_hook[1] = {decoded};
@@ -524,6 +670,7 @@ static void test_wiring(const char *tokenizer_json) {
     hooks.vae_pixels = vae_hook;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
     CHECK(hooks.text.values == NULL && at_vae_open(ctx));
+    CHECK(hooks.cache_result == H3_CACHE_NOT_USED);
 
     /* Text-to-image shares the cache with no references. */
     h3_image_params text_params = H3_IMAGE_PARAMS_DEFAULT;
@@ -535,14 +682,14 @@ static void test_wiring(const char *tokenizer_json) {
     h3_result *result = h3_generate_image_with_hooks(ctx, "a red fox",
                                                      &text_params, &hooks);
     CHECK(result != NULL);
-    CHECK(same_text(&plain, &hooks.text));
+    CHECK(same_text(&plain, &hooks.text) && hooks.cache_result == H3_CACHE_HIT);
     h3_text_embedding_free(&hooks.text);
     h3_result_free(result);
     memset(&hooks, 0, sizeof(hooks));
     hooks.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, "a blue fox", &text_params,
                                        &hooks) == NULL);
-    CHECK(hooks.text.values == NULL);
+    CHECK(hooks.text.values == NULL && hooks.cache_result == H3_CACHE_MISS);
 
     free(decoded);
     free(edit_key);
@@ -563,6 +710,7 @@ int main(int argc, char **argv) {
     test_key();
     test_round_trip();
     test_eviction();
+    test_store_hygiene();
     test_limit();
     test_set_directory();
     if (argc > 1) test_wiring(argv[1]);

@@ -668,6 +668,12 @@ int main(int argc, char **argv) {
                          home) < (int)sizeof(fallback))
                 configured = fallback;
             h3_cache_set_directory(ctx, configured);
+            if (!configured)
+                fprintf(stderr, "h3: %s disabled: no cache directory\n",
+                        reference_count ? "edit text cache" : "text cache");
+        } else {
+            fprintf(stderr, "h3: %s disabled\n",
+                    reference_count ? "edit text cache" : "text cache");
         }
         image_params.seed = params.seed;
         image_params.output_path = output ? output : "outputs/h3.png";

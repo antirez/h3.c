@@ -1,14 +1,18 @@
 #include "h3_image_cache.h"
 
 #include <CommonCrypto/CommonDigest.h>
+#include <crt_externs.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CACHE_MAGIC "H3EC"
@@ -75,6 +79,121 @@ static void file_sha_hex(const char *path,
     hex_digest(digest, out);
 }
 
+static char build_id[2 * CC_SHA256_DIGEST_LENGTH + 1];
+
+void h3_image_cache_set_build_id(const char *id) {
+    if (id) snprintf(build_id, sizeof(build_id), "%s", id);
+    else build_id[0] = '\0';
+}
+
+/* The code that computes an embedding is the running executable. */
+static const char *executable_hash(void) {
+    if (build_id[0]) return build_id;
+    char path[PATH_MAX], real[PATH_MAX];
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0 || !realpath(path, real))
+        strcpy(build_id, "none");
+    else
+        file_sha_hex(real, build_id);
+    return build_id;
+}
+
+static int by_name(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* Every H3_ variable can change kernel routing or numerics, except these. */
+static int ignored_variable(const char *name, size_t length) {
+    static const char *const ignored[] = {
+        "H3_CACHE_DIR", "H3_CACHE_BYTES", "H3_PROFILE", "H3_DEBUG_GPU_MEMORY",
+        "H3_DEBUG_VISION", "H3_DEBUG_VISION_STEPS", "H3_FFMPEG", "H3_FFPROBE",
+        "H3_AUDIO_ENCODER_TRACE", "H3_QWEN_PREFETCH", "H3_QWEN_PREFETCH_DEPTH"};
+    for (size_t index = 0; index < sizeof(ignored) / sizeof(ignored[0]);
+         index++)
+        if (strlen(ignored[index]) == length &&
+            !strncmp(ignored[index], name, length)) return 1;
+    return 0;
+}
+
+static void environment_hash(char out[2 * CC_SHA256_DIGEST_LENGTH + 1]) {
+    char **environment = *_NSGetEnviron();
+    size_t count = 0, capacity = 0;
+    char **picked = NULL;
+    for (size_t index = 0; environment && environment[index]; index++) {
+        const char *entry = environment[index];
+        const char *equals = strchr(entry, '=');
+        size_t length = equals ? (size_t)(equals - entry) : strlen(entry);
+        if (strncmp(entry, "H3_", 3) || ignored_variable(entry, length))
+            continue;
+        if (count == capacity) {
+            char **bigger = realloc(picked, (capacity ? capacity * 2 : 16) *
+                                    sizeof(*picked));
+            if (!bigger) break;
+            picked = bigger;
+            capacity = capacity ? capacity * 2 : 16;
+        }
+        picked[count++] = (char *)entry;
+    }
+    qsort(picked, count, sizeof(*picked), by_name);
+    CC_SHA256_CTX context;
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Init(&context);
+    for (size_t index = 0; index < count; index++) {
+        sha_update(&context, picked[index], strlen(picked[index]) + 1);
+    }
+    CC_SHA256_Final(digest, &context);
+    hex_digest(digest, out);
+    free(picked);
+}
+
+/* Name, size, modification time and inode of every file of a directory. */
+static void directory_hash(const char *path,
+                           char out[2 * CC_SHA256_DIGEST_LENGTH + 1]) {
+    DIR *directory = opendir(path);
+    if (!directory) {
+        strcpy(out, "none");
+        return;
+    }
+    char **names = NULL;
+    size_t count = 0, capacity = 0;
+    struct dirent *item;
+    while ((item = readdir(directory))) {
+        if (item->d_name[0] == '.') continue;
+        if (count == capacity) {
+            char **bigger = realloc(names, (capacity ? capacity * 2 : 32) *
+                                    sizeof(*names));
+            if (!bigger) break;
+            names = bigger;
+            capacity = capacity ? capacity * 2 : 32;
+        }
+        names[count] = strdup(item->d_name);
+        if (names[count]) count++;
+    }
+    closedir(directory);
+    qsort(names, count, sizeof(*names), by_name);
+    CC_SHA256_CTX context;
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Init(&context);
+    for (size_t index = 0; index < count; index++) {
+        char file[PATH_MAX], line[PATH_MAX + 128];
+        struct stat status;
+        snprintf(file, sizeof(file), "%s/%s", path, names[index]);
+        if (stat(file, &status) == 0) {
+            int length = snprintf(line, sizeof(line), "%s:%lld:%lld.%09ld:%llu\n",
+                                  names[index], (long long)status.st_size,
+                                  (long long)status.st_mtimespec.tv_sec,
+                                  status.st_mtimespec.tv_nsec,
+                                  (unsigned long long)status.st_ino);
+            if (length > 0 && (size_t)length < sizeof(line))
+                sha_update(&context, line, (size_t)length);
+        }
+        free(names[index]);
+    }
+    free(names);
+    CC_SHA256_Final(digest, &context);
+    hex_digest(digest, out);
+}
+
 char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
                          const int *widths, const int *heights,
                          const uint8_t *const *sources,
@@ -87,6 +206,8 @@ char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
     char *tokenizer_path = malloc(strlen(ctx->model_dir) + 32);
     char tokenizer[2 * CC_SHA256_DIGEST_LENGTH + 1];
     char shaders[2 * CC_SHA256_DIGEST_LENGTH + 1];
+    char weights[2 * CC_SHA256_DIGEST_LENGTH + 1];
+    char environment[2 * CC_SHA256_DIGEST_LENGTH + 1];
     if (!tokenizer_path) {
         fclose(key);
         free(text);
@@ -96,12 +217,16 @@ char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
     sprintf(tokenizer_path, "%s/tokenizer/tokenizer.json", ctx->model_dir);
     file_sha_hex(tokenizer_path, tokenizer);
     file_sha_hex("h3_shaders.metal", shaders);
+    sprintf(tokenizer_path, "%s/text_encoder", ctx->model_dir);
+    directory_hash(tokenizer_path, weights);
+    environment_hash(environment);
     const h3_component_info *encoder = &ctx->model.text_encoder;
-    fprintf(key, "edit-cache=%d|model=%s|text-encoder=%llu:%zu:%zu"
-            "|tokenizer=%s|shaders=%s|prompt=%zu:", H3_EDIT_CACHE_VERSION,
-            real ? real : ctx->model_dir, (unsigned long long)encoder->bytes,
-            encoder->files, encoder->tensors, tokenizer, shaders,
-            strlen(prompt));
+    fprintf(key, "edit-cache=%d|build=%s|device=%s|env=%s|model=%s"
+            "|text-encoder=%llu:%zu:%zu|weights=%s|tokenizer=%s|shaders=%s"
+            "|prompt=%zu:", H3_EDIT_CACHE_VERSION, executable_hash(),
+            ctx->device.name, environment, real ? real : ctx->model_dir,
+            (unsigned long long)encoder->bytes, encoder->files,
+            encoder->tensors, weights, tokenizer, shaders, strlen(prompt));
     fwrite(prompt, 1, strlen(prompt), key);
     fprintf(key, "|refs=%zu", count);
     for (size_t index = 0; index < count; index++) {
@@ -239,13 +364,17 @@ bad:
 }
 
 static int make_directories(const char *dir) {
+    if (!*dir) {
+        errno = EINVAL;
+        return 0;
+    }
     char *copy = strdup(dir);
     if (!copy) return 0;
     for (char *at = copy + 1; ; at++) {
         if (*at == '/' || *at == '\0') {
             char saved = *at;
             *at = '\0';
-            if (mkdir(copy, 0755) != 0 && errno != EEXIST) {
+            if (mkdir(copy, 0700) != 0 && errno != EEXIST) {
                 free(copy);
                 return 0;
             }
@@ -255,7 +384,9 @@ static int make_directories(const char *dir) {
     }
     free(copy);
     struct stat status;
-    return stat(dir, &status) == 0 && S_ISDIR(status.st_mode);
+    if (stat(dir, &status) != 0) return 0;
+    if (!S_ISDIR(status.st_mode)) errno = ENOTDIR;
+    return S_ISDIR(status.st_mode);
 }
 
 typedef struct {
@@ -281,8 +412,19 @@ static void evict(const char *dir, uint64_t limit) {
     uint64_t total = 0;
     struct dirent *item;
     size_t suffix = strlen(CACHE_SUFFIX);
+    time_t now = time(NULL);
     while ((item = readdir(directory))) {
         size_t length = strlen(item->d_name);
+        const char *orphan = strstr(item->d_name, CACHE_SUFFIX ".tmp.");
+        if (orphan) {
+            char path[PATH_MAX];
+            struct stat status;
+            if (snprintf(path, sizeof(path), "%s/%s", dir, item->d_name) <
+                    (int)sizeof(path) &&
+                stat(path, &status) == 0 &&
+                now - status.st_mtimespec.tv_sec > 3600) unlink(path);
+            continue;
+        }
         if (length <= suffix ||
             strcmp(item->d_name + length - suffix, CACHE_SUFFIX)) continue;
         char path[PATH_MAX];
@@ -345,21 +487,27 @@ int h3_image_cache_store(const char *dir, const char *key,
                          const h3_text_embedding *text, uint64_t limit,
                          char *path, size_t path_size) {
     if (!h3_image_cache_path(dir, key, path, path_size)) return 0;
-    if (!text->tokens || text->width != H3_TEXT_HIDDEN_SIZE ||
-        !make_directories(dir)) {
-        warn(dir, "cannot create the cache directory");
+    if (!text->tokens || text->width != H3_TEXT_HIDDEN_SIZE) {
+        warn(path, "not a text embedding");
+        return 0;
+    }
+    if (!make_directories(dir)) {
+        warn(dir, strerror(errno));
         return 0;
     }
     char temporary[PATH_MAX];
     if (snprintf(temporary, sizeof(temporary), "%s.tmp.%d", path,
                  (int)getpid()) >= (int)sizeof(temporary)) return 0;
-    FILE *file = fopen(temporary, "wb");
+    errno = 0;
+    int descriptor = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *file = descriptor >= 0 ? fdopen(descriptor, "wb") : NULL;
+    if (descriptor >= 0 && !file) close(descriptor);
     int ok = file != NULL;
     if (ok) ok = write_entry(file, key, text);
     if (file && fclose(file) != 0) ok = 0;
     if (ok) ok = rename(temporary, path) == 0;
     if (!ok) {
-        warn(path, "cannot write the entry");
+        warn(path, errno ? strerror(errno) : "cannot write the entry");
         unlink(temporary);
         return 0;
     }

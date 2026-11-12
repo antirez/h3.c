@@ -518,14 +518,21 @@ FILE`, `h3: edit text cache miss; stored FILE`, or `h3: edit text cache
 disabled` (`h3: text cache ...` without references). The reference VAE
 encoder still runs: its output depends on `--seed`.
 
-The cache is on by default and is a directory of one file per entry, named by
-a SHA-256 of the key. The key holds the model directory, the text encoder file
-inventory, the SHA-256 of `tokenizer.json` and of `h3_shaders.metal`, the
-prompt, and for every reference its decoded pixels (a SHA-256, so a renamed or
-touched file still hits, a changed pixel does not) and sizes. The file stores
-the whole key and the loader compares it byte for byte, so a stale hit is not
-possible; a truncated, corrupt or other-format file is a miss with a warning
-line. Entries are never changed, only replaced and deleted.
+The cache is on by default and is a directory (mode 0700) of one file (mode
+0600) per entry, named by a SHA-256 of the key. The key holds the SHA-256 of
+the running executable (so any rebuild that changes the host code, the
+tokenizer, the presentation builder, the resize or the Metal host code starts
+a new key space), the GPU name, every `H3_*` environment variable except the
+cache, profiling, debug and prefetch ones, the real model path, the name, size,
+modification time and inode of every file of `text_encoder/` (which holds the
+vision tower too), the SHA-256 of `tokenizer.json` and of `h3_shaders.metal`,
+the prompt, and for every reference its decoded pixels (a SHA-256, so a
+renamed or touched file still hits, a changed pixel does not) and sizes. The
+file stores the whole key and the loader compares it byte for byte; an edit
+entry whose row count differs from the prompt's presentation length is
+ignored. A truncated, corrupt or other-format file is a miss with a warning
+line. Entries are never changed, only replaced and deleted, and a leftover
+temporary file older than an hour is removed with the next eviction.
 
 - `--no-cache` turns it off for the run (image models only).
 - `H3_CACHE_DIR` sets the directory (default `$HOME/.h3_cache/edit`).

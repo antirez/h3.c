@@ -36,6 +36,10 @@ struct h3_ctx {
     struct h3_video_vae_decoder *video_decoder;
 };
 
+#define H3_CACHE_NOT_USED 0
+#define H3_CACHE_MISS 1
+#define H3_CACHE_HIT 2
+
 /* Test hooks of h3_generate_image(). */
 typedef struct {
     /* Initial latent noise [24][latent_height][latent_width] instead of the
@@ -75,6 +79,8 @@ typedef struct {
      * h3_text_embedding_free()). After a miss the run goes on. */
     int stop_after_lookup;
     h3_text_embedding text;
+    /* Output: what the text cache lookup did. */
+    int cache_result;
 } h3_image_hooks;
 
 h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,

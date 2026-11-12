@@ -257,9 +257,16 @@ static void test_edit_copies(void) {
     free(vae_only);
     geometry_of(250, 370, &g);
     uint8_t *small = picture(250, 370);
+    uint8_t *small_vae, *small_vision;
+    CHECK(h3_image_edit_copies(small, 250, 370, &g, &small_vae,
+                               &small_vision));
     CHECK(h3_image_edit_copies(small, 250, 370, &g, &vae_only, NULL));
-    CHECK(vae_only != NULL);
+    CHECK(vae_only != NULL &&
+          !memcmp(vae_only, small_vae, (size_t)3 * (size_t)g.vae_w *
+                                       (size_t)g.vae_h));
     free(vae_only);
+    free(small_vae);
+    free(small_vision);
     free(small);
     free(vae);
     free(vision);

@@ -380,11 +380,12 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	fi
 
 # Two default-mode runs of the fixture prompt must give a valid 512x512 PNG
-# and identical bytes. It runs the 62 GB text encoder and transformer, so on
+# and identical bytes. A fresh cache directory makes run a a text cache miss
+# and run b a hit (stderr says which), so this also compares miss and hit. It runs the 62 GB text encoder and transformer, so on
 # the development Mac run it through the guard wrapper (gated_exec.py), not
 # bare: python3 gated_exec.py --swap-mb 14000 --timeout 1500 -- make image-check
 image-check: h3 h3_image_png_test
-	@dir=$$(mktemp -d) && \
+	@dir=$$(mktemp -d) && export H3_CACHE_DIR=$$dir/cache && \
 	for run in a b; do \
 		./h3 -d $(H3_IMAGE_DIR) -p "a red fox in snow" --size 512x512 \
 			--min-generation-area 1024 --seed 42 \
@@ -393,8 +394,9 @@ image-check: h3 h3_image_png_test
 	./h3_image_png_test 512 512 $$dir/a.png $$dir/b.png; \
 	status=$$?; rm -rf $$dir; exit $$status
 
-# Two default-mode edits of a synthetic 256x256 reference must give a valid
-# 512x512 PNG and identical bytes, and the text-to-image image-check must still
+# Two default-mode edits of a synthetic 256x256 reference (a miss, then a hit
+# of a fresh cache directory) must give a valid 512x512 PNG and identical
+# bytes, and the text-to-image image-check must still
 # pass. It runs the 62 GB text encoder and transformer: through the guard
 # wrapper like image-check. It skips when the image checkpoint is not installed.
 image-edit-check: h3 h3_image_png_test
@@ -403,7 +405,7 @@ image-edit-check: h3 h3_image_png_test
 		echo "skip: image weights or FFmpeg are not installed"; exit 0; \
 	fi; \
 	$(MAKE) image-check || exit 1; \
-	dir=$$(mktemp -d) && \
+	dir=$$(mktemp -d) && export H3_CACHE_DIR=$$dir/cache && \
 	ffmpeg -v error -f lavfi -i testsrc2=size=256x256 -frames:v 1 \
 		$$dir/ref.png && \
 	for run in a b; do \

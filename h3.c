@@ -2247,15 +2247,16 @@ typedef struct {
  * references, so this runs before the reference VAE frees them. */
 static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
                                  const h3_edit_state *edit,
-                                 const h3_image_hooks *hooks,
+                                 size_t presentation_tokens,
+                                 h3_image_hooks *hooks,
                                  h3_text_cache_state *cache,
                                  h3_text_embedding *text) {
     const uint8_t *sources[H3_IMAGE_MAX_REFERENCES];
     int vision_w[H3_IMAGE_MAX_REFERENCES], vision_h[H3_IMAGE_MAX_REFERENCES];
+    if (hooks) hooks->cache_result = H3_CACHE_NOT_USED;
     cache->label = edit->count ? "edit text cache" : "text cache";
     if (!ctx->cache_dir ||
         (hooks && (hooks->vae_pixels || hooks->vision_pixels))) {
-        fprintf(stderr, "h3: %s disabled\n", cache->label);
         return;
     }
     for (size_t index = 0; index < edit->count; index++) {
@@ -2269,6 +2270,15 @@ static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
     if (!cache->key) return;
     cache->hit = h3_image_cache_load(ctx->cache_dir, cache->key, text,
                                      cache->path, sizeof(cache->path));
+    if (cache->hit && edit->count && text->tokens != presentation_tokens) {
+        fprintf(stderr, "h3: warning: %s: ignoring %s: %zu rows, the prompt "
+                "makes %zu\n", cache->label, cache->path, text->tokens,
+                presentation_tokens);
+        h3_text_embedding_free(text);
+        cache->hit = 0;
+    }
+    if (hooks) hooks->cache_result = cache->hit ? H3_CACHE_HIT :
+                                                  H3_CACHE_MISS;
     if (cache->hit)
         fprintf(stderr, "h3: %s hit %s\n", cache->label, cache->path);
 }
@@ -2351,8 +2361,8 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
             "(latent %dx%d, %d image tokens)\n", request_width, request_height,
             canvas_width, canvas_height, latent_width, latent_height,
             (latent_height / 2) * (latent_width / 2));
+    size_t presentation_tokens = 0;
     if (edit) {
-        size_t presentation_tokens = 0;
         if (!h3_edit_check(ctx, &edit_state, latent_height, latent_width, 0,
                            size_defaulted) ||
             !h3_edit_presentation_tokens(ctx, prompt, &edit_state,
@@ -2361,7 +2371,8 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                            presentation_tokens, size_defaulted)) goto cleanup;
         if (hooks) hooks->text_tokens = presentation_tokens;
     }
-    h3_text_cache_lookup(ctx, prompt, &edit_state, hooks, &text_cache, &text);
+    h3_text_cache_lookup(ctx, prompt, &edit_state, presentation_tokens, hooks,
+                         &text_cache, &text);
     if (text_cache.hit && hooks && hooks->stop_after_lookup) {
         hooks->text = text;
         memset(&text, 0, sizeof(text));

@@ -15,12 +15,19 @@
 /* The cache key of a text embedding, malloc'd (the caller frees it). count is
  * the number of references, 0 for text-to-image; sources are the decoded
  * planar bytes [3][h][w] of each reference, vision_* the Qwen vision size of
- * its geometry. The key names the content, never a file name, a time, the seed
- * or the canvas. NULL when out of memory. */
+ * its geometry. The key names the content and the computation: the pixels, the
+ * prompt, the model files (name, size, time and inode), the tokenizer, the
+ * running executable (which holds the host code and the shader source it was
+ * built with), the shader file, the GPU and the H3_ environment. It does not
+ * name a reference's file name, the seed or the canvas. NULL when out of memory. */
 char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
                          const int *widths, const int *heights,
                          const uint8_t *const *sources,
                          const int *vision_widths, const int *vision_heights);
+
+/* Test seam: the build identity the key uses instead of the SHA-256 of the
+ * running executable; NULL goes back to the executable. */
+void h3_image_cache_set_build_id(const char *id);
 
 /* The entry file of a key inside dir. */
 int h3_image_cache_path(const char *dir, const char *key, char *path,

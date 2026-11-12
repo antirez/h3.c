@@ -6,7 +6,7 @@ safetensors fixture per stage into misc/fixtures/. Every fixture also holds the
 scalar settings it was produced with, as small int32 tensors, so a C test needs
 nothing else.
 
-Stages: text, block0, step, f32truth, denoise, vae, e2e (or all), and step_large (not in all).
+Stages: text, block0, step, f32truth, denoise, vae, e2e (or all), and step_large and edit_vae (not in all).
 `all` loads the text encoder once and the transformer once: one six-step run
 records block 0, steps 0 and 3 and the final latents.
 
@@ -20,6 +20,26 @@ the refined text computed in float32 from the same inputs, one transformer
 block at a time from memory-mapped weights (about 2 GB of float32 weights at a
 time, CPU), so the bf16 reference noise can be told from an implementation
 error.
+The edit_vae stage (reference-image editing, VAE side only, CPU, float32, loads
+only the VAE) writes h3_image_edit_vae.safetensors. For each of three synthetic
+reference images, numbered 0, 1, 2 in the tensor names, it runs what
+MiniMaxH3ImageEditResizeStep and MiniMaxH3ImageEditVaeEncoderStep run, then
+MiniMaxH3ImageEditPrepareLatentsStep's noising, and records:
+  reference_u8_N    [3,H,W] uint8   the input image (seeded gradients, sinusoids, blocks and noise)
+  resized_u8_N      [3,Hr,Wr] uint8 VaeImageProcessor.resize (PIL Lanczos) to the bound_short_edge size with the
+                                    reference_* bounds; the input unchanged when the short edge is within them
+  mean_N, logvar_N  [24,Hv/16,Wv/16] F32  tiled-encoder moments of the resized image cropped top-left to
+                                    multiples of 16 and normalised with the ImageNet mean/std; logvar is the
+                                    raw chunk, before the posterior clamp
+  noise_N           [24,Hv/16,Wv/16] F32  the standard-normal tensor posterior.sample(generator) consumed
+  latents_N         [24,h,w] F32    (sample -> float16 -> float32 -> crop to whole 2x2 patches - latents_mean) / latents_std
+  reference_noise_N [24,h,w] F32    the noise scale_noise mixes in, drawn from the same generator after noise_N
+  noised_N          [24,h,w] F32    scale_noise(latents, tensor(0.999), reference_noise): t * x + (1 - t) * noise in float32
+  noised_rows_N     [h/2*w/2,96] F32 patchify_video_latents(noised[:, :, None], (1, 2, 2)), component (channel*2 + y)*2 + x
+  sizes_N           int32[12]       reference H, W; resized H, W; VAE input H, W; latent h, w before and after the
+                                    patch crop; vision H, W (bound_short_edge with the vision_* bounds)
+Also resize_down_in_u8 [3,203,317] and resize_down_out_u8 [3,61,100] (a Lanczos downscale), bounds
+int32[4] (reference_min, reference_max, vision_min, vision_max short edge), reference_noise_aug F32[1], seed.
 Run from the repository root in an environment that has diffusers (with the
 MiniMax-H3-Image classes), transformers, torch and safetensors.
 """
@@ -33,7 +53,9 @@ import os
 import struct
 import sys
 
+import numpy as np
 import torch
+from PIL import Image
 from diffusers import AutoencoderKLMiniMaxH3Image, MiniMaxH3ImageTransformer2DModel, MiniMaxH3Scheduler
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.transformers.transformer_minimax_h3_image import (
@@ -42,6 +64,8 @@ from diffusers.models.transformers.transformer_minimax_h3_image import (
     MiniMaxH3ImageTokenRefiner,
     MiniMaxH3ImageTransformerBlock,
 )
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.modular_pipelines.minimax_h3_image.before_encoder import bound_short_edge
 from diffusers.modular_pipelines.minimax_h3_image.before_denoise import (
     build_image_packed_sequence,
     get_image_canvas_size,
@@ -74,6 +98,7 @@ FIXTURE_NAMES = {
     "denoise": "h3_image_denoise.safetensors",
     "vae": "h3_image_vae_decode.safetensors",
     "e2e": "h3_image_e2e_512.safetensors",
+    "edit_vae": "h3_image_edit_vae.safetensors",
 }
 
 
@@ -738,6 +763,110 @@ def stage_step_large(args, _device):
     print(f"wrote {path}")
 
 
+REFERENCE_BOUNDS = (1024, 2048, 1024, 1024)
+REFERENCE_NOISE_AUG = 0.999
+EDIT_IMAGE_SIZES = ((256, 256), (250, 370), (1050, 1046))
+RESIZE_DOWN_SIZES = ((203, 317), (61, 100))
+
+
+def synthetic_image(height, width, seed):
+    """A uint8 HxWx3 image with gradients, sinusoids, hard-edged blocks and noise, from a seeded generator."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:height, 0:width].astype(np.float64)
+    y, x = y / height, x / width
+    channels = []
+    for channel in range(3):
+        phase = rng.uniform(0, 2 * np.pi, 2)
+        frequency = rng.uniform(2, 9, 2)
+        plane = 0.5 * x * (channel + 1) / 3 + 0.3 * y + 0.15 * np.sin(2 * np.pi * frequency[0] * x + phase[0])
+        plane += 0.1 * np.cos(2 * np.pi * frequency[1] * y + phase[1])
+        channels.append(plane)
+    image = np.stack(channels, axis=-1)
+    for _ in range(6):
+        top, left = int(rng.integers(0, height * 3 // 4)), int(rng.integers(0, width * 3 // 4))
+        image[top : top + height // 5, left : left + width // 5] += rng.uniform(-0.3, 0.3, 3)
+    image += rng.normal(0, 0.02, image.shape)
+    return (np.clip(image, 0, 1) * 255 + 0.5).astype(np.uint8)
+
+
+def encode_reference(vae, scheduler, resized, case_seed):
+    """The MiniMaxH3ImageEditVaeEncoderStep and MiniMaxH3ImageEditPrepareLatentsStep computations for one reference."""
+    _, patch_h, patch_w = PATCH_SIZE
+    pixel_mean = torch.tensor(PIXEL_MEAN).view(1, -1, 1, 1)
+    pixel_std = torch.tensor(PIXEL_STD).view(1, -1, 1, 1)
+    latents_mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1)
+    latents_std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1)
+    pixels = torch.from_numpy(np.array(resized)).permute(2, 0, 1)[None]
+    pixels = pixels[..., : pixels.shape[-2] // VAE_RATIO * VAE_RATIO, : pixels.shape[-1] // VAE_RATIO * VAE_RATIO]
+    vae_size = tuple(pixels.shape[-2:])
+    pixels = (pixels.to(torch.float32).div(255.0) - pixel_mean) / pixel_std
+    posterior = vae.encode(pixels, return_dict=False)[0]
+    moments = posterior.parameters
+    mean, logvar = moments[:, :LATENT_CHANNELS], moments[:, LATENT_CHANNELS:]
+
+    generator = torch.Generator("cpu").manual_seed(case_seed)
+    state = generator.get_state()
+    sample = posterior.sample(generator=generator)
+    replay = torch.Generator("cpu")
+    replay.set_state(state)
+    noise = randn_tensor(mean.shape, generator=replay, device=torch.device("cpu"), dtype=torch.float32)
+    assert torch.equal(sample, posterior.mean + posterior.std * noise), "stored noise is not what sample() drew"
+
+    latents = sample.to(torch.float16).float()
+    latent_size = tuple(latents.shape[-2:])
+    latents = latents[..., : latents.shape[-2] // patch_h * patch_h, : latents.shape[-1] // patch_w * patch_w]
+    latents = (latents - latents_mean) / latents_std
+    reference_noise = randn_tensor(latents.shape, generator=generator, device=torch.device("cpu"), dtype=torch.float32)
+    noised = scheduler.scale_noise(latents, torch.tensor(REFERENCE_NOISE_AUG), reference_noise)
+    rows = patchify_video_latents(noised[:, :, None], PATCH_SIZE)
+    return {
+        "mean": mean[0],
+        "logvar": logvar[0],
+        "noise": noise[0],
+        "latents": latents[0],
+        "reference_noise": reference_noise[0],
+        "noised": noised[0],
+        "noised_rows": rows,
+    }, vae_size, latent_size
+
+
+def stage_edit_vae(args, _device):
+    device = torch.device("cpu")
+    processor = VaeImageProcessor(vae_scale_factor=VAE_RATIO, do_normalize=False)
+    scheduler = MiniMaxH3Scheduler.from_pretrained(args.checkpoint, subfolder="scheduler")
+    vae = load_vae(args, device)
+    reference_min, reference_max, vision_min, vision_max = REFERENCE_BOUNDS
+    tensors = {}
+    with torch.no_grad():
+        for index, (height, width) in enumerate(EDIT_IMAGE_SIZES):
+            array = synthetic_image(height, width, args.seed + index)
+            image = Image.fromarray(array)
+            size = bound_short_edge(width, height, reference_min, reference_max, CANVAS_MULTIPLE)
+            resized = image if image.size == size else processor.resize(image, height=size[1], width=size[0])
+            vision = bound_short_edge(width, height, vision_min, vision_max, CANVAS_MULTIPLE)
+            encoded, vae_size, latent_size = encode_reference(vae, scheduler, resized, args.seed + index)
+            patched = tuple(encoded["latents"].shape[-2:])
+            tensors[f"reference_u8_{index}"] = torch.from_numpy(array).permute(2, 0, 1)
+            tensors[f"resized_u8_{index}"] = torch.from_numpy(np.array(resized)).permute(2, 0, 1)
+            tensors.update({f"{name}_{index}": value for name, value in encoded.items()})
+            tensors[f"sizes_{index}"] = torch.tensor(
+                [height, width, resized.size[1], resized.size[0], *vae_size, *latent_size, *patched, vision[1], vision[0]],
+                dtype=torch.int32,
+            )
+            print(f"reference {index}: {width}x{height} -> {resized.size[0]}x{resized.size[1]}, latents {patched}", flush=True)
+    del vae
+    release(device)
+    down_in, down_out = RESIZE_DOWN_SIZES
+    source = Image.fromarray(synthetic_image(*down_in, args.seed + 100))
+    shrunk = processor.resize(source, height=down_out[0], width=down_out[1])
+    tensors["resize_down_in_u8"] = torch.from_numpy(np.array(source)).permute(2, 0, 1)
+    tensors["resize_down_out_u8"] = torch.from_numpy(np.array(shrunk)).permute(2, 0, 1)
+    tensors["bounds"] = torch.tensor(REFERENCE_BOUNDS, dtype=torch.int32)
+    tensors["reference_noise_aug"] = torch.tensor([REFERENCE_NOISE_AUG], dtype=torch.float32)
+    tensors["seed"] = scalar(args.seed)
+    save_fixture(args, "edit_vae", tensors)
+
+
 STAGES = {
     "text": stage_text,
     "block0": stage_block0,
@@ -747,6 +876,7 @@ STAGES = {
     "vae": stage_vae,
     "e2e": stage_e2e,
     "step_large": stage_step_large,
+    "edit_vae": stage_edit_vae,
 }
 
 

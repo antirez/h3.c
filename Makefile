@@ -20,7 +20,7 @@ LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity clean
+.PHONY: all test parity real-parity image-check clean
 
 all: h3 libh3.a
 
@@ -61,6 +61,9 @@ h3_av_mux_test: tests/test_av_mux.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_png_test: tests/test_png.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_image_png_test: tests/test_image_png.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_real_video_encoder_test: tests/test_real_video_encoder.o $(LIB_OBJ)
@@ -259,6 +262,20 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 		echo "skip: image DiT weights/step fixtures are not installed"; \
 	fi
 
+# Two default-mode runs of the fixture prompt must give a valid 512x512 PNG
+# and identical bytes. It runs the 62 GB text encoder and transformer, so on
+# the development Mac run it through the guard wrapper (gated_exec.py), not
+# bare: python3 gated_exec.py --swap-mb 14000 --timeout 1500 -- make image-check
+image-check: h3 h3_image_png_test
+	@dir=$$(mktemp -d) && \
+	for run in a b; do \
+		./h3 -d $(H3_IMAGE_DIR) -p "a red fox in snow" --size 512x512 \
+			--min-generation-area 1024 --seed 42 \
+			-o $$dir/$$run.png || { rm -rf $$dir; exit 1; }; \
+	done && \
+	./h3_image_png_test 512 512 $$dir/a.png $$dir/b.png; \
+	status=$$?; rm -rf $$dir; exit $$status
+
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors
 	./h3_bf16_tests misc/fixtures/h3_dit_bf16.safetensors
@@ -293,6 +310,6 @@ clean:
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test h3_real_image_vae_test \
 		h3_real_image_dit_block_test h3_real_image_dit_test \
-		h3_real_image_text_test h3_real_image_e2e_test \
+		h3_real_image_text_test h3_real_image_e2e_test h3_image_png_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

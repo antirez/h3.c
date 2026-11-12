@@ -1065,7 +1065,13 @@ static void test_reference_size_rule(void) {
         {1500, 1500, 1500, 1500, 1024, 1024},
         {777, 513, 1536, 1024, 1536, 1024},
         {1920, 1080, 1920, 1080, 1824, 1024},
-        {1080, 1920, 1080, 1920, 1024, 1824}
+        {1080, 1920, 1080, 1920, 1024, 1824},
+        {3000, 2000, 3000, 2000, 1536, 1024},
+        {4000, 3000, 2720, 2048, 1376, 1024},
+        {640, 480, 1376, 1024, 1376, 1024},
+        {1500, 1024, 1500, 1024, 1500, 1024},
+        {1024, 1500, 1024, 1500, 1024, 1500},
+        {2000, 3000, 2000, 3000, 1024, 1536}
     };
     for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
         int width = 0, height = 0;
@@ -1086,26 +1092,6 @@ static void test_reference_size_rule(void) {
     CHECK(!h3_image_edit_bound_short_edge(256, 256, 0, 2048, &width, &height));
     CHECK(!h3_image_edit_bound_short_edge(33, 2000000000, 1024, 2048, &width,
                                           &height));
-}
-
-static void test_image_edit_bound_short_edge(void) {
-    /* (w, h) -> VAE copy size, then the vision copy's first stage. */
-    const struct { int w, h, vae_w, vae_h, stage_w, stage_h; } cases[] = {
-        {1024, 1024, 1024, 1024, 1024, 1024}, {256, 256, 1024, 1024, 1024, 1024},
-        {250, 370, 1024, 1504, 1024, 1504}, {3000, 2000, 3000, 2000, 1536, 1024},
-        {4000, 3000, 2720, 2048, 1376, 1024}, {640, 480, 1376, 1024, 1376, 1024},
-        {2049, 2049, 2048, 2048, 1024, 1024}, {1500, 1024, 1500, 1024, 1500, 1024},
-        {1024, 1500, 1024, 1500, 1024, 1500}, {2000, 3000, 2000, 3000, 1024, 1536}
-    };
-    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
-        int w, h;
-        CHECK(h3_image_edit_bound_short_edge(cases[index].w, cases[index].h,
-                                             1024, 2048, &w, &h));
-        CHECK(w == cases[index].vae_w && h == cases[index].vae_h);
-        CHECK(h3_image_edit_bound_short_edge(cases[index].w, cases[index].h,
-                                             1024, 1024, &w, &h));
-        CHECK(w == cases[index].stage_w && h == cases[index].stage_h);
-    }
 }
 
 static void test_image_edit_smart_resize(void) {
@@ -1517,7 +1503,6 @@ static void test_reference_pipeline_steps(void) {
     const float want_mixed[4] = {0.500499964f, -1.24800003f, 1.99750006f,
                                  0.00299996138f};
     float mixed[4];
-    CHECK(H3_REFERENCE_NOISE_AUG == 0.999f);
     h3_reference_scale_noise(clean, mixed_noise, H3_REFERENCE_NOISE_AUG, 4, mixed);
     CHECK(memcmp(mixed, want_mixed, sizeof(mixed)) == 0);
     h3_reference_scale_noise(clean, mixed_noise, 1.0f, 4, mixed);
@@ -1578,7 +1563,6 @@ int main(void) {
     test_image_unpack_2d();
     test_image_vae_config_parse();
     test_reference_size_rule();
-    test_image_edit_bound_short_edge();
     test_image_edit_smart_resize();
     test_image_edit_geometry();
     test_image_edit_aug_constant();

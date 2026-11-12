@@ -15,7 +15,7 @@
 /* The level reference latents are noised to: t in t * x + (1 - t) * noise. */
 #define H3_REFERENCE_NOISE_AUG 0.999f
 
-/* PIL Image.resize(resample=LANCZOS) byte for byte: 8-bit fixed-point
+/* PIL Image.resize(resample=LANCZOS) byte for byte: 22-bit fixed-point
  * coefficients, a horizontal pass then a vertical pass, each rounded to bytes.
  * Both sizes must be positive. Returns 0 only when out of memory. */
 int h3_reference_resize_lanczos(const uint8_t *planar, int height, int width,

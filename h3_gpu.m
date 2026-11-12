@@ -6,6 +6,7 @@
 #include "h3_gpu.h"
 
 #include <errno.h>
+#include <libproc.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
@@ -177,6 +178,17 @@ static int h3_gpu_profile_enabled(void) {
     return value && *value && strcmp(value, "0");
 }
 
+int h3_gpu_process_footprint(double *current_gib, double *peak_gib) {
+    struct rusage_info_v4 usage;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&usage))
+        return 0;
+    if (current_gib)
+        *current_gib = (double)usage.ri_phys_footprint / 1073741824.0;
+    if (peak_gib)
+        *peak_gib = (double)usage.ri_lifetime_max_phys_footprint / 1073741824.0;
+    return 1;
+}
+
 static uint64_t h3_gpu_counter_delta(uint64_t value, uint64_t start) {
     return value >= start ? value - start : 0;
 }
@@ -187,10 +199,13 @@ static void h3_gpu_profile_emit(H3GPU *gpu, NSString *phase,
     h3_gpu_stats value = gpu.stats;
     double wall = h3_gpu_now() - wall_start;
     NSString *label = gpu.profileLabel ? gpu.profileLabel : @"Metal context";
+    double footprint = 0.0, footprint_peak = 0.0;
+    h3_gpu_process_footprint(&footprint, &footprint_peak);
     fprintf(stderr,
         "h3 profile: %-24s %-14s wall=%8.3fs encode=%7.3fs "
         "wait=%8.3fs root-gpu=%7.3fs "
-        "peak=%7.3fGiB alloc=%7.3fGiB submissions=%llu "
+        "peak=%7.3fGiB alloc=%7.3fGiB footprint=%7.3fGiB footprint-max=%7.3fGiB "
+        "submissions=%llu "
         "direct=%llu linear=%llu conv=%llu attention=%llu\n",
         label.UTF8String, phase.UTF8String, wall,
         value.command_encode_seconds - start.command_encode_seconds,
@@ -200,6 +215,7 @@ static void h3_gpu_profile_emit(H3GPU *gpu, NSString *phase,
         (double)h3_gpu_counter_delta(value.allocated_bytes,
                                      start.allocated_bytes) /
             (1024.0 * 1024.0 * 1024.0),
+        footprint, footprint_peak,
         (unsigned long long)h3_gpu_counter_delta(value.submissions,
                                                  start.submissions),
         (unsigned long long)h3_gpu_counter_delta(value.direct_dispatches,

@@ -17,6 +17,7 @@
 #include "h3_vision_encoder.h"
 
 #include <errno.h>
+#include <time.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1858,6 +1859,69 @@ static void h3_image_vae_progress_bridge(int completed, int total,
     h3_progress_emit(opaque, "image VAE", completed, total);
 }
 
+typedef struct {
+    const char *name;
+    double seconds, footprint_gib, peak_gib;
+} h3_image_phase;
+
+typedef struct {
+    h3_image_phase phases[16];
+    int count;
+    double mark;
+} h3_image_phase_log;
+
+static double h3_wall_seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
+
+static void h3_image_phase_end(h3_image_phase_log *log, const char *name) {
+    if (log->count >= (int)(sizeof(log->phases) / sizeof(log->phases[0])))
+        return;
+    h3_image_phase *phase = &log->phases[log->count++];
+    double now = h3_wall_seconds();
+    phase->name = name;
+    phase->seconds = now - log->mark;
+    log->mark = now;
+    phase->footprint_gib = phase->peak_gib = 0.0;
+    h3_gpu_process_footprint(&phase->footprint_gib, &phase->peak_gib);
+}
+
+static void h3_image_phase_print(const h3_image_phase_log *log) {
+    double total = 0.0;
+    fprintf(stderr, "h3 profile: %-16s %9s %14s %14s\n", "phase", "seconds",
+            "footprint GiB", "lifetime max");
+    for (int index = 0; index < log->count; index++) {
+        const h3_image_phase *phase = &log->phases[index];
+        total += phase->seconds;
+        fprintf(stderr, "h3 profile: %-16s %9.2f %14.2f %14.2f\n",
+                phase->name, phase->seconds, phase->footprint_gib,
+                phase->peak_gib);
+    }
+    fprintf(stderr, "h3 profile: %-16s %9.2f\n", "total", total);
+}
+
+typedef struct {
+    void *dit;
+    h3_image_phase_log *log;
+    int enabled;
+} h3_image_timed_dit;
+
+static int h3_image_timed_velocity(void *opaque, int step, const float *rows,
+                                   float *velocity, char *error,
+                                   size_t error_size) {
+    h3_image_timed_dit *timed = opaque;
+    int ok = h3_image_dit_velocity(timed->dit, step, rows, velocity, error,
+                                   error_size);
+    if (ok && timed->enabled) {
+        static const char *names[] = {"DiT step 1", "DiT step 2", "DiT step 3",
+                                      "DiT step 4", "DiT step 5", "DiT step 6"};
+        h3_image_phase_end(timed->log, names[step % 6]);
+    }
+    return ok;
+}
+
 static void h3_report_peak(const char *label, const h3_gpu_stats *stats) {
     fprintf(stderr, "h3: %s peak GPU buffers %.2f GiB, %.2f GPU seconds\n",
             label,
@@ -1919,6 +1983,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "out of memory resolving image model paths");
         goto cleanup;
     }
+    h3_image_phase_log phase_log = {{{0}}, 0, h3_wall_seconds()};
     h3_progress_emit(&progress, "text encoder", 0, 50);
     if (!h3_image_encode_prompt(ctx->model_dir, prompt,
                                 h3_text_progress_bridge, &progress, NULL, NULL,
@@ -1927,6 +1992,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     if (profile) h3_report_peak("text encoder", &text.gpu_stats);
+    if (profile) h3_image_phase_end(&phase_log, "text encoder");
     if (progress.cancelled) goto cleanup;
     int resident_bf16 = !params->use_int8 && !params->use_int8_row_fc2 &&
                         !params->ssd_streaming;
@@ -1949,6 +2015,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         if (!progress.cancelled) h3_set_error(ctx, "%s", detail);
         goto cleanup;
     }
+    if (profile) h3_image_phase_end(&phase_log, "DiT load");
     fprintf(stderr, "h3: image DiT weights: %s\n", h3_dit_weight_mode(dit));
     if (hooks) hooks->weight_mode = h3_dit_weight_mode(dit);
     if (progress.cancelled) goto cleanup;
@@ -1964,8 +2031,9 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     else
         h3_image_noise(params->seed, latent_height, latent_width, latent);
     h3_image_step_state step_state = {&progress};
+    h3_image_timed_dit timed = {dit, &phase_log, profile};
     if (!h3_image_sample(latent_height, latent_width, latent,
-                         h3_image_dit_velocity, dit, h3_image_step_bridge,
+                         h3_image_timed_velocity, &timed, h3_image_step_bridge,
                          &step_state, latent, detail, sizeof(detail))) {
         h3_set_error(ctx, "%s", detail);
         goto cleanup;
@@ -1975,6 +2043,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         h3_report_peak("image DiT", &dit_stats);
     h3_dit_free(dit);
     dit = NULL;
+    if (profile) h3_image_phase_end(&phase_log, "DiT free");
     h3_progress_emit(&progress, "image VAE", 0, 1);
     if (progress.cancelled) goto cleanup;
     if (!h3_image_vae_decode(vae_path, "h3_shaders.metal", latent,
@@ -1985,6 +2054,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     if (profile) h3_report_peak("image VAE", &planes.gpu_stats);
+    if (profile) h3_image_phase_end(&phase_log, "image VAE");
     if (planes.height != canvas_height || planes.width != canvas_width) {
         h3_set_error(ctx, "image VAE returned %dx%d, expected %dx%d",
                      planes.width, planes.height, canvas_width, canvas_height);
@@ -2032,6 +2102,10 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
             goto cleanup;
         }
         h3_progress_emit(&progress, "PNG", 1, 1);
+    }
+    if (profile) {
+        h3_image_phase_end(&phase_log, "convert+PNG");
+        h3_image_phase_print(&phase_log);
     }
     result = calloc(1, sizeof(*result));
     if (!result) {

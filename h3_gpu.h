@@ -103,6 +103,9 @@ int h3_gpu_continue(h3_gpu *gpu);
 int h3_gpu_submit(h3_gpu *gpu);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
+/* Physical footprint of this process in GiB, now and its lifetime maximum.
+ * Unlike the GPU buffer statistics it includes MPSGraph transients. */
+int h3_gpu_process_footprint(double *current_gib, double *peak_gib);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown
  * print wall time alongside command-buffer GPU time and allocation counters. */
 void h3_gpu_profile_set_label(h3_gpu *gpu, const char *label);

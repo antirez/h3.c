@@ -1,5 +1,6 @@
 #include "h3_dit.h"
 #include "h3_image.h"
+#include "h3_image_pipeline.h"
 #include "h3_safetensors.h"
 #include "h3_weights.h"
 
@@ -10,33 +11,44 @@
 #include <string.h>
 #include <time.h>
 
-enum { HIDDEN = 5376, TEXT_DIM = 5120, PATCH = 96, FIXTURE_STEPS = 2 };
+enum { HIDDEN = 5376, TEXT_DIM = 5120, PATCH = 96, FIXTURE_STEPS = 6 };
 
-/* The BF16 reference is the diffusers transformer run on CPU. Against an F32
- * run of the same checkpoint (the truth fixture) it is 2.2e-2 off at step 0
- * and 1.9e-2 at step 3 in global rel-L2; this implementation in BF16 is
- * 2.0e-2 and 1.4e-2 off the truth, so it is closer to the truth than the
- * reference is, and 2.8e-2 and 1.8e-2 off the reference itself. The int8 run
- * is 4.0e-2 and 3.4e-2 off the truth. The truth bounds are about 1.4x the
- * achieved values; the reference bounds are per step, about 1.4x for BF16 and
- * 2x for int8. The refined text of the fixture is 4.1e-3 from its F32 run and
- * this implementation is 4.9e-3 from it.
+/* All six steps, each fed the BF16 reference's own latents. The reference is
+ * the diffusers transformer run on CPU in BF16. Global rel-L2 per step:
+ *   reference vs F32 truth:  2.2e-2 3.3e-2 4.0e-2 1.9e-2 2.0e-2 2.7e-2
+ *   BF16 / streaming vs ref: 2.8e-2 4.4e-2 4.4e-2 1.8e-2 2.1e-2 2.6e-2
+ *   BF16 / streaming vs truth: 2.0e-2 3.5e-2 2.8e-2 1.4e-2 1.4e-2 2.0e-2
+ *   int8 vs reference:       4.4e-2 4.3e-2 8.7e-2 3.5e-2 2.9e-2 4.3e-2
+ *   int8 vs truth:           4.0e-2 4.8e-2 7.9e-2 3.4e-2 2.7e-2 4.2e-2
+ * so this implementation in BF16 is closer to the truth than the reference is,
+ * and int8 is about twice as far (step 2 is the worst for every path). The
+ * bounds are about 1.4x the achieved value, per step and mode, for the global
+ * rel-L2 and the median over rows. The refined text of the fixture is 4.1e-3
+ * from its F32 run and this implementation is 4.9e-3 from it.
  * The six output heads are close to each other, so no velocity bound tells
- * them apart at step 3. The head binding is checked exactly instead: the
- * velocity must equal the head of its step applied to the final hidden state
- * (rel-L2 < HEAD_MATCH_BOUND) and differ from every other head's. */
+ * them apart. The head binding is checked exactly instead: the velocity must
+ * equal the head of its step applied to the final hidden state (rel-L2 <
+ * HEAD_MATCH_BOUND) and differ from every other head's. */
 #define REFINED_TEXT_BOUND 1e-2
 #define REFINED_TRUTH_BOUND 7e-3
 #define HEAD_MATCH_BOUND 1e-5
 #define HEAD_MISMATCH_BOUND 1e-3
-static const double BF16_VELOCITY_BOUND[FIXTURE_STEPS] = {4e-2, 2.5e-2};
-static const double BF16_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {3.5e-2, 2e-2};
-static const double INT8_VELOCITY_BOUND[FIXTURE_STEPS] = {9e-2, 7e-2};
-static const double INT8_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {8.5e-2, 5e-2};
-static const double BF16_TRUTH_BOUND[FIXTURE_STEPS] = {2.85e-2, 1.9e-2};
-static const double BF16_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {2.2e-2, 1.3e-2};
-static const double INT8_TRUTH_BOUND[FIXTURE_STEPS] = {5.6e-2, 4.8e-2};
-static const double INT8_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {5.2e-2, 3.4e-2};
+static const double BF16_VELOCITY_BOUND[FIXTURE_STEPS] = {
+    4e-2, 6.2e-2, 6.2e-2, 2.5e-2, 3e-2, 3.7e-2};
+static const double BF16_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {
+    3.5e-2, 4.5e-2, 4.7e-2, 1.8e-2, 1.9e-2, 1.7e-2};
+static const double INT8_VELOCITY_BOUND[FIXTURE_STEPS] = {
+    6.2e-2, 6.1e-2, 1.22e-1, 4.9e-2, 4.1e-2, 6.1e-2};
+static const double INT8_ROW_MEDIAN_BOUND[FIXTURE_STEPS] = {
+    5.9e-2, 4.8e-2, 7.5e-2, 3.5e-2, 3.4e-2, 5.2e-2};
+static const double BF16_TRUTH_BOUND[FIXTURE_STEPS] = {
+    2.9e-2, 4.9e-2, 4e-2, 1.9e-2, 2e-2, 2.8e-2};
+static const double BF16_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {
+    2.2e-2, 4e-2, 2.6e-2, 1.3e-2, 1.3e-2, 1.5e-2};
+static const double INT8_TRUTH_BOUND[FIXTURE_STEPS] = {
+    5.6e-2, 6.8e-2, 1.12e-1, 4.8e-2, 3.8e-2, 5.9e-2};
+static const double INT8_TRUTH_MEDIAN_BOUND[FIXTURE_STEPS] = {
+    5.3e-2, 5.4e-2, 7e-2, 3.5e-2, 3.2e-2, 5.2e-2};
 
 static void die(const char *message) {
     fprintf(stderr, "FAIL tests/test_real_image_dit.c: %s\n", message);
@@ -240,6 +252,117 @@ static float *read_head_tensor(const h3_weight_store *weights,
     return data;
 }
 
+typedef struct {
+    uint32_t magic;
+    uint32_t mode;
+    uint32_t tokens;
+    uint32_t latent_size;
+    uint64_t hash;
+    uint64_t elements;
+} random_header;
+
+#define RANDOM_MAGIC 0x52444d33u
+#define RANDOM_STEPS 2
+#define RANDOM_SEED 20241112u
+#define RANDOM_BOUND 7e-2
+#define RANDOM_DEFECT 1e-1
+
+/* The same checkpoint at a larger row count with seeded random latents,
+ * written by one mode and compared by the next: stream against bf16 must be
+ * bit-identical, int8 against either is reported and bounded. mode_id is
+ * 0 bf16, 1 stream, 2 int8. */
+static void run_random(h3_dit *dit, const char *mode, uint32_t mode_id,
+                       size_t tokens, int latent_size, const char *exchange) {
+    char error[512];
+    size_t rows = (size_t)(latent_size / 2) * (size_t)(latent_size / 2);
+    size_t elements = rows * PATCH;
+    float *latent = malloc(elements * sizeof(*latent));
+    float *input = malloc(elements * sizeof(*input));
+    require(latent && input, "oom");
+    h3_image_noise(RANDOM_SEED, latent_size, latent_size, latent);
+    require(h3_dit_patchify_video(latent, H3_IMAGE_LATENT_CHANNELS, 1,
+                                  latent_size, latent_size, input, elements),
+            "cannot patchify the random latent");
+    free(latent);
+    static const int steps[RANDOM_STEPS] = {0, 5};
+    float *velocity[RANDOM_STEPS];
+    for (int index = 0; index < RANDOM_STEPS; index++) {
+        velocity[index] = malloc(elements * sizeof(float));
+        require(velocity[index] != NULL, "oom");
+        double started = seconds_now();
+        require(h3_dit_forward_image(dit, steps[index], input, velocity[index],
+                                     error, sizeof(error)), error);
+        printf("random latents, step %d: %.2f s\n", steps[index],
+               seconds_now() - started);
+        for (size_t element = 0; element < elements; element++)
+            require(isfinite(velocity[index][element]),
+                    "non-finite velocity on random latents");
+    }
+    random_header header = {RANDOM_MAGIC, mode_id, (uint32_t)tokens,
+                            (uint32_t)latent_size,
+                            hash_bytes(1469598103934665603ull, input,
+                                       elements * sizeof(float)), elements};
+    free(input);
+    FILE *file = exchange ? fopen(exchange, "rb") : NULL;
+    if (!file) {
+        if (exchange) {
+            file = fopen(exchange, "wb");
+            int ok = file && fwrite(&header, sizeof(header), 1, file) == 1;
+            for (int index = 0; ok && index < RANDOM_STEPS; index++)
+                ok = fwrite(velocity[index], sizeof(float), elements, file) ==
+                     elements;
+            require(file && fclose(file) == 0 && ok,
+                    "cannot write the random exchange file");
+            printf("velocities stored for the comparison with the next mode\n");
+        }
+        return;
+    }
+    random_header stored;
+    require(fread(&stored, sizeof(stored), 1, file) == 1 &&
+            stored.magic == RANDOM_MAGIC, "random exchange file is invalid");
+    require(stored.mode != header.mode,
+            "random exchange file was written by this same mode");
+    require(stored.tokens == header.tokens &&
+            stored.latent_size == header.latent_size &&
+            stored.hash == header.hash && stored.elements == header.elements,
+            "random exchange file was written for other inputs");
+    int int8_involved = stored.mode == 2 || header.mode == 2;
+    float *other = malloc(elements * sizeof(*other));
+    require(other != NULL, "oom");
+    for (int index = 0; index < RANDOM_STEPS; index++) {
+        require(fread(other, sizeof(float), elements, file) == elements,
+                "random exchange file is short");
+        if (!int8_involved) {
+            size_t different = 0;
+            for (size_t element = 0; element < elements; element++)
+                if (memcmp(&other[element], &velocity[index][element],
+                           sizeof(float))) different++;
+            printf("random latents, step %d: stream vs bf16 bit-identical: %s "
+                   "(%zu of %zu differ)\n", steps[index],
+                   different ? "NO" : "yes", different, elements);
+            require(different == 0,
+                    "stream and bf16 velocities are not bit-identical");
+            continue;
+        }
+        const float *int8_values = header.mode == 2 ? velocity[index] : other;
+        const float *exact = header.mode == 2 ? other : velocity[index];
+        comparison result = compare(int8_values, exact, rows, PATCH);
+        printf("random latents, %zu rows, step %d: int8 vs %s: rel-L2 %.6g, "
+               "max abs %.6g, median row %.6g, worst row %.6g\n", rows,
+               steps[index], header.mode == 2 ? (stored.mode ? "stream" : "bf16")
+               : mode, result.l2, result.maximum, result.row_median,
+               result.row_worst);
+        require(isfinite(result.l2), "non-finite int8 comparison");
+        require(result.l2 < RANDOM_DEFECT,
+                "int8 differs from the exact path by 1e-1 or more: defect");
+        require(result.l2 < RANDOM_BOUND,
+                "int8 differs from the exact path by more than 7e-2");
+    }
+    free(other);
+    fclose(file);
+    for (int index = 0; index < RANDOM_STEPS; index++) free(velocity[index]);
+}
+
 int main(int argc, char **argv) {
     if (argc < 5) {
         fprintf(stderr, "usage: %s WEIGHT_DIR STEP_FIXTURE TEXT_FIXTURE "
@@ -273,6 +396,24 @@ int main(int argc, char **argv) {
     text.values = read_fixture(&text_fixture, "prompt_embeds", H3_DTYPE_BF16,
                                tokens * TEXT_DIM);
 
+    if (argc > 7) {
+        int random_size = atoi(argv[7]);
+        require(random_size >= 2 && random_size % 2 == 0,
+                "latent size must be a positive even number");
+        printf("mode %s: %zu text tokens, random latents %dx%d\n", mode,
+               tokens, random_size, random_size);
+        h3_dit *random_dit = h3_dit_load_image(
+            weight_directory, "h3_shaders.metal", &text, random_size,
+            random_size, 50, stream, bf16, bf16, bf16, 0, 0, 0, 0, 0, 0, 0, 0,
+            progress, NULL, error, sizeof(error));
+        require(random_dit != NULL, error);
+        run_random(random_dit, mode, bf16 ? 0u : stream ? 1u : 2u, tokens,
+                   random_size, exchange);
+        h3_dit_free(random_dit);
+        printf("ok: random-latent run of %s at %dx%d\n", mode, random_size,
+               random_size);
+        return 0;
+    }
     int latent_height = read_scalar(&step_fixture, "latent_height");
     int latent_width = read_scalar(&step_fixture, "latent_width");
     require(latent_height > 0 && latent_width > 0 &&
@@ -282,16 +423,25 @@ int main(int argc, char **argv) {
     size_t elements = rows * PATCH;
     uint16_t *refined_want = read_fixture(&step_fixture, "refined_text",
                                           H3_DTYPE_BF16, tokens * HIDDEN);
-    int32_t steps[FIXTURE_STEPS] = {read_scalar(&step_fixture, "step0"),
-                                    read_scalar(&step_fixture, "step3")};
-    const char *input_names[FIXTURE_STEPS] = {"latents_in_step0",
-                                              "latents_in_step3"};
-    const char *output_names[FIXTURE_STEPS] = {"noise_pred_step0",
-                                               "noise_pred_step3"};
-    const char *truth_names[FIXTURE_STEPS] = {"noise_pred_f32_step0",
-                                              "noise_pred_f32_step3"};
+    int32_t steps[FIXTURE_STEPS];
+    static const char *const input_names[FIXTURE_STEPS] = {
+        "latents_in_step0", "latents_in_step1", "latents_in_step2",
+        "latents_in_step3", "latents_in_step4", "latents_in_step5"};
+    static const char *const output_names[FIXTURE_STEPS] = {
+        "noise_pred_step0", "noise_pred_step1", "noise_pred_step2",
+        "noise_pred_step3", "noise_pred_step4", "noise_pred_step5"};
+    static const char *const truth_names[FIXTURE_STEPS] = {
+        "noise_pred_f32_step0", "noise_pred_f32_step1",
+        "noise_pred_f32_step2", "noise_pred_f32_step3",
+        "noise_pred_f32_step4", "noise_pred_f32_step5"};
+    for (int index = 0; index < FIXTURE_STEPS; index++) {
+        char name[16];
+        snprintf(name, sizeof(name), "step%d", index);
+        steps[index] = read_scalar(&step_fixture, name);
+        require(steps[index] == index, "step fixture is not the six-step run");
+    }
     float *inputs[FIXTURE_STEPS], *wanted[FIXTURE_STEPS];
-    float *truth[FIXTURE_STEPS] = {NULL, NULL};
+    float *truth[FIXTURE_STEPS] = {NULL, NULL, NULL, NULL, NULL, NULL};
     float *refined_truth = NULL;
     for (int index = 0; index < FIXTURE_STEPS; index++) {
         inputs[index] = read_fixture(&step_fixture, input_names[index],

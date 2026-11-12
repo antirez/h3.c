@@ -1156,6 +1156,151 @@ static void test_image_edit_aug_constant(void) {
     CHECK(remainder != decimal);
 }
 
+static void test_image_edit_tags(void) {
+    size_t largest = 99;
+    uint32_t mask = 99;
+    h3_image_edit_scan_tags("<Picture 1> and <Picture 2>", 2, &largest, &mask);
+    CHECK(largest == 2 && mask == 3u);
+    h3_image_edit_scan_tags("<Picture 3>", 1, &largest, &mask);
+    CHECK(largest == 3 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture1> <picture 1> <Picture 1 > <Picture >",
+                            2, &largest, &mask);
+    CHECK(largest == 0 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture 0> no tags", 2, &largest, &mask);
+    CHECK(largest == 0 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture 2><Picture 2> <Picture 12> <Picture 99999999999>",
+                            3, &largest, &mask);
+    CHECK(largest == 12 && mask == 2u);
+    h3_image_edit_scan_tags("", 1, &largest, NULL);
+    CHECK(largest == 0);
+    h3_image_edit_scan_tags("<Picture 1>", 1, NULL, &mask);
+    CHECK(mask == 1u);
+}
+
+static void test_image_edit_streams(void) {
+    const uint64_t seed = 42;
+    CHECK(h3_image_edit_stream(seed, 1, 0) != seed);
+    CHECK(h3_image_edit_stream(seed, 2, 0) != seed);
+    CHECK(h3_image_edit_stream(seed, 1, 0) != h3_image_edit_stream(seed, 2, 0));
+    CHECK(h3_image_edit_stream(seed, 1, 0) != h3_image_edit_stream(seed, 1, 1));
+    CHECK(h3_image_edit_stream(seed, 1, 0) == h3_image_edit_stream(seed, 1, 0));
+    CHECK(h3_image_edit_stream(seed, 1, 0) == (42u ^ UINT64_C(0x9E3779B97F4A7C15) * 2u));
+    CHECK(h3_image_edit_stream(seed, 2, 3) == (42u ^ UINT64_C(0x9E3779B97F4A7C15) * 9u));
+    uint64_t seen[16];
+    for (size_t index = 0; index < 8; index++)
+        for (int role = 1; role <= 2; role++) {
+            uint64_t value = h3_image_edit_stream(seed, role, index);
+            size_t slot = index * 2 + (size_t)role - 1;
+            for (size_t other = 0; other < slot; other++)
+                CHECK(seen[other] != value);
+            seen[slot] = value;
+        }
+}
+
+static void test_image_edit_limits(void) {
+    char error[256];
+    h3_image_reference_geometry geometry[8];
+    int small[8], large[8];
+    for (int index = 0; index < 8; index++) small[index] = 1024, large[index] = 2048;
+    /* eight 64x64 latent references and a 128x128 canvas: 8192 + 4096 rows */
+    CHECK(h3_image_edit_check_limits(small, small, 8, 128, 128, 100, geometry,
+                                     error, sizeof(error)));
+    CHECK(geometry[7].dit_rows == 1024 && geometry[0].latent_w == 64);
+    /* eight 128x128 references plus the canvas: the eighth crosses 32768 */
+    CHECK(!h3_image_edit_check_limits(large, large, 8, 128, 128, 100, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "reference 8 ") == error);
+    CHECK(strstr(error, "36864") != NULL);
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 100, NULL,
+                                     error, sizeof(error)));
+    /* the sequence cap: 32768 rows plus text */
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 4096, NULL,
+                                     error, sizeof(error)));
+    CHECK(!h3_image_edit_check_limits(large, large, 7, 128, 128, 4097, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "36865") != NULL);
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 0, NULL,
+                                     error, sizeof(error)));
+    /* too small: both sides must reach 32 (EditResizeStep), not rounded up */
+    int w[2] = {1024, 31}, h[2] = {1024, 100};
+    CHECK(!h3_image_edit_check_limits(w, h, 2, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    CHECK(strstr(error, "reference 2 is 31x100") == error);
+    CHECK(strstr(error, "at least 32") != NULL);
+    w[1] = 100; h[1] = 31;
+    CHECK(!h3_image_edit_check_limits(w, h, 2, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    w[1] = 32; h[1] = 32;
+    CHECK(h3_image_edit_check_limits(w, h, 2, 64, 64, 10, geometry, error,
+                                     sizeof(error)));
+    CHECK(geometry[1].vae_w == 1024 && geometry[1].latent_w == 64);
+    /* an extremely elongated reference fails before any weight loads */
+    int long_w[1] = {2048}, long_h[1] = {100000};
+    CHECK(!h3_image_edit_check_limits(long_w, long_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "reference 1 is 2048x100000") == error);
+    CHECK(strstr(error, "latent grid 128x6250") != NULL);
+    int huge_w[1] = {32}, huge_h[1] = {2000000000};
+    CHECK(!h3_image_edit_check_limits(huge_w, huge_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    int wide_w[1] = {6500}, wide_h[1] = {32};
+    CHECK(!h3_image_edit_check_limits(wide_w, wide_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "aspect ratio") != NULL);
+    /* a latent side above 1024 */
+    int side_w[1] = {16500}, side_h[1] = {2048};
+    CHECK(!h3_image_edit_check_limits(side_w, side_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "above 1024 on a side") != NULL);
+    CHECK(!h3_image_edit_check_limits(small, NULL, 1, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    CHECK(!h3_image_edit_check_limits(NULL, NULL, 0, 1, 64, 10, NULL, error,
+                                      sizeof(error)));
+}
+
+static void test_image_edit_layout(void) {
+    h3_layout layout;
+    char error[256];
+    const h3_layout_ref one = {H3_LAYOUT_REF_IMAGE, 1, 4, 6, 0};
+    CHECK(h3_layout_build_image(3, 4, 4, &one, 1, &layout, error, sizeof(error)));
+    CHECK(layout.seq_len == 3 + 6 + 4);
+    const size_t bounds[][2] = {{0, 3}, {3, 9}, {9, 13}};
+    const h3_segment_kind kinds[] = {H3_SEG_TEXT, H3_SEG_REF_IMAGE, H3_SEG_VIDEO};
+    check_segments(&layout, bounds, kinds, 3);
+    CHECK(layout.img_cond_rows == 6 && layout.img_target_rows == 4);
+    /* _frame_position_grid(4, 6, 2, 2) */
+    const double heights[2] = {2.9360547052, 16.0};
+    const double widths[3] = {-3.5959179423, 9.4680273526, 22.5319726474};
+    for (size_t row = 0; row < 6; row++) {
+        CHECK(layout.positions[3 + row].t == 3.0);
+        CHECK(close_enough(layout.positions[3 + row].h, heights[row / 3], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, widths[row % 3], 1e-6));
+    }
+    const double axis[2] = {0.0, 16.0};
+    for (size_t row = 0; row < 4; row++) {
+        CHECK(layout.positions[9 + row].t == 4.0);
+        CHECK(close_enough(layout.positions[9 + row].h, axis[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[9 + row].w, axis[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    const h3_layout_ref two[2] = {
+        {H3_LAYOUT_REF_IMAGE, 1, 4, 6, 0}, {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0}
+    };
+    CHECK(h3_layout_build_image(3, 4, 4, two, 2, &layout, error, sizeof(error)));
+    CHECK(layout.positions[3].t == 3.0 && layout.positions[9].t == 4.0);
+    CHECK(layout.positions[10].t == 5.0 && layout.seq_len == 3 + 6 + 1 + 4);
+    CHECK(close_enough(layout.positions[9].h, 0.0, 1e-6) &&
+          close_enough(layout.positions[9].w, 0.0, 1e-6));
+    h3_layout_free(&layout);
+
+    const h3_layout_ref odd = {H3_LAYOUT_REF_IMAGE, 1, 4, 5, 0};
+    CHECK(!h3_layout_build_image(3, 4, 4, &odd, 1, &layout, error, sizeof(error)));
+    const h3_layout_ref odd_height = {H3_LAYOUT_REF_IMAGE, 1, 3, 4, 0};
+    CHECK(!h3_layout_build_image(3, 4, 4, &odd_height, 1, &layout, error,
+                                 sizeof(error)));
+}
+
 static void test_reference_resize_lanczos(void) {
     /* PIL Image.resize((w, h), LANCZOS) of this 6x5 planar image. */
     enum { W = 6, H = 5 };
@@ -1344,6 +1489,10 @@ int main(void) {
     test_image_edit_smart_resize();
     test_image_edit_geometry();
     test_image_edit_aug_constant();
+    test_image_edit_tags();
+    test_image_edit_streams();
+    test_image_edit_limits();
+    test_image_edit_layout();
     test_reference_resize_lanczos();
     test_reference_pipeline_steps();
     test_metal_probe();

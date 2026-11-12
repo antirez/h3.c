@@ -2,6 +2,8 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 int h3_image_schedule_build(h3_sigma_schedule *schedule) {
     static const double sample_sigmas[H3_IMAGE_STEPS + 1] = {
@@ -171,3 +173,76 @@ int h3_image_edit_reference_geometry(int w, int h,
     *geometry = g;
     return 1;
 }
+
+void h3_image_edit_scan_tags(const char *prompt, size_t reference_count,
+                             size_t *max_tag, uint32_t *referenced_mask) {
+    static const char opening[] = "<Picture ";
+    size_t largest = 0;
+    uint32_t mask = 0;
+    for (const char *at = prompt; at && (at = strstr(at, opening)); at++) {
+        const char *digits = at + sizeof(opening) - 1;
+        const char *end = digits;
+        size_t value = 0;
+        while (*end >= '0' && *end <= '9' && value < 1000000) {
+            value = value * 10 + (size_t)(*end - '0');
+            end++;
+        }
+        if (end == digits || *end != '>' || !value) continue;
+        if (value > largest) largest = value;
+        if (value <= reference_count && value <= 32)
+            mask |= UINT32_C(1) << (value - 1);
+    }
+    if (max_tag) *max_tag = largest;
+    if (referenced_mask) *referenced_mask = mask;
+}
+
+uint64_t h3_image_edit_stream(uint64_t seed, int role, size_t index) {
+    return seed ^ (UINT64_C(0x9E3779B97F4A7C15) *
+                   ((uint64_t)index * 2 + (uint64_t)role + 1));
+}
+
+#define EDIT_FAIL(...) do { \
+        if (error && error_size) snprintf(error, error_size, __VA_ARGS__); \
+        return 0; \
+    } while (0)
+
+int h3_image_edit_check_limits(const int *widths, const int *heights,
+                               size_t reference_count, int canvas_latent_height,
+                               int canvas_latent_width, size_t text_tokens,
+                               h3_image_reference_geometry *geometry,
+                               char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if ((reference_count && (!widths || !heights)) ||
+        canvas_latent_height < 2 || canvas_latent_width < 2)
+        EDIT_FAIL("invalid edit limit arguments");
+    int64_t rows = (int64_t)canvas_latent_height * canvas_latent_width / 4;
+    for (size_t index = 0; index < reference_count; index++) {
+        h3_image_reference_geometry local;
+        h3_image_reference_geometry *g = geometry ? &geometry[index] : &local;
+        int w = widths[index], h = heights[index];
+        if (w < 32 || h < 32)
+            EDIT_FAIL("reference %zu is %dx%d pixels: both sides must be at "
+                      "least 32", index + 1, w, h);
+        if (!h3_image_edit_reference_geometry(w, h, g))
+            EDIT_FAIL("reference %zu is %dx%d pixels: the aspect ratio is "
+                      "above 200 or the size is too large", index + 1, w, h);
+        if (g->latent_w > H3_IMAGE_MAX_LATENT_SIDE ||
+            g->latent_h > H3_IMAGE_MAX_LATENT_SIDE)
+            EDIT_FAIL("reference %zu is %dx%d pixels: its latent grid %dx%d "
+                      "is above %d on a side", index + 1, w, h, g->latent_w,
+                      g->latent_h, H3_IMAGE_MAX_LATENT_SIDE);
+        rows += g->dit_rows;
+        if (rows > H3_IMAGE_EDIT_MAX_ROWS)
+            EDIT_FAIL("reference %zu brings the reference and image rows to "
+                      "%lld, above %d", index + 1, (long long)rows,
+                      H3_IMAGE_EDIT_MAX_ROWS);
+    }
+    /* 36864 is unverified: the largest measured sequence is 33069 rows. */
+    if (text_tokens && (int64_t)text_tokens + rows > H3_IMAGE_EDIT_MAX_SEQUENCE)
+        EDIT_FAIL("the packed sequence of %lld rows is above %d",
+                  (long long)((int64_t)text_tokens + rows),
+                  H3_IMAGE_EDIT_MAX_SEQUENCE);
+    return 1;
+}
+
+#undef EDIT_FAIL

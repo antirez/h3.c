@@ -63,8 +63,28 @@ typedef struct {
 } encoder_level;
 
 typedef struct {
+    const char *block;
+    const char *shortcut;
+    const char *downsample;
+} encoder_names;
+
+static const encoder_names video_names = {
+    "encoder.down.%d.block.%d", "nin_shortcut",
+    "encoder.down.%d.downsample.conv"
+};
+static const encoder_names image_names = {
+    "encoder.down_blocks.%d.resnets.%d", "conv_shortcut",
+    "encoder.down_blocks.%d.downsamplers.0.conv"
+};
+
+typedef struct {
     h3_gpu *gpu;
     h3_weight_store *store;
+    const encoder_names *names;
+    /* Video: the mean channels, normalized per tile. Image: all quant_conv
+     * moments, as they are. */
+    int raw_moments;
+    int output_channels;
     encoder_conv conv_in;
     encoder_level levels[LEVELS];
     encoder_norm norm_out;
@@ -294,7 +314,7 @@ static int load_weights(encoder_context *encoder, char *error,
             encoder_block *item = &encoder->levels[level].blocks[block];
             uint32_t input_channels = block ? channels : previous;
             char prefix[192];
-            snprintf(prefix, sizeof(prefix), "encoder.down.%d.block.%d", level,
+            snprintf(prefix, sizeof(prefix), encoder->names->block, level,
                      block);
             char name[224];
             snprintf(name, sizeof(name), "%s.norm1", prefix);
@@ -312,7 +332,8 @@ static int load_weights(encoder_context *encoder, char *error,
                            1, 1, 1, 2, 1, 1, 1, 1,
                            error, error_size)) return 0;
             if (input_channels != channels) {
-                snprintf(name, sizeof(name), "%s.nin_shortcut", prefix);
+                snprintf(name, sizeof(name), "%s.%s", prefix,
+                         encoder->names->shortcut);
                 if (!load_conv(encoder, &item->shortcut, name, input_channels,
                                channels, 1, 1, 1, 1, 0, 0, 0, 0, 0,
                                error, error_size)) return 0;
@@ -321,7 +342,7 @@ static int load_weights(encoder_context *encoder, char *error,
         }
         if (space_strides[level] * time_strides[level] > 1) {
             char name[192];
-            snprintf(name, sizeof(name), "encoder.down.%d.downsample.conv", level);
+            snprintf(name, sizeof(name), encoder->names->downsample, level);
             uint32_t spatial_tail = space_strides[level] == 2 ? 1 : 0;
             if (!load_conv(encoder, &encoder->levels[level].downsample, name,
                            channels, channels, 3, time_strides[level],
@@ -569,14 +590,14 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
                     "submit visual encoder output");
     }
     float *raw = ok ? malloc(moment_count * sizeof(*raw)) : NULL;
-    size_t latent_count = (size_t)LATENT_CHANNELS * depth * h * w;
+    size_t latent_count = (size_t)encoder->output_channels * depth * h * w;
     float *latent = ok ? malloc(latent_count * sizeof(*latent)) : NULL;
     if (ok && (!raw || !latent ||
                !h3_gpu_tensor_read_f32(quant, raw, moment_count))) {
         fail(error, error_size, "cannot read visual encoder latent");
         ok = 0;
     }
-    if (ok) for (uint32_t channel = 0; channel < LATENT_CHANNELS; channel++)
+    if (ok) for (int channel = 0; channel < encoder->output_channels; channel++)
         for (uint32_t time = 0; time < depth; time++)
             for (uint32_t y = 0; y < h; y++)
                 for (uint32_t x = 0; x < w; x++) {
@@ -584,8 +605,9 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
                                     MOMENT_CHANNELS + channel;
                     size_t target = (((size_t)channel * depth + time) * h + y) *
                                     w + x;
-                    latent[target] = (raw[source] - encoder->latent_mean[channel]) /
-                                     encoder->latent_std[channel];
+                    latent[target] = encoder->raw_moments ? raw[source] :
+                        (raw[source] - encoder->latent_mean[channel]) /
+                        encoder->latent_std[channel];
                 }
     free(raw);
     free_tensor(&hidden);
@@ -673,7 +695,7 @@ static float *extract_pixel_tile(const float *pixels, int frames,
     return tile;
 }
 
-static int stitch_latents(float **tiles, int latent_time,
+static int stitch_latents(float **tiles, int channels, int latent_time,
                           const tile_axis *y_axis, const tile_axis *x_axis,
                           h3_video_latent *output, char *error,
                           size_t error_size) {
@@ -683,7 +705,7 @@ static int stitch_latents(float **tiles, int latent_time,
                  SPATIAL_RATIO;
     int full_w = (x_axis->starts[x_axis->count - 1] + x_axis->length) /
                  SPATIAL_RATIO;
-    size_t count = (size_t)LATENT_CHANNELS * latent_time * full_h * full_w;
+    size_t count = (size_t)channels * latent_time * full_h * full_w;
     float *values = malloc(count * sizeof(*values));
     if (!values) {
         fail(error, error_size, "out of memory stitching visual latents");
@@ -705,7 +727,7 @@ static int stitch_latents(float **tiles, int latent_time,
                 x_axis->overlaps[tile_x] / SPATIAL_RATIO : 0);
             int destination_y = y_axis->starts[tile_y] / SPATIAL_RATIO;
             int destination_x = x_axis->starts[tile_x] / SPATIAL_RATIO;
-            for (int channel = 0; channel < LATENT_CHANNELS; channel++)
+            for (int channel = 0; channel < channels; channel++)
                 for (int time = 0; time < latent_time; time++)
                     for (int y = 0; y < keep_h; y++)
                         for (int x = 0; x < keep_w; x++) {
@@ -742,12 +764,13 @@ static int stitch_latents(float **tiles, int latent_time,
     return 1;
 }
 
-int h3_video_vae_encode(const char *weight_directory,
-                        const char *shader_source_path,
-                        const float *pixels, int frames, int height, int width,
-                        h3_video_encoder_progress progress, void *progress_opaque,
-                        h3_video_latent *output,
-                        char *error, size_t error_size) {
+static int encode_visual(const encoder_names *names, int raw_moments,
+                         const char *weight_directory,
+                         const char *shader_source_path,
+                         const float *pixels, int frames, int height, int width,
+                         h3_video_encoder_progress progress,
+                         void *progress_opaque, h3_video_latent *output,
+                         char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (output) memset(output, 0, sizeof(*output));
     if (!weight_directory || !*weight_directory || !shader_source_path ||
@@ -765,13 +788,18 @@ int h3_video_vae_encode(const char *weight_directory,
         return 0;
     }
     encoder_context encoder = {0};
+    encoder.names = names;
+    encoder.raw_moments = raw_moments;
+    encoder.output_channels = raw_moments ? MOMENT_CHANNELS : LATENT_CHANNELS;
     encoder.gpu = h3_gpu_create(shader_source_path, error, error_size);
     if (encoder.gpu)
-        h3_gpu_profile_set_label(encoder.gpu, "video VAE encoder");
+        h3_gpu_profile_set_label(encoder.gpu, raw_moments ?
+                                 "image VAE encoder" : "video VAE encoder");
     if (encoder.gpu)
         encoder.store = h3_weight_store_open(weight_directory, error, error_size);
     ok = encoder.gpu && encoder.store &&
-         load_normalization(&encoder, weight_directory, error, error_size) &&
+         (raw_moments ||
+          load_normalization(&encoder, weight_directory, error, error_size)) &&
          load_weights(&encoder, error, error_size);
     int tile_count = y_axis.count * x_axis.count;
     float **tiles = ok ? calloc((size_t)tile_count, sizeof(*tiles)) : NULL;
@@ -795,8 +823,9 @@ int h3_video_vae_encode(const char *weight_directory,
             if (ok) latent_time = current_time;
             if (ok && progress) progress(completed + 1, tile_count, progress_opaque);
         }
-    if (ok) ok = stitch_latents(tiles, latent_time, &y_axis, &x_axis,
-                                output, error, error_size) &&
+    if (ok) ok = stitch_latents(tiles, encoder.output_channels, latent_time,
+                                &y_axis, &x_axis, output, error,
+                                error_size) &&
                  h3_gpu_get_stats(encoder.gpu, &output->gpu_stats);
     if (tiles) for (int index = 0; index < tile_count; index++) free(tiles[index]);
     free(tiles);
@@ -805,6 +834,28 @@ int h3_video_vae_encode(const char *weight_directory,
     tile_axis_free(&x_axis);
     if (!ok) h3_video_latent_free(output);
     return ok;
+}
+
+int h3_video_vae_encode(const char *weight_directory,
+                        const char *shader_source_path,
+                        const float *pixels, int frames, int height, int width,
+                        h3_video_encoder_progress progress, void *progress_opaque,
+                        h3_video_latent *output,
+                        char *error, size_t error_size) {
+    return encode_visual(&video_names, 0, weight_directory, shader_source_path,
+                         pixels, frames, height, width, progress,
+                         progress_opaque, output, error, error_size);
+}
+
+int h3_image_vae_encode_moments(const char *weight_directory,
+                                const char *shader_source_path,
+                                const float *pixels, int height, int width,
+                                h3_video_encoder_progress progress,
+                                void *progress_opaque, h3_video_latent *output,
+                                char *error, size_t error_size) {
+    return encode_visual(&image_names, 1, weight_directory, shader_source_path,
+                         pixels, 1, height, width, progress, progress_opaque,
+                         output, error, error_size);
 }
 
 void h3_video_latent_free(h3_video_latent *latent) {

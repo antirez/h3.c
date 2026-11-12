@@ -38,6 +38,12 @@ int h3_image_vae_parse_float_array(const char *json, const char *key,
                                    float *values, size_t count, char *error,
                                    size_t error_size);
 
+/* Read latents_mean and latents_std (24 values each, std > 0) from
+ * <weight_directory>/config.json. */
+int h3_image_vae_load_latent_normalization(const char *weight_directory,
+                                           float *mean, float *deviation,
+                                           char *error, size_t error_size);
+
 /* One decoder tile: patch rows [latent_height * latent_width][768], component
  * (channel * 16 + y) * 16 + x, to interleaved [y][x][3] pixels. */
 void h3_image_vae_unpack_patches(const float *rows, int latent_height,

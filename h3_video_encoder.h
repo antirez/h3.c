@@ -25,6 +25,16 @@ int h3_video_vae_encode(const char *weight_directory,
                         h3_video_encoder_progress progress, void *progress_opaque,
                         h3_video_latent *output,
                         char *error, size_t error_size);
+/* The image VAE encoder (diffusers tensor names) on one frame: planar RGB
+ * pixels [3,H,W] in [0,1], H and W multiples of 16, tiled as above. The output
+ * holds the quant_conv moments [48,1,H/16,W/16], mean channels first,
+ * unnormalized, with the tiles blended as moments. */
+int h3_image_vae_encode_moments(const char *weight_directory,
+                                const char *shader_source_path,
+                                const float *pixels, int height, int width,
+                                h3_video_encoder_progress progress,
+                                void *progress_opaque, h3_video_latent *output,
+                                char *error, size_t error_size);
 void h3_video_latent_free(h3_video_latent *latent);
 
 #endif

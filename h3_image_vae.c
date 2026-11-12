@@ -339,9 +339,9 @@ int h3_image_vae_parse_float_array(const char *json, const char *key,
     return 1;
 }
 
-static int load_latent_normalization(const char *weight_directory,
-                                     float *mean, float *deviation,
-                                     char *error, size_t error_size) {
+int h3_image_vae_load_latent_normalization(const char *weight_directory,
+                                           float *mean, float *deviation,
+                                           char *error, size_t error_size) {
     char path[1024];
     int length = snprintf(path, sizeof(path), "%s/config.json",
                           weight_directory);
@@ -592,8 +592,9 @@ int h3_image_vae_decode(const char *weight_directory,
         return 0;
     }
     float mean[LATENT_CHANNELS], deviation[LATENT_CHANNELS];
-    if (!load_latent_normalization(weight_directory, mean, deviation,
-                                   error, error_size)) return 0;
+    if (!h3_image_vae_load_latent_normalization(weight_directory, mean,
+                                                deviation, error, error_size))
+        return 0;
     h3_vae_tile_axis y_axis, x_axis;
     if (!h3_vae_tile_axis_build(latent_height * PATCH, TILE_PIXELS, &y_axis,
                                 error, error_size)) return 0;

@@ -3,6 +3,7 @@
 #include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
 #include "h3_image.h"
+#include "h3_image_pipeline.h"
 #include "h3_image_vae.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
@@ -612,6 +613,82 @@ static void test_image_patchify(void) {
     CHECK(memcmp(latent, roundtrip, sizeof(latent)) == 0);
 }
 
+typedef struct {
+    int next_step;
+    int progress_calls;
+    int cancel_after;
+} sampler_probe;
+
+static int probe_velocity(void *opaque, int step, const float *rows,
+                          float *velocity, char *error, size_t error_size) {
+    sampler_probe *probe = opaque;
+    (void)error; (void)error_size;
+    if (step != probe->next_step++) return 0;
+    for (size_t index = 0; index < 24 * 4 * 6; index++)
+        velocity[index] = 0.5f * (float)(step + 1) - rows[index];
+    return 1;
+}
+
+static int probe_progress(int completed, int total, void *opaque) {
+    sampler_probe *probe = opaque;
+    CHECK(total == 6 && completed == probe->progress_calls);
+    probe->progress_calls++;
+    return probe->cancel_after >= 0 && completed == probe->cancel_after;
+}
+
+static void test_image_sampler(void) {
+    enum { C = 24, H = 4, W = 6, ELEMENTS = C * H * W };
+    static const double sigma[7] = {1.0, 0.9675237, 0.8875485, 0.75,
+                                    0.5327739, 0.23200887, 0.0};
+    float noise[ELEMENTS], latent[ELEMENTS];
+    for (size_t index = 0; index < ELEMENTS; index++)
+        noise[index] = (float)((int)(index % 7) - 3) * 0.4f;
+    sampler_probe probe = {0, 0, -1};
+    char error[128];
+    CHECK(h3_image_sample(H, W, noise, probe_velocity, &probe, probe_progress,
+                          &probe, latent, error, sizeof(error)));
+    CHECK(probe.next_step == 6 && probe.progress_calls == 7);
+    /* v = target - x makes every element follow its own relaxation. */
+    for (size_t index = 0; index < ELEMENTS; index++) {
+        double x = (double)noise[index];
+        for (int step = 0; step < 6; step++)
+            x += (sigma[step] - sigma[step + 1]) *
+                 (0.5 * (double)(step + 1) - x);
+        CHECK(close_enough((double)latent[index], x, 2e-6));
+    }
+    /* In place, and a cancelled run reports an error. */
+    memcpy(latent, noise, sizeof(latent));
+    probe = (sampler_probe){0, 0, -1};
+    CHECK(h3_image_sample(H, W, latent, probe_velocity, &probe, NULL, NULL,
+                          latent, error, sizeof(error)));
+    probe = (sampler_probe){0, 0, 2};
+    CHECK(!h3_image_sample(H, W, noise, probe_velocity, &probe, probe_progress,
+                           &probe, latent, error, sizeof(error)));
+    CHECK(probe.next_step == 2 && strstr(error, "cancelled") != NULL);
+    CHECK(!h3_image_sample(3, W, noise, probe_velocity, &probe, NULL, NULL,
+                           latent, error, sizeof(error)));
+}
+
+static void test_image_noise_and_interleave(void) {
+    enum { H = 2, W = 4, ELEMENTS = 24 * H * W };
+    float first[ELEMENTS], again[ELEMENTS], other[ELEMENTS];
+    h3_image_noise(42, H, W, first);
+    h3_image_noise(42, H, W, again);
+    h3_image_noise(43, H, W, other);
+    CHECK(memcmp(first, again, sizeof(first)) == 0);
+    CHECK(memcmp(first, other, sizeof(first)) != 0);
+    h3_rng rng;
+    h3_rng_seed(&rng, 42);
+    float direct[ELEMENTS];
+    h3_rng_fill_normal(&rng, direct, ELEMENTS);
+    CHECK(memcmp(first, direct, sizeof(first)) == 0);
+    const uint8_t planar[12] = {1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24};
+    uint8_t interleaved[12];
+    h3_image_interleave_rgb(planar, 2, 2, interleaved);
+    const uint8_t want[12] = {1, 11, 21, 2, 12, 22, 3, 13, 23, 4, 14, 24};
+    CHECK(memcmp(interleaved, want, sizeof(want)) == 0);
+}
+
 static void test_image_qkv_interleave(void) {
     const struct { unsigned heads, head_dim; } shapes[] = {{56, 128}, {16, 64}};
     for (size_t shape = 0; shape < 2; shape++) {
@@ -961,6 +1038,8 @@ int main(void) {
     test_image_rope_inv_freq();
     test_image_timestep_features();
     test_image_patchify();
+    test_image_sampler();
+    test_image_noise_and_interleave();
     test_image_qkv_interleave();
     test_dit_names();
     test_image_dit_bookkeeping();

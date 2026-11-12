@@ -13,7 +13,7 @@ LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
 
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
 	h3_terminal.c h3_vision_encoder.c h3_multimodal.c h3_image.c \
-	h3_vae_tiles.c
+	h3_vae_tiles.c h3_image_vae.c
 LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
@@ -95,6 +95,9 @@ tests/bench_dit_864.o: tests/bench_dit.c
 	$(CC) $(CFLAGS) -I. -DH3_BENCH_LATENT_H=30 \
 		-DH3_BENCH_LATENT_W=54 -c $< -o $@
 
+h3_real_image_vae_test: tests/test_real_image_vae.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -105,7 +108,8 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_audio_gpu_tests h3_image_gpu_tests h3_real_audio_vae_test \
 	h3_real_audio_encoder_test h3_av_mux_test \
 	h3_real_video_encoder_test h3_real_qwen_vision_test \
-	h3_real_multimodal_text_test h3_real_ref_video_text_test
+	h3_real_multimodal_text_test h3_real_ref_video_text_test \
+	h3_real_image_vae_test
 
 	./h3_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
@@ -182,6 +186,13 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: Ref2VA video presentation fixture is not installed"; \
 	fi
+	@if test -f MiniMax-H3-Image/vae_diffusers/diffusion_pytorch_model.safetensors && \
+	         test -f misc/fixtures/h3_image_vae_decode.safetensors; then \
+		./h3_real_image_vae_test MiniMax-H3-Image/vae_diffusers \
+			misc/fixtures/h3_image_vae_decode.safetensors; \
+	else \
+		echo "skip: image VAE weights/fixture are not installed"; \
+	fi
 
 parity: h3_metal_tests h3_bf16_tests h3_text_tests
 	./h3_metal_tests misc/fixtures/h3_dit.safetensors
@@ -215,6 +226,6 @@ clean:
 		h3_real_video_encoder_test h3_real_qwen_vision_test \
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
-		h3_real_video_vae_test h3_semantic_vae_test \
+		h3_real_video_vae_test h3_semantic_vae_test h3_real_image_vae_test \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

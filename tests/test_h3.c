@@ -2,6 +2,7 @@
 #include "h3_dit.h"
 #include "h3_dit_schedule.h"
 #include "h3_image.h"
+#include "h3_image_vae.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
 #include "h3_vae_tiles.h"
@@ -688,6 +689,51 @@ static void test_image_vae_tiles(void) {
     CHECK(h3_vae_tile_count(2048, 256) == 11);
 }
 
+static void test_image_unpack_2d(void) {
+    enum { HL = 2, WL = 3, PATCH = 768 };
+    float *rows = malloc((size_t)HL * WL * PATCH * sizeof(*rows));
+    float *rgb = malloc((size_t)HL * WL * 256 * 3 * sizeof(*rgb));
+    CHECK(rows && rgb);
+    for (int patch = 0; patch < HL * WL; patch++)
+        for (int component = 0; component < PATCH; component++)
+            rows[patch * PATCH + component] = (float)(patch * 1000 + component);
+    h3_image_vae_unpack_patches(rows, HL, WL, rgb);
+    const int width = WL * 16;
+    /* pixel (y, x, channel): patch (y / 16) * WL + x / 16, component
+     * (channel * 16 + y % 16) * 16 + x % 16 */
+    CHECK(rgb[(0 * width + 0) * 3 + 0] == 0.0f);
+    CHECK(rgb[(0 * width + 1) * 3 + 0] == 1.0f);
+    CHECK(rgb[(1 * width + 0) * 3 + 0] == 16.0f);
+    CHECK(rgb[(0 * width + 0) * 3 + 1] == 256.0f);
+    CHECK(rgb[(0 * width + 0) * 3 + 2] == 512.0f);
+    CHECK(rgb[(0 * width + 16) * 3 + 0] == 1000.0f);
+    CHECK(rgb[(17 * width + 35) * 3 + 2] == 5531.0f);
+    CHECK(rgb[(31 * width + 47) * 3 + 1] == 5511.0f);
+    free(rows);
+    free(rgb);
+
+    /* Raw decoder values 0, 3, -5 per channel: 0 maps to the ImageNet mean,
+     * 3 and -5 clamp to the ends of [0, 1]; 0.9999 is the value that rounds
+     * to 255 but truncates to 254. */
+    const float raw_nine = (0.9999f - 0.485f) / 0.229f;
+    float data[3 * 4] = {
+        0.0f, 3.0f, -5.0f, raw_nine,
+        0.0f, 3.0f, -5.0f, 0.0f,
+        0.0f, 3.0f, -5.0f, 0.0f
+    };
+    h3_image_planes planes = {2, 2, data, {0}};
+    h3_image_planes_to_rgb(&planes);
+    CHECK(close_enough(data[0], 0.485, 1e-6) && data[1] == 1.0f && data[2] == 0.0f);
+    CHECK(close_enough(data[3], 0.9999, 1e-6));
+    CHECK(close_enough(data[4], 0.456, 1e-6));
+    CHECK(close_enough(data[8], 0.406, 1e-6));
+    uint8_t bytes[12];
+    h3_image_planes_to_u8(&planes, bytes);
+    CHECK(bytes[0] == 123 && bytes[1] == 255 && bytes[2] == 0 && bytes[3] == 254);
+    CHECK(bytes[4] == 116 && bytes[8] == 103);
+    CHECK(lrintf(0.9999f * 255.0f) == 255);
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -731,6 +777,7 @@ int main(void) {
     test_image_patchify();
     test_image_qkv_interleave();
     test_image_vae_tiles();
+    test_image_unpack_2d();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

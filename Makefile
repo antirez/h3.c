@@ -381,9 +381,9 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 
 # Two default-mode runs of the fixture prompt must give a valid 512x512 PNG
 # and identical bytes. A fresh cache directory makes run a a text cache miss
-# and run b a hit (stderr says which), so this also compares miss and hit. It runs the 62 GB text encoder and transformer, so on
-# the development Mac run it through the guard wrapper (gated_exec.py), not
-# bare: python3 gated_exec.py --swap-mb 14000 --timeout 1500 -- make image-check
+# and run b a hit (stderr says which), so this also compares miss and hit.
+# It runs the 62 GB text encoder and transformer: on a machine shared with
+# other large models, run it when nothing else holds that memory.
 image-check: h3 h3_image_png_test
 	@dir=$$(mktemp -d) && export H3_CACHE_DIR=$$dir/cache && \
 	for run in a b; do \
@@ -422,12 +422,12 @@ image-edit-check: h3 h3_image_png_test
 # depend on each other. Times and peak memory are estimates from the t2i runs,
 # not measurements; fill them in from the first run. PY is any Python with
 # diffusers (MiniMax-H3-Image classes), transformers, torch and safetensors;
-# G is the guard wrapper. The harness runs on the CPU from memory-mapped
+# G is an optional wrapper prefix (for example a memory guard); leave it
+# empty to run the commands directly. The harness runs on the CPU from memory-mapped
 # weights, so its peak is evictable file pages plus a few GB. Every command
 # can first be run with --plan (harness) to print shapes without a 62 GB model.
 define IMAGE_EDIT_FIXTURES
-GATED=/private/tmp/claude-501/-Users-ronica-projects/6bc281dc-2caa-4d62-b4ea-14cf2c92d0cd/scratchpad/gated_exec.py
-G="python3 $$GATED --swap-mb 14000 --timeout 7200 --"   PY="python -I"
+G=""   PY="python -I"
 H="$$PY tools/h3_image_reference.py --device cpu --out-dir misc/fixtures"
  1. $$H --stage edit_vae                        only for the M5c reference-encoder test, not for steps 2-8; light, about 1 min
  2. $$G $$H --stage edit_text_small             62 GB text encoder, N=84: 5-15 min, 4 GB anon + page cache

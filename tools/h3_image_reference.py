@@ -102,7 +102,7 @@ from safetensors.torch import load_file, save_file
 from transformers import Qwen2TokenizerFast, Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
-DEFAULT_CHECKPOINT = "/Users/ronica/projects/h3-image/MiniMax-H3-Image"
+DEFAULT_CHECKPOINT = os.environ.get("H3_IMAGE_DIR", "MiniMax-H3-Image")
 DEFAULT_PROMPT = "a red fox in snow"
 PATCH_SIZE = (1, 2, 2)
 LATENT_CHANNELS = 24

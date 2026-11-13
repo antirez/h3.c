@@ -1,6 +1,8 @@
 # Local models, references, experiments, and generated media.
 misc/
+MiniMax-H3
 MiniMax-H3/
+MiniMax-H3-Image
 MiniMax-H3-Image/
 outputs/
 .ruff_cache/

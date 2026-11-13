@@ -87,6 +87,24 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                                         const h3_image_params *params,
                                         h3_image_hooks *hooks);
 
+/* Generation progress and helpers that h3.c shares with h3_image_generate.c. */
+typedef struct {
+    h3_ctx *ctx;
+    h3_progress_callback callback;
+    void *opaque;
+    const h3_params *params;
+    int cancelled;
+} h3_generation_progress;
+
+void h3_progress_emit(h3_generation_progress *state, const char *phase,
+                      int completed, int total);
+void h3_text_progress_bridge(int completed, int total, void *opaque);
+void h3_dit_progress_bridge(const char *phase, int completed, int total,
+                            void *opaque);
+void h3_vision_progress_bridge(int completed, int total, void *opaque);
+/* "root/relative", malloc'd (the caller frees it); NULL when out of memory. */
+char *h3_path(const char *root, const char *relative);
+
 void h3_set_error(h3_ctx *ctx, const char *format, ...)
     __attribute__((format(printf, 2, 3)));
 

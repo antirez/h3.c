@@ -10,7 +10,7 @@ Stages: text, block0, step, f32truth, denoise, vae, e2e (or all), and step_large
 `all` loads the text encoder once and the transformer once: one six-step run
 records block 0, steps 0 and 3 and the final latents.
 
-Fixture tensor names that differ from spec 5.3: the step fixture holds
+The step fixture holds
 latents_in_step{0..5} and noise_pred_step{0..5} (plus step0..step5 scalars)
 instead of one latents_in / noise_pred: every step of the six-step run, each
 fed the bf16 reference's own latents (teacher forcing).
@@ -41,8 +41,8 @@ MiniMaxH3ImageEditPrepareLatentsStep's noising, and records:
 Also resize_down_in_u8 [3,203,317] and resize_down_out_u8 [3,61,100] (a Lanczos downscale), bounds
 int32[4] (reference_min, reference_max, vision_min, vision_max short edge), reference_noise_aug F32[1], seed.
 
-The edit_text, edit_text_small, edit_step, edit_f32truth and edit_e2e stages are the reference-image editing fixtures
-(M5b.2, M5b.3, M5c.2). They all start from edit_vae's reference 0 (the same seeded 256x256 image) and the prompt
+The edit_text, edit_text_small, edit_step, edit_f32truth and edit_e2e stages are the reference-image editing fixtures.
+They all start from edit_vae's reference 0 (the same seeded 256x256 image) and the prompt
 "<Picture 1> the same fox, now in autumn leaves", and write the scalar settings plus reference_count:
   edit_text        vision copy 1024x1024 after EditResizeStep, 1024 vision tokens, the whole text encoder (62 GB,
                    memory-mapped on the CPU): reference_u8, vision_u8, pixel_values [4096,1536] F32, image_grid_thw

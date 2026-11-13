@@ -1,8 +1,12 @@
 # Local models, references, experiments, and generated media.
 misc/
+MiniMax-H3
 MiniMax-H3/
+MiniMax-H3-Image
+MiniMax-H3-Image/
 outputs/
 .ruff_cache/
+__pycache__/
 
 # Compiler and test outputs.
 *.o
@@ -27,4 +31,5 @@ h3_semantic_dit_test
 h3_real_video_vae_test
 h3_semantic_vae_test
 libh3.a
+h3_text_build_id.h
 .DS_Store

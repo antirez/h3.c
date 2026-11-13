@@ -20,6 +20,13 @@ int h3_ffmpeg_read_image_f32(const char *path, int width, int height,
                              h3_image_fit fit, float **pixels,
                              char *error, size_t error_size);
 
+/* Decode one image at its own size with its EXIF orientation applied (the
+ * result is the upright image). The caller owns planar RGB bytes
+ * [3][height][width]. Rejects sides above 16384 and more than 134217728
+ * pixels. */
+int h3_ffmpeg_read_image_u8(const char *path, int *width, int *height,
+                            uint8_t **planar, char *error, size_t error_size);
+
 /* Decode a 24 fps visual stream to channel-major F32 [3,T,H,W] in [0,1].
  * The returned frame count is trimmed down to the released 5+17k cadence. */
 int h3_ffmpeg_read_video_f32(const char *path, int width, int height,
@@ -37,6 +44,11 @@ int h3_ffmpeg_read_audio_f32(const char *path, int max_samples,
 int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
                           int frame_count, int width, int height, int fps,
                           char *error, size_t error_size);
+
+/* Write one interleaved RGB24 image [height][width][3] as a PNG. */
+int h3_ffmpeg_write_png_rgb24(const char *path, const uint8_t *rgb,
+                              int width, int height,
+                              char *error, size_t error_size);
 
 /* Encode RGB24 video and channel-major F32 PCM through two concurrent pipes.
  * No intermediate uncompressed media file is created. */

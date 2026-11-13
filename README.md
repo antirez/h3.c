@@ -403,6 +403,154 @@ Standalone audio must accompany an image or video reference. Audio references
 must be 2–15 seconds; at most three audio inputs are accepted and their total
 decoded duration is capped at 15 seconds.
 
+### 9. Generate an image
+
+A MiniMax-H3-Image directory (it has `transformer_diffusers/`) selects
+text-to-image. The model always runs six steps; the video sampler options do
+not apply, and the interactive session stays video-only.
+
+```sh
+./h3 -d MiniMax-H3-Image -p "a red fox in snow" --size 1024x768 --seed 42 \
+  -o outputs/fox.png
+```
+
+Requests below `--min-generation-area` (default 4194304) are generated on a
+larger canvas and resized back. `--min-generation-area 1024` stops the
+enlarging, but the canvas is still rounded to a multiple of 32 (the model's
+grid), so a 1000x1000 request is generated on 992x992 and resized to 1000x1000.
+
+Three weight modes, measured at 512x512 on an M5 Max:
+
+| mode | flag | GPU buffers | whole run | exactness |
+|---|---|---|---|---|
+| resident BF16 | (default) | about 36 GiB | 18 s | reference quality |
+| resident int8 | `--int8` (Metal 4) | about 18.6 GiB | 20 s | about twice the per-step error |
+| SSD streaming | `--ssd-streaming` | about 1.5 GiB | 34 s (reads 216 GiB) | identical to BF16 |
+
+BF16 and streaming give bit-identical latents; int8 gives a different but
+equally plausible picture. `--int8` and `--ssd-streaming` exclude each other.
+
+Large canvases, one seed, M5 Max with 128 GB, `--profile` (the footprint is the
+lifetime maximum of the process physical footprint, which includes MPSGraph
+transients; swap stayed flat in every run):
+
+| canvas | image tokens | mode | per step | whole run | footprint (lifetime max) |
+|---|---|---|---|---|---|
+| 2048x2048 | 4096 | BF16 | 3.1 s | 40 s | 37.1 GiB |
+| 3072x3072 | 9216 | BF16 | 10.9 s | 100 s | 38.4 GiB |
+| 4096x4096 | 16384 | BF16 | 20.9 s | 163 s | 40.1 GiB |
+| 4096x4096 | 16384 | `--int8` | 13.8 s | 118 s | 24.3 GiB |
+| 4096x4096 | 16384 | `--ssd-streaming` | 20.7 s | 150 s | 9.5 GiB |
+| 6272x2688 | 16464 | BF16 | 20.6 s | 160 s | 40.1 GiB |
+| 8192x4096 | 32768 | BF16 | 61 s | 418 s | 43.9 GiB |
+
+The attention scores are not materialised (the footprint grows by about
+0.25 MiB per token over the 36 GiB of weights, not by 56 S^2 elements), and
+the attention time grows with the square of the token count. Sizes were
+measured up to 8192x4096 (33554432 pixels, 32768 tokens), which is also the
+cap. 16384x2048 has the same token count and is accepted on arithmetic, but it
+was never run; 8192x8192 was not measured. The cap is the same in every weight
+mode by policy: `--int8` is about 1.5x faster per step at 16384 tokens (13.8 s
+against 20.9 s) but does not raise it. A larger canvas is refused before any
+weight is loaded. The image VAE decode takes 12 s at 4096x4096 and 24 s at
+8192x4096. BF16 and streaming write byte-identical PNGs at 4096x4096.
+
+Precision on large canvases: against an F32 run of the same checkpoint, the
+step-0 velocity is verified up to 9216 image rows (3072x3072). Above that only
+"finite, decodes, BF16 equals streaming" is checked. At about 9k tokens and
+more the model amplifies BF16 attention rounding: the global velocity error is
+0.08 at 9216 rows (0.013 at 4096), while the median row stays at 0.012, and the
+error sits in a central blob. The MPSGraph BF16 attention is at the BF16
+rounding floor; running the attention in F32 only halves the global error at
+twice the forward time, so it is not shipped.
+
+#### Edit with reference images
+
+`--ref-image PATH`, repeated up to 8 times, turns the request into an edit. The
+prompt calls the references `<Picture 1>`, `<Picture 2>`, ... in command-line
+order; say what to keep first, then what to change, then the target image:
+
+```sh
+./h3 -d MiniMax-H3-Image --ref-image fox.png --ref-image scarf.png \
+  -p "Keep <Picture 1> as it is, put the scarf of <Picture 2> on the fox, \
+a photo in autumn light." --seed 42 -o outputs/edit.png
+```
+
+Without `--size` the result has the size of the first reference (after EXIF
+orientation); the canvas rules above apply to it unchanged. A prompt that names
+a `<Picture N>` above the reference count, or that never names a reference,
+prints a warning and runs anyway.
+
+Each reference is resized twice, keeping its own aspect ratio, as the
+diffusers pipeline does. The VAE copy keeps a short edge between 1024 and 2048
+pixels as it is, and scales anything else to the nearer bound with both sides
+rounded to a multiple of 32. The Qwen vision copy has a short edge of exactly
+1024 pixels, then both sides round to a multiple of 32. A reference adds
+`vae_width * vae_height / 1024` transformer rows and `vision_width *
+vision_height / 1024` text tokens. The resizing is a port of PIL's Lanczos
+(byte exact against PIL; the vision copy's second stage, bicubic in the
+reference, is Lanczos here).
+
+Limits, all checked before any weight loads and reported with the reference
+number: at most 8 references, every side at least 32 pixels, a vision aspect
+ratio of at most 200, a latent side of at most 1024 per reference (16384
+pixels), at most 32768 reference plus image rows, and a packed sequence of at
+most 36864 rows. The sequence limit is measured up to about 36.6k rows. Every
+weight mode works; the models run one at a time (VAE encoder, Qwen vision and
+text encoder, transformer, VAE decoder), and a reference adds the 1.2 GB vision
+tower and the 0.6 GB VAE encoder to the phases, not to the resident
+transformer. The noise of each reference derives from `--seed`, so the same
+command writes the same PNG.
+
+Measured on M5 Max, 128 GB, BF16 resident unless stated:
+
+| Edit | Result |
+| --- | --- |
+| 512x512, one 256x256 reference | 32.3 s in total: reference VAE 6.2 s, vision tower and text encoder ("reference text") 5.0 s, DiT load 9.4 s, six steps of 1.7 s each; peak footprint 36.8 GiB |
+| 512x512, same reference, `--ssd-streaming` | 43.9 s: DiT load 3.9 s, steps of 4.0 to 4.9 s each (216 GiB of weights read per run) |
+| 512x512, same reference, `--int8` | 31.2 to 33.2 s: DiT load 12.2 s, steps of 1.0 s each; peak footprint 24.5 GiB |
+| 1024x768 with a 1024x768 reference (canvas 2368x1760 through the default minimum generation area) | 61.5 s |
+| 5120x4096 with three references (2048, 3072 and 4096 pixel squares; sequence about 35.9k rows) | 652 to 698 s: reference VAE 86 to 92 s, text 15 s, a DiT step 70 to 80 s; peak footprint 44.4 GiB; two runs byte-identical |
+| 7104x4096 with one 4096x1024 reference (sequence about 36.6k rows, near the 36864 cap) | 593 s; DiT peak 44.9 GiB |
+
+#### Text embedding cache
+
+The text encoder reads about 49 GB of weights per prompt, and the vision tower
+runs once per reference. Their output, the text embedding, depends only on the
+prompt, the pixels of the references and the checkpoint, so an image run
+(text-to-image or edit) keeps it in a file and reuses it: a run with the same
+prompt and references, whatever its `--seed`, `--size` or weight mode, skips
+the "reference text" phase (5.0 s of the 32.3 s above; more for bigger
+references). The stderr line says what happened: `h3: edit text cache hit
+FILE`, `h3: edit text cache miss; stored FILE`, or `h3: edit text cache
+disabled` (`h3: text cache ...` without references). The reference VAE
+encoder still runs: its output depends on `--seed`.
+
+The cache is on by default and is a directory (mode 0700) of one file (mode
+0600) per entry, named by a SHA-256 of the key. The key holds the SHA-256 of
+the running executable (so any rebuild that changes the host code, the
+tokenizer, the presentation builder, the resize or the Metal host code starts
+a new key space), the GPU name, every `H3_*` environment variable except the
+cache, profiling, debug and prefetch ones, the real model path, the name, size,
+modification time and inode of every file of `text_encoder/` (which holds the
+vision tower too), the SHA-256 of `tokenizer.json` and of `h3_shaders.metal`,
+the prompt, and for every reference its decoded pixels (a SHA-256, so a
+renamed or touched file still hits, a changed pixel does not) and sizes. The
+file stores the whole key and the loader compares it byte for byte; an edit
+entry whose row count differs from the prompt's presentation length is
+ignored. A truncated, corrupt or other-format file is a miss with a warning
+line. Entries are never changed, only replaced and deleted, and a leftover
+temporary file older than an hour is removed with the next eviction.
+
+- `--no-cache` turns it off for the run (image models only).
+- `H3_CACHE_DIR` sets the directory (default `$HOME/.h3_cache/edit`).
+- `H3_CACHE_BYTES` caps the directory (default 2147483648). After each store
+  the entries with the oldest modification time go first; a hit refreshes its
+  file's time.
+- A library caller enables it with `h3_cache_set_directory(ctx, dir)`
+  (`NULL` disables, the default); it does not touch `h3_cache_set_enabled`,
+  which is the interactive video session's in-memory cache.
+
 ## Tests and runtime requirements
 
 ```sh

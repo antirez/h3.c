@@ -3,6 +3,13 @@
 #include "h3_host.h"
 #include "h3_dit.h"
 #include "h3_ffmpeg.h"
+#include "h3_image.h"
+#include "h3_image_cache.h"
+#include "h3_image_edit.h"
+#include "h3_image_pipeline.h"
+#include "h3_image_vae.h"
+#include "h3_image_vae_encode.h"
+#include "h3_gpu.h"
 #include "h3_metal.h"
 #include "h3_multimodal.h"
 #include "h3_safetensors.h"
@@ -13,6 +20,7 @@
 #include "h3_vision_encoder.h"
 
 #include <errno.h>
+#include <time.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -67,6 +75,12 @@ void h3_cache_set_enabled(h3_ctx *ctx, int enabled) {
     if (!ctx) return;
     if (!enabled) h3_cache_clear(ctx);
     ctx->cache_enabled = enabled != 0;
+}
+
+void h3_cache_set_directory(h3_ctx *ctx, const char *dir) {
+    if (!ctx) return;
+    free(ctx->cache_dir);
+    ctx->cache_dir = dir && *dir ? strdup(dir) : NULL;
 }
 
 void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info) {
@@ -172,19 +186,19 @@ static char *h3_prepared_key(const char *conditioning,
             "|slow=%d%d%d%d%d%d%d%d%d%d",
             conditioning, render_width, render_height, params->frames,
             params->steps, params->dit_layers, params->core_reuse,
-            params->token_reduction, params->use_int8_row_fc2,
+            params->token_reduction, params->tuning.use_int8_row_fc2,
             params->use_reference_rope,
-            params->ssd_streaming,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer)) {
+            params->tuning.ssd_streaming,
+            params->tuning.use_slower_bf16_mlp,
+            params->tuning.use_slower_bf16_qkv,
+            params->tuning.use_slower_bf16_attention_output,
+            params->tuning.use_slower_row_major_attention_output,
+            params->tuning.use_slower_unfused_int8_inputs,
+            params->tuning.use_slower_unfused_qkv_rope,
+            params->tuning.use_slower_scalar_qkv_rms,
+            params->tuning.use_slower_uncached_int8_scales,
+            params->tuning.use_slower_dynamic_fc1_k,
+            params->tuning.use_slower_grouped_quantizer)) {
         free(key.text);
         return NULL;
     }
@@ -371,11 +385,18 @@ static int h3_is_file(const char *path) {
     return stat(path, &status) == 0 && S_ISREG(status.st_mode);
 }
 
-static char *h3_path(const char *root, const char *relative) {
+char *h3_path(const char *root, const char *relative) {
     size_t size = strlen(root) + strlen(relative) + 2;
     char *result = malloc(size);
     if (result) snprintf(result, size, "%s/%s", root, relative);
     return result;
+}
+
+static int h3_is_file_in(const char *root, const char *relative) {
+    char *path = h3_path(root, relative);
+    int exists = path && h3_is_file(path);
+    free(path);
+    return exists;
 }
 
 static int h3_require_file(h3_ctx *ctx, const char *relative) {
@@ -421,7 +442,46 @@ h3_ctx *h3_load_dir(const char *model_dir) {
         free(ctx);
         return NULL;
     }
-    if (!h3_require_file(ctx, "FL2VA/transformer/config.json") ||
+    char *video_config = h3_path(model_dir, "FL2VA/transformer/config.json");
+    char *image_config = h3_path(model_dir,
+                                 "transformer_diffusers/config.json");
+    if (!video_config || !image_config) {
+        free(video_config);
+        free(image_config);
+        h3_set_error(ctx, "out of memory resolving model path");
+        snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
+        h3_free(ctx);
+        return NULL;
+    }
+    ctx->image = !h3_is_file(video_config) && h3_is_file(image_config);
+    free(video_config);
+    free(image_config);
+    char *image_directory = h3_path(model_dir, "transformer_diffusers");
+    struct stat image_status;
+    int partial_image = !ctx->image && image_directory &&
+        stat(image_directory, &image_status) == 0 &&
+        S_ISDIR(image_status.st_mode) &&
+        !h3_is_file_in(model_dir, "FL2VA/transformer/config.json");
+    free(image_directory);
+    if (partial_image &&
+        !h3_require_file(ctx, "transformer_diffusers/config.json")) {
+        snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
+        h3_free(ctx);
+        return NULL;
+    }
+    if (ctx->image) {
+        if (!h3_require_file(ctx, "vae_diffusers/config.json") ||
+            !h3_require_file(ctx, "tokenizer/tokenizer.json") ||
+            !h3_inventory(ctx, "text_encoder", &ctx->model.text_encoder) ||
+            !h3_inventory(ctx, "transformer_diffusers",
+                          &ctx->model.image_transformer) ||
+            !h3_inventory(ctx, "vae_diffusers", &ctx->model.image_vae)) {
+            snprintf(h3_global_error, sizeof(h3_global_error), "%s",
+                     ctx->error);
+            h3_free(ctx);
+            return NULL;
+        }
+    } else if (!h3_require_file(ctx, "FL2VA/transformer/config.json") ||
         !h3_require_file(ctx, "FL2VA/tokenizer/tokenizer.json") ||
         !h3_inventory(ctx, "FL2VA/text_encoder", &ctx->model.text_encoder) ||
         !h3_inventory(ctx, "FL2VA/transformer", &ctx->model.fl2va_transformer) ||
@@ -433,7 +493,7 @@ h3_ctx *h3_load_dir(const char *model_dir) {
     }
     /* Ref2VA is selected only by ordered-reference requests. Keep prompt-only
      * FL2VA usable while that optional 62 GiB checkpoint is not installed. */
-    char *ref_index = h3_path(
+    char *ref_index = ctx->image ? strdup("") : h3_path(
         ctx->model_dir, "Ref2VA/transformer/model.safetensors.index.json");
     if (!ref_index) {
         h3_set_error(ctx, "out of memory resolving optional Ref2VA path");
@@ -463,7 +523,12 @@ void h3_free(h3_ctx *ctx) {
     if (!ctx) return;
     h3_cache_clear(ctx);
     free(ctx->model_dir);
+    free(ctx->cache_dir);
     free(ctx);
+}
+
+int h3_is_image_model(const h3_ctx *ctx) {
+    return ctx && ctx->image;
 }
 
 const char *h3_last_error(const h3_ctx *ctx) {
@@ -536,8 +601,8 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "token reduction must be zero or one");
         return 0;
     }
-    if (params->use_int8_row_fc2 != 0 &&
-        params->use_int8_row_fc2 != 1) {
+    if (params->tuning.use_int8_row_fc2 != 0 &&
+        params->tuning.use_int8_row_fc2 != 1) {
         h3_set_error(ctx, "int8 row FC2 must be zero or one");
         return 0;
     }
@@ -546,20 +611,20 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "reference RoPE must be zero or one");
         return 0;
     }
-    if (params->ssd_streaming != 0 && params->ssd_streaming != 1) {
+    if (params->tuning.ssd_streaming != 0 && params->tuning.ssd_streaming != 1) {
         h3_set_error(ctx, "SSD streaming must be zero or one");
         return 0;
     }
-    if (params->ssd_streaming && params->use_int8_row_fc2) {
+    if (params->tuning.ssd_streaming && params->tuning.use_int8_row_fc2) {
         h3_set_error(ctx, "SSD streaming uses original BF16 weights and cannot "
                          "be combined with int8 row FC2");
         return 0;
     }
-    if (params->use_int8_row_fc2 && params->use_slower_bf16_mlp) {
+    if (params->tuning.use_int8_row_fc2 && params->tuning.use_slower_bf16_mlp) {
         h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
         return 0;
     }
-    if (params->use_int8_row_fc2 && !h3_device(ctx)->metal4) {
+    if (params->tuning.use_int8_row_fc2 && !h3_device(ctx)->metal4) {
         h3_set_error(ctx, "int8 row FC2 requires an M5-class Metal 4 GPU");
         return 0;
     }
@@ -636,28 +701,21 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
     return 1;
 }
 
-typedef struct {
-    h3_ctx *ctx;
-    const h3_params *params;
-    int cancelled;
-} h3_generation_progress;
-
-static void h3_progress_emit(h3_generation_progress *state, const char *phase,
-                             int completed, int total) {
-    if (!state || state->cancelled || !state->params->on_progress) return;
-    if (state->params->on_progress(phase, completed, total,
-                                   state->params->callback_opaque)) {
+void h3_progress_emit(h3_generation_progress *state, const char *phase,
+                      int completed, int total) {
+    if (!state || state->cancelled || !state->callback) return;
+    if (state->callback(phase, completed, total, state->opaque)) {
         state->cancelled = 1;
         h3_set_error(state->ctx, "generation cancelled during %s", phase);
     }
 }
 
-static void h3_text_progress_bridge(int completed, int total, void *opaque) {
+void h3_text_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "text encoder", completed, total);
 }
 
-static void h3_dit_progress_bridge(const char *phase, int completed, int total,
-                                   void *opaque) {
+void h3_dit_progress_bridge(const char *phase, int completed, int total,
+                            void *opaque) {
     h3_progress_emit(opaque, phase, completed, total);
 }
 
@@ -718,7 +776,7 @@ static h3_video_vae_decoder *h3_acquire_video_decoder(
     return decoder;
 }
 
-static void h3_vision_progress_bridge(int completed, int total, void *opaque) {
+void h3_vision_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "Qwen vision", completed, total);
 }
 
@@ -849,6 +907,10 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                        const h3_params *params) {
     if (!ctx) return NULL;
     ctx->error[0] = '\0';
+    if (ctx->image) {
+        h3_set_error(ctx, "this is an image checkpoint: use h3_generate_image");
+        return NULL;
+    }
     if (!prompt || !*prompt) {
         h3_set_error(ctx, "prompt must not be empty");
         return NULL;
@@ -868,7 +930,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "ordered references require the Ref2VA checkpoint");
         return NULL;
     }
-    h3_generation_progress progress = {ctx, params, 0};
+    h3_generation_progress progress = {
+        ctx, params->on_progress, params->callback_opaque, params, 0};
     h3_temporal_shape temporal = h3_temporal(params->frames);
     int latent_w, latent_h;
     h3_latent_canvas(render_width, render_height, &latent_w, &latent_h);
@@ -1479,19 +1542,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
             params->token_reduction,
-            params->ssd_streaming,
+            &params->tuning,
             spatial_rope_scale,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer,
-            params->use_int8_row_fc2,
             condition_video_rows, condition_video_elements,
             condition_audio_rows, condition_audio_elements,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
@@ -1500,19 +1552,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             dit_path, "h3_shaders.metal", &text, &layout, &sigmas,
             (unsigned)params->dit_layers, (unsigned)params->core_reuse,
             params->token_reduction,
-            params->ssd_streaming,
+            &params->tuning,
             spatial_rope_scale,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer,
-            params->use_int8_row_fc2,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
     }
     if (!dit) {

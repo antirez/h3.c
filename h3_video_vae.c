@@ -1,5 +1,6 @@
 #include "h3_video_vae.h"
 
+#include "h3_vae_tiles.h"
 #include "h3_weights.h"
 
 #include <errno.h>
@@ -25,17 +26,9 @@ enum {
     SUFFIX = 5,
     ROPE_HALF = 24,
     OUTPUT_PATCH = 3 * 4 * 16 * 16,
-    SPATIAL_RATIO = 16,
-    TILE_PIXELS = 256,
-    TILE_OVERLAP_MIN = 64
+    SPATIAL_RATIO = H3_VAE_SPATIAL_RATIO,
+    TILE_PIXELS = 256
 };
-
-typedef struct {
-    int count;
-    int length;
-    int *starts;
-    int *overlaps;
-} tile_axis;
 
 typedef struct {
     h3_gpu_tensor *norm1;
@@ -91,8 +84,8 @@ typedef struct {
 
 struct h3_video_vae_decoder {
     vae_context vae;
-    tile_axis y_axis;
-    tile_axis x_axis;
+    h3_vae_tile_axis y_axis;
+    h3_vae_tile_axis x_axis;
     int latent_h;
     int latent_w;
     float latent_mean[LATENT_CHANNELS];
@@ -648,21 +641,6 @@ static int unpack_frames(vae_context *vae, h3_video_frames *output,
                               error, error_size);
 }
 
-static void tile_axis_free(tile_axis *axis) {
-    if (!axis) return;
-    free(axis->starts);
-    free(axis->overlaps);
-    memset(axis, 0, sizeof(*axis));
-}
-
-static int tile_count_for_extent(int extent, int tile_pixels) {
-    if (extent <= tile_pixels) return 1;
-    int count = (extent + tile_pixels - 1) / tile_pixels;
-    while (tile_pixels * count - TILE_OVERLAP_MIN * (count - 1) < extent)
-        count++;
-    return count;
-}
-
 static int configured_tile_pixels(int pixel_height, int pixel_width) {
     const char *value = getenv("H3_VAE_TILE_PIXELS");
     if (value && *value) {
@@ -675,8 +653,8 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
     uint64_t best_score = UINT64_MAX;
     for (int pixels = TILE_PIXELS; pixels <= 320;
          pixels += SPATIAL_RATIO) {
-        uint64_t tiles = (uint64_t)tile_count_for_extent(pixel_height, pixels) *
-            (uint64_t)tile_count_for_extent(pixel_width, pixels);
+        uint64_t tiles = (uint64_t)h3_vae_tile_count(pixel_height, pixels) *
+            (uint64_t)h3_vae_tile_count(pixel_width, pixels);
         /* The resident VAE is dominated by linears and activation traffic;
          * measured tile cost follows area more closely than cubic sequence
          * growth at these shapes. Attention is still included in each tile. */
@@ -687,47 +665,6 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
         }
     }
     return best;
-}
-
-static int tile_axis_build(int extent, int tile_pixels, tile_axis *axis,
-                           char *error,
-                           size_t error_size) {
-    memset(axis, 0, sizeof(*axis));
-    if (extent < 1 || extent % SPATIAL_RATIO) {
-        fail(error, error_size, "video VAE tile extent must be a multiple of %d",
-             SPATIAL_RATIO);
-        return 0;
-    }
-    if (extent <= tile_pixels) {
-        axis->count = 1;
-        axis->length = extent;
-        axis->starts = calloc(1, sizeof(*axis->starts));
-        if (!axis->starts) {
-            fail(error, error_size, "out of memory constructing VAE tile plan");
-            return 0;
-        }
-        return 1;
-    }
-    int count = tile_count_for_extent(extent, tile_pixels);
-    axis->starts = calloc((size_t)count, sizeof(*axis->starts));
-    axis->overlaps = malloc((size_t)(count - 1) * sizeof(*axis->overlaps));
-    if (!axis->starts || !axis->overlaps) {
-        tile_axis_free(axis);
-        fail(error, error_size, "out of memory constructing VAE tile plan");
-        return 0;
-    }
-    for (int index = 0; index < count - 1; index++)
-        axis->overlaps[index] = TILE_OVERLAP_MIN;
-    int remaining = tile_pixels * count - TILE_OVERLAP_MIN * (count - 1) -
-                    extent;
-    for (int unit = 0; unit < remaining / SPATIAL_RATIO; unit++)
-        axis->overlaps[unit % (count - 1)] += SPATIAL_RATIO;
-    for (int index = 1; index < count; index++)
-        axis->starts[index] = axis->starts[index - 1] + tile_pixels -
-                              axis->overlaps[index - 1];
-    axis->count = count;
-    axis->length = tile_pixels;
-    return 1;
 }
 
 static float *extract_latent_tile(const float *latent, int full_t,
@@ -756,76 +693,6 @@ static float *extract_latent_tile(const float *latent, int full_t,
                        (size_t)tile_w * sizeof(*tile));
             }
     return tile;
-}
-
-static int stitch_tiles(float **tiles, const tile_axis *y_axis,
-                        const tile_axis *x_axis, int frame_count,
-                        h3_video_frames *output,
-                        char *error, size_t error_size) {
-    int full_h = y_axis->starts[y_axis->count - 1] + y_axis->length;
-    int full_w = x_axis->starts[x_axis->count - 1] + x_axis->length;
-    size_t count = (size_t)frame_count * (size_t)full_h *
-                   (size_t)full_w * 3;
-    float *rgb = malloc(count * sizeof(*rgb));
-    if (!rgb) {
-        fail(error, error_size, "out of memory stitching video VAE tiles");
-        return 0;
-    }
-    for (int tile_y = 0; tile_y < y_axis->count; tile_y++)
-        for (int tile_x = 0; tile_x < x_axis->count; tile_x++) {
-            int index = tile_y * x_axis->count + tile_x;
-            const float *current = tiles[index];
-            const float *above = tile_y ? tiles[index - x_axis->count] : NULL;
-            const float *left = tile_x ? tiles[index - 1] : NULL;
-            int overlap_y = tile_y ? y_axis->overlaps[tile_y - 1] : 0;
-            int overlap_x = tile_x ? x_axis->overlaps[tile_x - 1] : 0;
-            int keep_h = y_axis->length -
-                (tile_y + 1 < y_axis->count ? y_axis->overlaps[tile_y] : 0);
-            int keep_w = x_axis->length -
-                (tile_x + 1 < x_axis->count ? x_axis->overlaps[tile_x] : 0);
-            for (int frame = 0; frame < frame_count; frame++)
-                for (int y = 0; y < keep_h; y++)
-                    for (int x = 0; x < keep_w; x++)
-                        for (int channel = 0; channel < 3; channel++) {
-                            size_t local = (((size_t)frame *
-                                (size_t)y_axis->length + (size_t)y) *
-                                (size_t)x_axis->length + (size_t)x) * 3 +
-                                (size_t)channel;
-                            float value = current[local];
-                            if (above && y < overlap_y) {
-                                size_t top = (((size_t)frame *
-                                    (size_t)y_axis->length +
-                                    (size_t)(y_axis->length - overlap_y + y)) *
-                                    (size_t)x_axis->length + (size_t)x) * 3 +
-                                    (size_t)channel;
-                                float alpha = (float)y / (float)overlap_y;
-                                value = above[top] * (1.0f - alpha) +
-                                        value * alpha;
-                            }
-                            if (left && x < overlap_x) {
-                                size_t prior = (((size_t)frame *
-                                    (size_t)y_axis->length + (size_t)y) *
-                                    (size_t)x_axis->length +
-                                    (size_t)(x_axis->length - overlap_x + x)) *
-                                    3 + (size_t)channel;
-                                float alpha = (float)x / (float)overlap_x;
-                                value = left[prior] * (1.0f - alpha) +
-                                        value * alpha;
-                            }
-                            size_t destination = (((size_t)frame *
-                                (size_t)full_h +
-                                (size_t)(y_axis->starts[tile_y] + y)) *
-                                (size_t)full_w +
-                                (size_t)(x_axis->starts[tile_x] + x)) * 3 +
-                                (size_t)channel;
-                            rgb[destination] = value;
-                        }
-        }
-    output->frames = frame_count;
-    output->height = full_h;
-    output->width = full_w;
-    output->rgb = rgb;
-    return 1;
 }
 
 static int decoder_decode_chunk(h3_video_vae_decoder *decoder,
@@ -880,7 +747,7 @@ static int decoder_decode_chunk(h3_video_vae_decoder *decoder,
                 tiles[index] = tile.rgb;
             }
         }
-    if (ok) ok = stitch_tiles(tiles, &decoder->y_axis, &decoder->x_axis,
+    if (ok) ok = h3_vae_stitch_tiles(tiles, &decoder->y_axis, &decoder->x_axis,
                               frame_count, output, error, error_size);
     for (int index = 0; index < tile_count; index++) free(tiles[index]);
     free(tiles);
@@ -915,9 +782,9 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
     int ok = load_latent_normalization(
         weight_directory, decoder->latent_mean, decoder->latent_std,
         error, error_size) &&
-        tile_axis_build(latent_height * SPATIAL_RATIO, tile_pixels,
+        h3_vae_tile_axis_build(latent_height * SPATIAL_RATIO, tile_pixels,
                         &decoder->y_axis, error, error_size) &&
-        tile_axis_build(latent_width * SPATIAL_RATIO, tile_pixels,
+        h3_vae_tile_axis_build(latent_width * SPATIAL_RATIO, tile_pixels,
                         &decoder->x_axis, error, error_size);
     if (ok && getenv("H3_PROFILE"))
         fprintf(stderr, "h3: resident video VAE tiles %dx%d at %d pixels\n",
@@ -1039,8 +906,8 @@ int h3_video_vae_decoder_decode(h3_video_vae_decoder *decoder,
 void h3_video_vae_decoder_free(h3_video_vae_decoder *decoder) {
     if (!decoder) return;
     cleanup(&decoder->vae);
-    tile_axis_free(&decoder->y_axis);
-    tile_axis_free(&decoder->x_axis);
+    h3_vae_tile_axis_free(&decoder->y_axis);
+    h3_vae_tile_axis_free(&decoder->x_axis);
     free(decoder);
 }
 
@@ -1053,17 +920,17 @@ static int decode_chunked(const char *weight_directory,
                           h3_video_vae_progress progress, void *progress_opaque,
                           h3_video_frames *output, char *error,
                           size_t error_size) {
-    tile_axis y_axis, x_axis;
+    h3_vae_tile_axis y_axis, x_axis;
     memset(&y_axis, 0, sizeof(y_axis));
     memset(&x_axis, 0, sizeof(x_axis));
-    int ok = tile_axis_build(latent_height * SPATIAL_RATIO, tile_pixels,
+    int ok = h3_vae_tile_axis_build(latent_height * SPATIAL_RATIO, tile_pixels,
                              &y_axis,
                              error, error_size) &&
-             tile_axis_build(latent_width * SPATIAL_RATIO, tile_pixels,
+             h3_vae_tile_axis_build(latent_width * SPATIAL_RATIO, tile_pixels,
                              &x_axis,
                              error, error_size);
     if (!ok) {
-        tile_axis_free(&y_axis); tile_axis_free(&x_axis);
+        h3_vae_tile_axis_free(&y_axis); h3_vae_tile_axis_free(&x_axis);
         return 0;
     }
     if (getenv("H3_PROFILE"))
@@ -1136,7 +1003,7 @@ static int decode_chunked(const char *weight_directory,
             }
         h3_video_frames decoded;
         memset(&decoded, 0, sizeof(decoded));
-        if (ok) ok = stitch_tiles(tiles, &y_axis, &x_axis,
+        if (ok) ok = h3_vae_stitch_tiles(tiles, &y_axis, &x_axis,
                                   FIRST_CHUNK_FRAMES, &decoded,
                                   error, error_size);
         for (int index = 0; index < tile_count; index++) free(tiles[index]);
@@ -1171,7 +1038,7 @@ static int decode_chunked(const char *weight_directory,
     free(final_rgb);
     free(temporal_overlap);
     cleanup(&vae);
-    tile_axis_free(&y_axis); tile_axis_free(&x_axis);
+    h3_vae_tile_axis_free(&y_axis); h3_vae_tile_axis_free(&x_axis);
     return ok;
 }
 

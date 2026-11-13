@@ -6,6 +6,7 @@
 #include "h3_gpu.h"
 
 #include <errno.h>
+#include <libproc.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
@@ -177,6 +178,17 @@ static int h3_gpu_profile_enabled(void) {
     return value && *value && strcmp(value, "0");
 }
 
+int h3_gpu_process_footprint(double *current_gib, double *peak_gib) {
+    struct rusage_info_v4 usage;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&usage))
+        return 0;
+    if (current_gib)
+        *current_gib = (double)usage.ri_phys_footprint / 1073741824.0;
+    if (peak_gib)
+        *peak_gib = (double)usage.ri_lifetime_max_phys_footprint / 1073741824.0;
+    return 1;
+}
+
 static uint64_t h3_gpu_counter_delta(uint64_t value, uint64_t start) {
     return value >= start ? value - start : 0;
 }
@@ -187,10 +199,13 @@ static void h3_gpu_profile_emit(H3GPU *gpu, NSString *phase,
     h3_gpu_stats value = gpu.stats;
     double wall = h3_gpu_now() - wall_start;
     NSString *label = gpu.profileLabel ? gpu.profileLabel : @"Metal context";
+    double footprint = 0.0, footprint_peak = 0.0;
+    h3_gpu_process_footprint(&footprint, &footprint_peak);
     fprintf(stderr,
         "h3 profile: %-24s %-14s wall=%8.3fs encode=%7.3fs "
         "wait=%8.3fs root-gpu=%7.3fs "
-        "peak=%7.3fGiB alloc=%7.3fGiB submissions=%llu "
+        "peak=%7.3fGiB alloc=%7.3fGiB footprint=%7.3fGiB footprint-max=%7.3fGiB "
+        "submissions=%llu "
         "direct=%llu linear=%llu conv=%llu attention=%llu\n",
         label.UTF8String, phase.UTF8String, wall,
         value.command_encode_seconds - start.command_encode_seconds,
@@ -200,6 +215,7 @@ static void h3_gpu_profile_emit(H3GPU *gpu, NSString *phase,
         (double)h3_gpu_counter_delta(value.allocated_bytes,
                                      start.allocated_bytes) /
             (1024.0 * 1024.0 * 1024.0),
+        footprint, footprint_peak,
         (unsigned long long)h3_gpu_counter_delta(value.submissions,
                                                  start.submissions),
         (unsigned long long)h3_gpu_counter_delta(value.direct_dispatches,
@@ -722,12 +738,15 @@ h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *opaque, const char *path,
 static int h3_gpu_tensor_read_file_bf16_mode(
                                  h3_gpu_tensor *opaque, const char *path,
                                  uint64_t file_offset, size_t elements,
+                                 size_t destination_offset, int whole,
                                  int uncached,
                                  char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (!opaque || !path || !*path ||
         TENSOR(opaque).dtype != H3_GPU_BF16 ||
-        elements != TENSOR(opaque).elements ||
+        (whole && elements != TENSOR(opaque).elements) ||
+        destination_offset > TENSOR(opaque).elements ||
+        elements > TENSOR(opaque).elements - destination_offset ||
         elements > SIZE_MAX / sizeof(uint16_t) || file_offset > INT64_MAX) {
         if (error && error_size)
             snprintf(error, error_size, "invalid BF16 file read request");
@@ -751,7 +770,8 @@ static int h3_gpu_tensor_read_file_bf16_mode(
 #else
     (void)uncached;
 #endif
-    unsigned char *destination = TENSOR(opaque).buffer.contents;
+    unsigned char *destination = (unsigned char *)TENSOR(opaque).buffer.contents +
+        destination_offset * sizeof(uint16_t);
     size_t completed = 0;
     while (completed < bytes) {
         size_t request = MIN(bytes - completed, (size_t)SSIZE_MAX);
@@ -778,14 +798,27 @@ int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *opaque, const char *path,
                                  uint64_t file_offset, size_t elements,
                                  char *error, size_t error_size) {
     return h3_gpu_tensor_read_file_bf16_mode(
-        opaque, path, file_offset, elements, 0, error, error_size);
+        opaque, path, file_offset, elements, 0, 1, 0, error, error_size);
 }
 
-int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *opaque, const char *path,
-                                   uint64_t file_offset, size_t elements,
-                                   char *error, size_t error_size) {
+int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *opaque,
+                                       size_t destination_offset,
+                                       const char *path,
+                                       uint64_t file_offset, size_t elements,
+                                       char *error, size_t error_size) {
     return h3_gpu_tensor_read_file_bf16_mode(
-        opaque, path, file_offset, elements, 1, error, error_size);
+        opaque, path, file_offset, elements, destination_offset, 0, 0,
+        error, error_size);
+}
+
+int h3_gpu_tensor_stream_file_bf16_range(h3_gpu_tensor *opaque,
+                                         size_t destination_offset,
+                                         const char *path,
+                                         uint64_t file_offset, size_t elements,
+                                         char *error, size_t error_size) {
+    return h3_gpu_tensor_read_file_bf16_mode(
+        opaque, path, file_offset, elements, destination_offset, 0, 1,
+        error, error_size);
 }
 
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor) {
@@ -3054,6 +3087,11 @@ int h3_gpu_mlp_int8_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
                          int use_int8_row_fc2,
                          int input_is_quantized) {
     H3GPU *gpu = GPU(opaque);
+    if (rows < 128) {
+        h3_gpu_set_error(gpu, @"int8 MLP needs at least 128 rows, got %u",
+                         rows);
+        return 0;
+    }
     uint32_t padded_rows = (rows + 127u) & ~127u;
     uint32_t fc2_scale_groups = hidden_dim / 1024u;
     size_t activation_capacity = (size_t)padded_rows *

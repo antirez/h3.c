@@ -31,4 +31,30 @@ h3_gpu_tensor *h3_weight_load_f32(const h3_weight_store *store, h3_gpu *gpu,
                                   const uint64_t *shape,
                                   char *error, size_t error_size);
 
+/* Source and destination of one head_dim-row slab of the grouped
+ * [head][q,k,v][head_dim] QKV matrix: the projection (0 = q, 1 = k, 2 = v) it
+ * comes from and the element offsets in that projection's matrix and in the
+ * grouped matrix. Returns 0 for a slab outside 3 * heads. */
+int h3_weight_qkv_slab(size_t slab, unsigned heads, unsigned head_dim,
+                       uint64_t columns, unsigned *projection,
+                       uint64_t *source_offset, uint64_t *destination_offset);
+
+/* Load three [heads * head_dim, columns] BF16 projections into one grouped
+ * [head][q,k,v][head_dim] matrix with 3 * heads ranged reads straight from the
+ * shard files. */
+h3_gpu_tensor *h3_weight_load_bf16_qkv(const h3_weight_store *store,
+                                       h3_gpu *gpu, const char *q_name,
+                                       const char *k_name, const char *v_name,
+                                       unsigned heads, unsigned head_dim,
+                                       uint64_t columns,
+                                       char *error, size_t error_size);
+
+/* Load a [rows, columns] BF16 matrix whose two row halves are exchanged when
+ * swap_halves is set (two half-tensor ranged reads). */
+h3_gpu_tensor *h3_weight_load_bf16_halves(const h3_weight_store *store,
+                                          h3_gpu *gpu, const char *name,
+                                          uint64_t rows, uint64_t columns,
+                                          int swap_halves,
+                                          char *error, size_t error_size);
+
 #endif

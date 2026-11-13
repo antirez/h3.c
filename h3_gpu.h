@@ -59,12 +59,22 @@ h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *gpu, const char *path,
 int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                  uint64_t file_offset, size_t elements,
                                  char *error, size_t error_size);
-/* As above, but ask Darwin to avoid retaining a second copy in the file cache.
- * Intended for large sequential weight streams whose destination is the only
- * useful resident copy. */
-int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *tensor, const char *path,
-                                   uint64_t file_offset, size_t elements,
-                                   char *error, size_t error_size);
+/* Read `elements` BF16 values from the file into the tensor starting at element
+ * `destination_offset`; the rest of the tensor is untouched. */
+int h3_gpu_tensor_read_file_bf16_range(h3_gpu_tensor *tensor,
+                                       size_t destination_offset,
+                                       const char *path,
+                                       uint64_t file_offset, size_t elements,
+                                       char *error, size_t error_size);
+/* Read `elements` BF16 values into the tensor starting at element
+ * `destination_offset`, asking Darwin to avoid retaining a second copy in the
+ * file cache. Intended for large sequential weight streams whose destination
+ * is the only useful resident copy. */
+int h3_gpu_tensor_stream_file_bf16_range(h3_gpu_tensor *tensor,
+                                         size_t destination_offset,
+                                         const char *path,
+                                         uint64_t file_offset, size_t elements,
+                                         char *error, size_t error_size);
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor);
 size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor);
 h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor);
@@ -93,6 +103,9 @@ int h3_gpu_continue(h3_gpu *gpu);
 int h3_gpu_submit(h3_gpu *gpu);
 const char *h3_gpu_error(const h3_gpu *gpu);
 int h3_gpu_get_stats(const h3_gpu *gpu, h3_gpu_stats *stats);
+/* Physical footprint of this process in GiB, now and its lifetime maximum.
+ * Unlike the GPU buffer statistics it includes MPSGraph transients. */
+int h3_gpu_process_footprint(double *current_gib, double *peak_gib);
 /* Optional benchmark labels. With H3_PROFILE set, marks and context teardown
  * print wall time alongside command-buffer GPU time and allocation counters. */
 void h3_gpu_profile_set_label(h3_gpu *gpu, const char *label);

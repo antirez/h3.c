@@ -193,9 +193,9 @@ static void print_status(const h3_cli_state *state) {
            state->params.steps, state->params.denoise_reuse,
            state->params.dit_layers, state->params.core_reuse,
            state->params.token_reduction ? "reduced" : "full",
-           state->params.ssd_streaming ? "SSD BF16" : "resident",
-           state->params.ssd_streaming ? "BF16" :
-           state->params.use_int8_row_fc2 ? "int8 row" : "int8 grouped");
+           state->params.tuning.ssd_streaming ? "SSD BF16" : "resident",
+           state->params.tuning.ssd_streaming ? "BF16" :
+           state->params.tuning.use_int8_row_fc2 ? "int8 row" : "int8 grouped");
     printf("Spatial RoPE: %s\n", state->params.use_reference_rope ?
            "released reference" : "native 256 adapted");
     if (state->random_seed) puts("Seed: random");
@@ -587,24 +587,24 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
         }
     } else if (!strcasecmp(command, "ssd-streaming")) {
         int value;
-        if (!parse_toggle(argument, state->params.ssd_streaming, &value))
+        if (!parse_toggle(argument, state->params.tuning.ssd_streaming, &value))
             fprintf(stderr, "h3: use on or off\n");
-        else if (value && state->params.use_int8_row_fc2)
+        else if (value && state->params.tuning.use_int8_row_fc2)
             fprintf(stderr,
                     "h3: disable !int8-row-fc2 before SSD streaming\n");
         else {
-            state->params.ssd_streaming = value;
+            state->params.tuning.ssd_streaming = value;
             printf("SSD streaming: %s\n", value ? "on" : "off");
         }
     } else if (!strcasecmp(command, "int8-row-fc2")) {
         int value;
-        if (!parse_toggle(argument, state->params.use_int8_row_fc2, &value))
+        if (!parse_toggle(argument, state->params.tuning.use_int8_row_fc2, &value))
             fprintf(stderr, "h3: use on or off\n");
-        else if (value && state->params.ssd_streaming)
+        else if (value && state->params.tuning.ssd_streaming)
             fprintf(stderr,
                     "h3: disable !ssd-streaming before int8 row FC2\n");
         else {
-            state->params.use_int8_row_fc2 = value;
+            state->params.tuning.use_int8_row_fc2 = value;
             printf("FC2 int8 row scaling: %s\n", value ? "on" : "off");
         }
     } else if (!strcasecmp(command, "reference-rope")) {

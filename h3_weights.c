@@ -145,6 +145,10 @@ static h3_gpu_tensor *load_tensor(const h3_weight_store *store, h3_gpu *gpu,
                                   const char *name, int ndim,
                                   const uint64_t *shape, h3_dtype dtype,
                                   char *error, size_t error_size) {
+    if (!name) {
+        fail(error, error_size, "weight name is missing for this model family");
+        return NULL;
+    }
     const h3_st_header *header = NULL;
     const h3_st_tensor *tensor = h3_weight_find(store, name, &header);
     if (!tensor) {
@@ -199,4 +203,120 @@ h3_gpu_tensor *h3_weight_load_f32(const h3_weight_store *store, h3_gpu *gpu,
                                   char *error, size_t error_size) {
     return load_tensor(store, gpu, name, ndim, shape, H3_DTYPE_F32,
                        error, error_size);
+}
+
+static int find_bf16_matrix(const h3_weight_store *store, const char *name,
+                            uint64_t rows, uint64_t columns,
+                            const h3_st_header **header,
+                            const h3_st_tensor **tensor,
+                            char *error, size_t error_size) {
+    *tensor = name ? h3_weight_find(store, name, header) : NULL;
+    if (!*tensor) {
+        if (!name) {
+            fail(error, error_size,
+                 "weight name is missing for this model family");
+            return 0;
+        }
+        fail(error, error_size, "required weight is absent: %s", name);
+        return 0;
+    }
+    if ((*tensor)->dtype != H3_DTYPE_BF16 || (*tensor)->ndim != 2 ||
+        (*tensor)->shape[0] != rows || (*tensor)->shape[1] != columns ||
+        columns == 0 || rows > SIZE_MAX / columns) {
+        fail(error, error_size, "weight %s has the wrong BF16 matrix shape",
+             name);
+        return 0;
+    }
+    return 1;
+}
+
+int h3_weight_qkv_slab(size_t slab, unsigned heads, unsigned head_dim,
+                       uint64_t columns, unsigned *projection,
+                       uint64_t *source_offset, uint64_t *destination_offset) {
+    if (!heads || !head_dim || !columns || !projection || !source_offset ||
+        !destination_offset || slab >= (size_t)3 * heads) return 0;
+    uint64_t slab_elements = (uint64_t)head_dim * columns;
+    *projection = (unsigned)(slab % 3);
+    *source_offset = (slab / 3) * slab_elements;
+    *destination_offset = slab * slab_elements;
+    return 1;
+}
+
+h3_gpu_tensor *h3_weight_load_bf16_qkv(const h3_weight_store *store,
+                                       h3_gpu *gpu, const char *q_name,
+                                       const char *k_name, const char *v_name,
+                                       unsigned heads, unsigned head_dim,
+                                       uint64_t columns,
+                                       char *error, size_t error_size) {
+    const char *names[3] = {q_name, k_name, v_name};
+    const h3_st_header *headers[3];
+    const h3_st_tensor *tensors[3];
+    uint64_t rows = (uint64_t)heads * head_dim;
+    for (unsigned index = 0; index < 3; index++) {
+        if (!find_bf16_matrix(store, names[index], rows, columns,
+                              &headers[index], &tensors[index],
+                              error, error_size)) return NULL;
+    }
+    size_t elements = (size_t)(3 * rows * columns);
+    h3_gpu_tensor *result = h3_gpu_tensor_new_bf16(gpu, elements);
+    if (!result) {
+        fail(error, error_size, "cannot allocate grouped QKV for %s: %s",
+             q_name, h3_gpu_error(gpu));
+        return NULL;
+    }
+    size_t slab_elements = (size_t)head_dim * columns;
+    for (size_t slab = 0; slab < (size_t)3 * heads; slab++) {
+        unsigned projection;
+        uint64_t source, destination;
+        if (!h3_weight_qkv_slab(slab, heads, head_dim, columns, &projection,
+                                &source, &destination) ||
+            !h3_gpu_tensor_read_file_bf16_range(
+                result, (size_t)destination, headers[projection]->path,
+                tensors[projection]->file_offset +
+                    source * sizeof(uint16_t),
+                slab_elements, error, error_size)) {
+            if (error && error_size && !error[0])
+                fail(error, error_size, "invalid grouped QKV slab %zu", slab);
+            h3_gpu_tensor_free(result);
+            return NULL;
+        }
+    }
+    return result;
+}
+
+h3_gpu_tensor *h3_weight_load_bf16_halves(const h3_weight_store *store,
+                                          h3_gpu *gpu, const char *name,
+                                          uint64_t rows, uint64_t columns,
+                                          int swap_halves,
+                                          char *error, size_t error_size) {
+    if (!name || rows % 2) {
+        fail(error, error_size, "weight %s cannot be split into halves",
+             name ? name : "(unnamed)");
+        return NULL;
+    }
+    const h3_st_header *header;
+    const h3_st_tensor *tensor;
+    if (!find_bf16_matrix(store, name, rows, columns, &header, &tensor,
+                          error, error_size)) return NULL;
+    size_t half = (size_t)(rows / 2 * columns);
+    h3_gpu_tensor *result = h3_gpu_tensor_new_bf16(gpu, 2 * half);
+    if (!result) {
+        fail(error, error_size, "cannot allocate %s: %s", name,
+             h3_gpu_error(gpu));
+        return NULL;
+    }
+    for (unsigned index = 0; index < 2; index++) {
+        size_t destination = (swap_halves ? 1 - index : index) * half;
+        if (!h3_gpu_tensor_read_file_bf16_range(
+                result, destination, header->path,
+                tensor->file_offset + (uint64_t)index * half *
+                    sizeof(uint16_t),
+                half, error, error_size)) {
+            if (error && error_size && !error[0])
+                fail(error, error_size, "cannot read %s", name);
+            h3_gpu_tensor_free(result);
+            return NULL;
+        }
+    }
+    return result;
 }

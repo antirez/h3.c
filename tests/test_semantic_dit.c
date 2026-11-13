@@ -89,9 +89,15 @@ int main(int argc, char **argv) {
     if (!h3_schedule_build(20, &sigmas)) die("cannot build sampler schedule");
     char weights[1024];
     snprintf(weights, sizeof(weights), "%s/FL2VA/transformer", model_root);
+    const h3_dit_tuning tuning = {
+        .use_slower_bf16_qkv = 1, .use_slower_bf16_attention_output = 1,
+        .use_slower_row_major_attention_output = 1,
+        .use_slower_unfused_int8_inputs = 1,
+        .use_slower_unfused_qkv_rope = 1, .use_slower_scalar_qkv_rms = 1,
+        .use_slower_uncached_int8_scales = 1
+    };
     h3_dit *dit = h3_dit_load_t2va(weights, "h3_shaders.metal", &text,
-                                    &layout, &sigmas, 50, 1, 0, 0, 1.0f, 0, 1, 1, 1,
-                                    1, 1, 1, 1, 0, 0, 0,
+                                    &layout, &sigmas, 50, 1, 0, &tuning, 1.0f,
                                     progress, NULL,
                                     error, sizeof(error));
     if (!dit) die(error);

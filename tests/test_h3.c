@@ -1,8 +1,18 @@
 #include "h3_host.h"
 #include "h3_dit.h"
+#include "h3_dit_names.h"
+#include "h3_dit_schedule.h"
+#include "h3_dit_family.h"
+#include "h3_image.h"
+#include "h3_image_edit.h"
+#include "h3_image_pipeline.h"
+#include "h3_image_vae.h"
+#include "h3_image_vae_encode.h"
 #include "h3_metal.h"
 #include "h3_safetensors.h"
+#include "h3_vae_tiles.h"
 #include "h3_terminal.h"
+#include "h3_weights.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -182,6 +192,12 @@ static void test_layout_tiny(void) {
     CHECK(close_enough(sums[0], 339.6666666666667, 1e-10));
     CHECK(close_enough(weighted[0], 6498.0, 1e-10));
     CHECK(sums[1] == 0.0 && sums[2] == 0.0);
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
+    CHECK(summary.video_target_start == 28 && summary.audio_target_start == 12);
+    CHECK(summary.video_condition == 0 && summary.audio_condition == 0);
+    CHECK(summary.video_target == 2 && summary.audio_target == 16);
     h3_layout_free(&layout);
 }
 
@@ -208,6 +224,12 @@ static void test_layout_fl2va(void) {
     CHECK(close_enough(weighted[0], 5883121758.0, 1e-4));
     CHECK(close_enough(sums[1], 117002.11801356057, 1e-7));
     CHECK(close_enough(sums[2], 119830.2393846486, 1e-7));
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 128, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
+    CHECK(summary.video_target_start == 1124 && summary.audio_target_start == 938);
+    CHECK(summary.video_condition == 810 && summary.audio_condition == 0);
+    CHECK(summary.video_target == 6885 && summary.audio_target == 186);
     h3_layout_free(&layout);
 }
 
@@ -240,7 +262,52 @@ static void test_layout_ref2va(void) {
     CHECK(close_enough(weighted[0], 12788836714.0, 1e-3));
     CHECK(close_enough(sums[1], 115719.96684277552, 1e-7));
     CHECK(close_enough(sums[2], 122360.11344760543, 1e-7));
+    h3_layout_summary summary;
+    CHECK(h3_layout_validate(&layout, 192, &summary, error, sizeof(error)));
+    CHECK(!summary.image);
+    CHECK(summary.video_target_start == 1402 && summary.audio_target_start == 1216);
+    CHECK(summary.video_condition == 768 && summary.audio_condition == 256);
+    CHECK(summary.video_target == 6885 && summary.audio_target == 186);
     h3_layout_free(&layout);
+}
+
+static void test_layout_validate(void) {
+    h3_layout layout;
+    h3_layout_summary summary;
+    char error[256];
+    CHECK(h3_layout_build_image(3, 4, 4, NULL, 0, &layout, error, sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    CHECK(summary.image && summary.video_target == 4 && summary.video_target_start == 3);
+    CHECK(summary.video_condition == 0 && summary.audio_target == 0);
+    CHECK(!h3_layout_validate(&layout, 4, &summary, error, sizeof(error)));
+    layout.signature[1] = 2;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    layout.signature[1] = 1;
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    h3_layout_free(&layout);
+
+    const h3_layout_ref reference = {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0};
+    CHECK(h3_layout_build_image(3, 4, 4, &reference, 1, &layout,
+                                error, sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    CHECK(summary.video_condition == 1 && summary.video_target_start == 4);
+    layout.segments[1].kind = H3_SEG_COND;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    layout.segments[1].kind = H3_SEG_REF_AUDIO;
+    layout.audio_cond_rows = 1;
+    layout.img_cond_rows = 0;
+    CHECK(!h3_layout_validate(&layout, 3, &summary, error, sizeof(error)));
+    h3_layout_free(&layout);
+
+    const h3_layout_spec no_audio[2] = {
+        {12, 1, 2, 2, 0, 5, NULL, 0, NULL, 0},
+        {12, 2, 2, 2, 0, 5, NULL, 0, NULL, 0}
+    };
+    for (size_t index = 0; index < 2; index++) {
+        CHECK(h3_layout_build(&no_audio[index], &layout, error, sizeof(error)));
+        CHECK(!h3_layout_validate(&layout, 12, &summary, error, sizeof(error)));
+        h3_layout_free(&layout);
+    }
 }
 
 static void write_all(int descriptor, const void *data, size_t size) {
@@ -373,6 +440,1077 @@ static void test_dit_row_conversions(void) {
     CHECK(memcmp(audio, unpacked, sizeof(audio)) == 0);
 }
 
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void test_image_schedule(void) {
+    h3_sigma_schedule schedule;
+    CHECK(h3_dit_image_schedule_build(&schedule));
+    CHECK(schedule.steps == 6);
+    const uint32_t sigma_bits[7] = {
+        0x3f800000, 0x3f77afa2, 0x3f633661, 0x3f400000,
+        0x3f0863df, 0x3e6d93bc, 0x00000000
+    };
+    const uint32_t timestep_bits[6] = {
+        0x00000000, 0x3d0505e0, 0x3de64cf8, 0x3e800000, 0x3eef3842, 0x3f449b11
+    };
+    const float deltas[6] = {
+        0.032476306f, 0.07997519f, 0.1375485f, 0.21722609f, 0.30076504f,
+        0.23200887f
+    };
+    for (int index = 0; index <= 6; index++) {
+        CHECK(float_bits(schedule.video[index]) == sigma_bits[index]);
+        CHECK(float_bits(schedule.audio[index]) == sigma_bits[index]);
+    }
+    for (int index = 0; index < 6; index++) {
+        CHECK(float_bits(1.0f - schedule.video[index]) == timestep_bits[index]);
+        CHECK(close_enough(schedule.video[index] - schedule.video[index + 1],
+                           deltas[index], 1e-7));
+    }
+    CHECK(!h3_dit_image_schedule_build(NULL));
+}
+
+static void test_image_canvas(void) {
+    const struct { int width, height, min_area, canvas_w, canvas_h; } cases[] = {
+        {1024, 1024, 4194304, 2048, 2048},
+        {768, 1024, 4194304, 1760, 2368},
+        {1024, 768, 4194304, 2368, 1760},
+        {1920, 1080, 4194304, 2720, 1536},
+        {1000, 1000, 1024, 992, 992},
+        {4096, 4096, 4194304, 4096, 4096},
+        {16, 16, 1024, 32, 32},
+        {48, 80, 1024, 64, 64}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int canvas_w = 0, canvas_h = 0;
+        CHECK(h3_image_canvas(cases[index].height, cases[index].width,
+                              cases[index].min_area, &canvas_h, &canvas_w));
+        CHECK(canvas_w == cases[index].canvas_w);
+        CHECK(canvas_h == cases[index].canvas_h);
+    }
+    int canvas_w, canvas_h;
+    CHECK(h3_image_canvas(1024, 1024, 1024, &canvas_h, &canvas_w));
+    CHECK(h3_image_canvas(1024, 1024, 16777216, &canvas_h, &canvas_w));
+    CHECK(canvas_w == 4096 && canvas_h == 4096);
+    CHECK(!h3_image_canvas(1024, 1024, 1023, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, 1024, 16777217, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(0, 1024, 4194304, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, -1, 4194304, &canvas_h, &canvas_w));
+    CHECK(!h3_image_canvas(1024, 1024, 4194304, NULL, &canvas_w));
+}
+
+static void test_image_canvas_limits(void) {
+    const struct { int width, height, min_area; int accepted; } cases[] = {
+        {1024, 1024, 4194304, 1}, {4096, 4096, 4194304, 1},
+        {2048, 8192, 1024, 1}, {16384, 1024, 1024, 1},
+        {10000, 100, 4194304, 0}, {16384, 64, 4194304, 0},
+        {16384, 16384, 4194304, 0}, {8192, 4096, 1024, 1},
+        {4128, 4128, 1024, 1}, {6272, 2688, 1024, 1}, {5792, 5792, 1024, 1},
+        {8224, 4096, 1024, 0}, {8192, 4128, 1024, 0}, {5824, 5824, 1024, 0},
+        {16384, 2048, 1024, 1}, {16384, 2080, 1024, 0}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int canvas_w, canvas_h;
+        CHECK(h3_image_canvas(cases[index].height, cases[index].width,
+                              cases[index].min_area, &canvas_h, &canvas_w));
+        const char *reason = h3_image_canvas_error(canvas_h, canvas_w);
+        CHECK((reason == NULL) == cases[index].accepted);
+        if (reason) CHECK(strchr(reason, '\n') == NULL);
+    }
+}
+
+static void test_image_parse_size(void) {
+    int width = 7, height = 7;
+    CHECK(h3_parse_size("512x768", &width, &height));
+    CHECK(width == 512 && height == 768);
+    CHECK(h3_parse_size("1X2", &width, &height));
+    CHECK(width == 1 && height == 2);
+    CHECK(h3_parse_size("2147483647x1", &width, &height));
+    CHECK(width == 2147483647);
+    const char *const bad[] = {
+        "", "x", "512", "512x", "x512", " 512x512", "512x512 ", "512 x512",
+        "512x 512", "512x+512", "+512x512", "-512x512", "512x-512", "0x512",
+        "512x0", "512x512x512", "512x512\n", "2147483648x1", "1x99999999999",
+        "5_12x512", "0x1p3x512"
+    };
+    for (size_t index = 0; index < sizeof(bad) / sizeof(bad[0]); index++) {
+        width = height = 7;
+        CHECK(!h3_parse_size(bad[index], &width, &height));
+        CHECK(width == 7 && height == 7);
+    }
+    CHECK(!h3_parse_size(NULL, &width, &height));
+}
+
+static void test_image_layout(void) {
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build_image(3, 4, 4, NULL, 0, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 7);
+    const size_t bounds[][2] = {{0, 3}, {3, 7}};
+    const h3_segment_kind kinds[] = {H3_SEG_TEXT, H3_SEG_VIDEO};
+    check_segments(&layout, bounds, kinds, 2);
+    CHECK(layout.img_cond_rows == 0 && layout.img_target_rows == 4);
+    CHECK(layout.audio_cond_rows == 0 && layout.audio_target_rows == 0);
+    const int signature[5] = {3, 1, 4, 4, 0};
+    CHECK(memcmp(layout.signature, signature, sizeof(signature)) == 0);
+    for (size_t row = 0; row < 3; row++) {
+        CHECK(layout.positions[row].t == (double)row);
+        CHECK(layout.positions[row].h == 0.0 && layout.positions[row].w == 0.0);
+    }
+    const double axis[2] = {0.0, 16.0};
+    for (size_t row = 0; row < 4; row++) {
+        CHECK(layout.positions[3 + row].t == 3.0);
+        CHECK(close_enough(layout.positions[3 + row].h, axis[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, axis[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    CHECK(h3_layout_build_image(3, 6, 4, NULL, 0, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 9 && layout.img_target_rows == 6);
+    const double heights[3] = {-3.59591794, 9.46802735, 22.53197265};
+    const double widths[2] = {2.93605471, 16.0};
+    for (size_t row = 0; row < 6; row++) {
+        CHECK(close_enough(layout.positions[3 + row].h, heights[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, widths[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    const h3_layout_ref refs[2] = {
+        {H3_LAYOUT_REF_IMAGE, 1, 2, 4, 0}, {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0}
+    };
+    CHECK(h3_layout_build_image(2, 4, 4, refs, 2, &layout,
+                                error, sizeof(error)));
+    CHECK(layout.seq_len == 2 + 2 + 1 + 4);
+    const size_t ref_bounds[][2] = {{0, 2}, {2, 4}, {4, 5}, {5, 9}};
+    const h3_segment_kind ref_kinds[] = {
+        H3_SEG_TEXT, H3_SEG_REF_IMAGE, H3_SEG_REF_IMAGE, H3_SEG_VIDEO
+    };
+    check_segments(&layout, ref_bounds, ref_kinds, 4);
+    CHECK(layout.img_cond_rows == 3 && layout.img_target_rows == 4);
+    CHECK(layout.positions[2].t == 2.0 && layout.positions[4].t == 3.0);
+    CHECK(layout.positions[5].t == 4.0);
+    CHECK(close_enough(layout.positions[2].h, 4.6862915, 1e-6));
+    CHECK(close_enough(layout.positions[2].w, -6.627417, 1e-6));
+    CHECK(close_enough(layout.positions[3].h, 4.6862915, 1e-6));
+    CHECK(close_enough(layout.positions[3].w, 16.0, 1e-6));
+    CHECK(close_enough(layout.positions[4].h, 0.0, 1e-6));
+    CHECK(close_enough(layout.positions[4].w, 0.0, 1e-6));
+    h3_layout_free(&layout);
+
+    const h3_layout_ref audio = {H3_LAYOUT_REF_AUDIO, 0, 0, 0, 4};
+    CHECK(!h3_layout_build_image(3, 4, 4, &audio, 1, &layout,
+                                 error, sizeof(error)));
+    CHECK(error[0] != '\0' && layout.positions == NULL);
+    CHECK(!h3_layout_build_image(0, 4, 4, NULL, 0, &layout,
+                                 error, sizeof(error)));
+    CHECK(!h3_layout_build_image(3, 3, 4, NULL, 0, &layout,
+                                 error, sizeof(error)));
+}
+
+static void test_image_rope_inv_freq(void) {
+    const uint32_t dit[16] = {
+        0x3f800000, 0x3f0ff59a, 0x3ea1e89b, 0x3e361887, 0x3dcccccd, 0x3d6655c2,
+        0x3d0186e3, 0x3c91ad39, 0x3c23d70a, 0x3bb8449c, 0x3b4f3e38, 0x3ae91528,
+        0x3a83126f, 0x3a136a16, 0x39a5cb60, 0x393a7753
+    };
+    float values[16];
+    h3_dit_image_inv_freq(values);
+    for (size_t index = 0; index < 16; index++)
+        CHECK(float_bits(values[index]) == dit[index]);
+    h3_image_vae_inv_freq(values);
+    for (size_t index = 0; index < 8; index++)
+        CHECK(float_bits(values[index]) == dit[index]);
+}
+
+static void test_image_timestep_features(void) {
+    float row[H3_DIT_TIME_INPUT];
+    h3_dit_time_features(0.032476306f, row);
+    CHECK(close_enough(row[0], 0.9994727, 1e-6));
+    CHECK(close_enough(row[128], 0.0324706, 1e-6));
+    CHECK(close_enough(row[127], 1.0, 1e-6));
+    CHECK(close_enough(row[128 + 2], 0.02811961, 1e-6));
+    h3_dit_time_features(0.0f, row);
+    CHECK(row[0] == 1.0f && row[128] == 0.0f && row[255] == 0.0f);
+}
+
+static void test_image_patchify(void) {
+    enum { C = 24, H = 4, W = 4, ELEMENTS = C * H * W, ROWS = 4, ROW = C * 4 };
+    float latent[ELEMENTS], rows[ELEMENTS], roundtrip[ELEMENTS];
+    for (size_t index = 0; index < ELEMENTS; index++) latent[index] = (float)index;
+    CHECK(h3_dit_patchify_video(latent, C, 1, H, W, rows, ELEMENTS));
+    for (size_t row = 0; row < ROWS; row++) {
+        for (size_t c = 0; c < C; c++) {
+            for (size_t dh = 0; dh < 2; dh++) {
+                for (size_t dw = 0; dw < 2; dw++) {
+                    size_t y = 2 * (row / 2) + dh, x = 2 * (row % 2) + dw;
+                    CHECK(rows[row * ROW + c * 4 + dh * 2 + dw] ==
+                          latent[(c * H + y) * W + x]);
+                }
+            }
+        }
+    }
+    CHECK(h3_dit_unpatchify_video(rows, C, 1, H, W, roundtrip, ELEMENTS));
+    CHECK(memcmp(latent, roundtrip, sizeof(latent)) == 0);
+}
+
+typedef struct {
+    int next_step;
+    int progress_calls;
+    int cancel_after;
+} sampler_probe;
+
+static int probe_velocity(void *opaque, int step, const float *rows,
+                          float *velocity, char *error, size_t error_size) {
+    sampler_probe *probe = opaque;
+    (void)error; (void)error_size;
+    if (step != probe->next_step++) return 0;
+    for (size_t index = 0; index < 24 * 4 * 6; index++)
+        velocity[index] = 0.5f * (float)(step + 1) - rows[index];
+    return 1;
+}
+
+static int probe_progress(int completed, int total, void *opaque) {
+    sampler_probe *probe = opaque;
+    CHECK(total == 6 && completed == probe->progress_calls);
+    probe->progress_calls++;
+    return probe->cancel_after >= 0 && completed == probe->cancel_after;
+}
+
+static void test_image_sampler(void) {
+    enum { C = 24, H = 4, W = 6, ELEMENTS = C * H * W };
+    static const double sigma[7] = {1.0, 0.9675237, 0.8875485, 0.75,
+                                    0.5327739, 0.23200887, 0.0};
+    float noise[ELEMENTS], latent[ELEMENTS];
+    for (size_t index = 0; index < ELEMENTS; index++)
+        noise[index] = (float)((int)(index % 7) - 3) * 0.4f;
+    sampler_probe probe = {0, 0, -1};
+    char error[128];
+    CHECK(h3_image_sample(H, W, noise, probe_velocity, &probe, probe_progress,
+                          &probe, latent, error, sizeof(error)));
+    CHECK(probe.next_step == 6 && probe.progress_calls == 7);
+    /* v = target - x makes every element follow its own relaxation. */
+    for (size_t index = 0; index < ELEMENTS; index++) {
+        double x = (double)noise[index];
+        for (int step = 0; step < 6; step++)
+            x += (sigma[step] - sigma[step + 1]) *
+                 (0.5 * (double)(step + 1) - x);
+        CHECK(close_enough((double)latent[index], x, 2e-6));
+    }
+    /* In place, and a cancelled run reports an error. */
+    memcpy(latent, noise, sizeof(latent));
+    probe = (sampler_probe){0, 0, -1};
+    CHECK(h3_image_sample(H, W, latent, probe_velocity, &probe, NULL, NULL,
+                          latent, error, sizeof(error)));
+    probe = (sampler_probe){0, 0, 2};
+    CHECK(!h3_image_sample(H, W, noise, probe_velocity, &probe, probe_progress,
+                           &probe, latent, error, sizeof(error)));
+    CHECK(probe.next_step == 2 && strstr(error, "cancelled") != NULL);
+    CHECK(!h3_image_sample(3, W, noise, probe_velocity, &probe, NULL, NULL,
+                           latent, error, sizeof(error)));
+}
+
+static void test_image_noise_and_interleave(void) {
+    enum { H = 2, W = 4, ELEMENTS = 24 * H * W };
+    float first[ELEMENTS], again[ELEMENTS], other[ELEMENTS];
+    h3_image_noise(42, H, W, first);
+    h3_image_noise(42, H, W, again);
+    h3_image_noise(43, H, W, other);
+    CHECK(memcmp(first, again, sizeof(first)) == 0);
+    CHECK(memcmp(first, other, sizeof(first)) != 0);
+    h3_rng rng;
+    h3_rng_seed(&rng, 42);
+    float direct[ELEMENTS];
+    h3_rng_fill_normal(&rng, direct, ELEMENTS);
+    CHECK(memcmp(first, direct, sizeof(first)) == 0);
+    const uint8_t planar[12] = {1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24};
+    uint8_t interleaved[12];
+    h3_image_interleave_rgb(planar, 2, 2, interleaved);
+    const uint8_t want[12] = {1, 11, 21, 2, 12, 22, 3, 13, 23, 4, 14, 24};
+    CHECK(memcmp(interleaved, want, sizeof(want)) == 0);
+}
+
+static void test_image_qkv_interleave(void) {
+    const struct { unsigned heads, head_dim; } shapes[] = {{56, 128}, {16, 64}};
+    for (size_t shape = 0; shape < 2; shape++) {
+        unsigned heads = shapes[shape].heads, dim = shapes[shape].head_dim;
+        size_t rows = (size_t)3 * heads * dim;
+        unsigned char *seen = calloc(rows, 1);
+        CHECK(seen != NULL);
+        for (size_t dest = 0; dest < rows; dest++) {
+            unsigned projection;
+            size_t source;
+            CHECK(h3_dit_qkv_source(dest, heads, dim, &projection, &source));
+            size_t head = dest / ((size_t)3 * dim);
+            CHECK(projection == (dest / dim) % 3);
+            CHECK(source == head * dim + dest % dim);
+            size_t flat = projection * (size_t)heads * dim + source;
+            CHECK(!seen[flat]);
+            seen[flat] = 1;
+        }
+        free(seen);
+        unsigned projection;
+        size_t source;
+        CHECK(!h3_dit_qkv_source(rows, heads, dim, &projection, &source));
+    }
+    unsigned projection;
+    size_t source;
+    CHECK(h3_dit_qkv_source(56 * 384 - 1, 56, 128, &projection, &source));
+    CHECK(projection == 2 && source == 56 * 128 - 1);
+    CHECK(h3_dit_qkv_source(128, 56, 128, &projection, &source));
+    CHECK(projection == 1 && source == 0);
+    CHECK(h3_dit_qkv_source(384 + 2 * 128 + 5, 56, 128, &projection, &source));
+    CHECK(projection == 2 && source == 128 + 5);
+    CHECK(h3_dit_qkv_source(192 + 64 + 5, 16, 64, &projection, &source));
+    CHECK(projection == 1 && source == 64 + 5);
+    CHECK(!h3_dit_qkv_source(0, 0, 128, &projection, &source));
+}
+
+static void test_dit_names(void) {
+    const h3_dit_names *video = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
+    const h3_dit_names *image = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
+    CHECK(video && image && video != image);
+    CHECK(video->family == H3_DIT_FAMILY_VIDEO);
+    CHECK(image->family == H3_DIT_FAMILY_IMAGE);
+    char name[160];
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 7,
+                            video->qkv));
+    CHECK(strcmp(name, "blocks.7.attn.qkv_proj.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 49, video->fc1));
+    CHECK(strcmp(name, "blocks.49.mlp.fc1.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 0, 0,
+                            video->adaln_bias));
+    CHECK(strcmp(name, "blocks.0.adaln_proj.linear.bias") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), video, 1, 1, video->q_norm));
+    CHECK(strcmp(name, "token_refiner.blocks.1.attn.q_norm.weight") == 0);
+    CHECK(strcmp(video->time_in_weight, "time_embedder.proj_in.weight") == 0);
+    CHECK(strcmp(video->time_out_bias, "time_embedder.proj_out.bias") == 0);
+    CHECK(strcmp(video->condition_weight, "condition_proj.weight") == 0);
+    CHECK(strcmp(video->patch_weight, "video_patch_proj.weight") == 0);
+    CHECK(strcmp(video->final_norm, "final_layer.norm.weight") == 0);
+    CHECK(strcmp(video->final_adaln_weight,
+                 "final_layer.adaln_proj.linear.weight") == 0);
+    CHECK(strcmp(video->refiner_final_norm,
+                 "token_refiner.final_norm.weight") == 0);
+    CHECK(strcmp(video->rope_inv_freq, "rope.inv_freq") == 0);
+    CHECK(video->q == NULL && video->k == NULL && video->v == NULL);
+    CHECK(video->audio_patch_weight && video->audio_head_weight);
+    CHECK(h3_dit_name_format(name, sizeof(name), video->head_weight, 3));
+    CHECK(strcmp(name, "final_layer.video_out.weight") == 0);
+
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 12, image->q));
+    CHECK(strcmp(name, "transformer_blocks.12.attn.to_q.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->v));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.to_v.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->k_norm));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.norm_k.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 0, image->out));
+    CHECK(strcmp(name, "transformer_blocks.0.attn.to_out.0.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 49, image->fc1));
+    CHECK(strcmp(name, "transformer_blocks.49.ff.net.0.proj.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 3, image->fc2));
+    CHECK(strcmp(name, "transformer_blocks.3.ff.net.2.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 0, 3,
+                            image->adaln_weight));
+    CHECK(strcmp(name, "transformer_blocks.3.adaln_proj.linear.weight") == 0);
+    CHECK(h3_dit_block_name(name, sizeof(name), image, 1, 0, image->norm1));
+    CHECK(strcmp(name, "token_refiner.refiner_blocks.0.norm1.weight") == 0);
+    CHECK(strcmp(image->time_in_weight, "time_embedder.linear_1.weight") == 0);
+    CHECK(strcmp(image->time_out_bias, "time_embedder.linear_2.bias") == 0);
+    CHECK(strcmp(image->condition_bias, "context_embedder.bias") == 0);
+    CHECK(strcmp(image->patch_weight, "proj_in.weight") == 0);
+    CHECK(strcmp(image->final_norm, "norm_out.norm.weight") == 0);
+    CHECK(strcmp(image->final_adaln_bias, "norm_out.linear.bias") == 0);
+    CHECK(strcmp(image->refiner_final_norm,
+                 "token_refiner.final_norm.weight") == 0);
+    CHECK(h3_dit_name_format(name, sizeof(name), image->head_weight, 5));
+    CHECK(strcmp(name, "pdd_proj_out.5.weight") == 0);
+    CHECK(h3_dit_name_format(name, sizeof(name), image->head_bias, 0));
+    CHECK(strcmp(name, "pdd_proj_out.0.bias") == 0);
+    CHECK(image->qkv == NULL && image->rope_inv_freq == NULL);
+    CHECK(image->audio_patch_weight == NULL && image->audio_head_weight == NULL);
+
+    char tiny[8];
+    CHECK(!h3_dit_block_name(tiny, sizeof(tiny), image, 0, 0, image->q));
+    CHECK(!h3_dit_block_name(name, sizeof(name), image, 0, 0, NULL));
+    CHECK(!h3_dit_name_format(name, sizeof(name), NULL, 0));
+    CHECK(h3_dit_names_for((h3_dit_family)99) == NULL);
+}
+
+static void test_image_dit_bookkeeping(void) {
+    h3_layout layout;
+    h3_layout_summary summary;
+    char error[256];
+    CHECK(h3_layout_build_image(5, 32, 32, NULL, 0, &layout, error,
+                                sizeof(error)));
+    CHECK(h3_layout_validate(&layout, 5, &summary, error, sizeof(error)));
+    CHECK(layout.seq_len == 5 + 256);
+    CHECK(layout.audio_target_rows == 0 && layout.img_target_rows == 256);
+    CHECK(summary.audio_condition == 0 && summary.audio_target == 0);
+    CHECK(summary.video_condition == 0 && summary.video_target == 256);
+    CHECK(summary.video_target_start == 5);
+    CHECK(layout.segment_count == 2);
+    CHECK(layout.segments[0].kind == H3_SEG_TEXT &&
+          layout.segments[1].kind == H3_SEG_VIDEO);
+    h3_layout_free(&layout);
+
+    CHECK(h3_dit_image_rows(NULL) == 0);
+
+    h3_sigma_schedule schedule;
+    CHECK(h3_dit_image_schedule_build(&schedule));
+    for (int step = 0; step < H3_DIT_IMAGE_STEPS; step++) {
+        CHECK(schedule.video[step] == schedule.audio[step]);
+        for (int other = 0; other < step; other++)
+            CHECK(schedule.video[step] != schedule.video[other]);
+    }
+}
+
+static void test_missing_weight_names(void) {
+    const h3_dit_names *image = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
+    const h3_dit_names *video = h3_dit_names_for(H3_DIT_FAMILY_VIDEO);
+    CHECK(image->audio_patch_weight == NULL && image->audio_patch_bias == NULL);
+    CHECK(image->audio_head_weight == NULL && image->audio_head_bias == NULL);
+    CHECK(video->audio_patch_weight && video->audio_patch_bias);
+    CHECK(video->audio_head_weight && video->audio_head_bias);
+    uint64_t shape[2] = {2, 2};
+    char error[256] = "";
+    CHECK(h3_weight_load_bf16(NULL, NULL, image->audio_patch_weight, 2, shape,
+                              error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_f32(NULL, NULL, image->audio_head_bias, 1, shape,
+                             error, sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_bf16_qkv(NULL, NULL, NULL, "k", "v", 2, 2, 2, error,
+                                  sizeof(error)) == NULL);
+    CHECK(strstr(error, "missing") != NULL);
+    error[0] = '\0';
+    CHECK(h3_weight_load_bf16_halves(NULL, NULL, NULL, 4, 2, 1, error,
+                                     sizeof(error)) == NULL);
+    CHECK(error[0] != '\0');
+}
+
+static void test_qkv_slab_plan(void) {
+    const uint64_t columns = 5376, slab = 128 * columns;
+    unsigned projection;
+    uint64_t source, destination;
+    CHECK(h3_weight_qkv_slab(0, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 0 && source == 0 && destination == 0);
+    CHECK(h3_weight_qkv_slab(1, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 1 && source == 0 && destination == slab);
+    CHECK(h3_weight_qkv_slab(5, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 2 && source == slab && destination == 5 * slab);
+    CHECK(h3_weight_qkv_slab(167, 56, 128, columns, &projection, &source,
+                             &destination));
+    CHECK(projection == 2 && source == 55 * slab && destination == 167 * slab);
+    CHECK(!h3_weight_qkv_slab(168, 56, 128, columns, &projection, &source,
+                              &destination));
+    CHECK(!h3_weight_qkv_slab(0, 0, 128, columns, &projection, &source,
+                              &destination));
+
+    /* Applying the plan to three small matrices gives the row order that
+     * h3_dit_qkv_source describes. */
+    enum { HEADS = 3, DIM = 4, COLUMNS = 5 };
+    int matrices[3][HEADS * DIM * COLUMNS];
+    int grouped[3 * HEADS * DIM * COLUMNS];
+    for (int p = 0; p < 3; p++)
+        for (int index = 0; index < HEADS * DIM * COLUMNS; index++)
+            matrices[p][index] = p * 1000 + index;
+    for (size_t slab_index = 0; slab_index < 3 * HEADS; slab_index++) {
+        CHECK(h3_weight_qkv_slab(slab_index, HEADS, DIM, COLUMNS,
+                                 &projection, &source, &destination));
+        memcpy(grouped + destination, matrices[projection] + source,
+               DIM * COLUMNS * sizeof(int));
+    }
+    for (size_t row = 0; row < 3 * HEADS * DIM; row++) {
+        size_t source_row;
+        CHECK(h3_dit_qkv_source(row, HEADS, DIM, &projection, &source_row));
+        CHECK(memcmp(grouped + row * COLUMNS,
+                     matrices[projection] + source_row * COLUMNS,
+                     COLUMNS * sizeof(int)) == 0);
+    }
+}
+
+static void check_tile_axis(int extent, int count, const int *overlaps) {
+    h3_vae_tile_axis axis;
+    char error[256];
+    CHECK(h3_vae_tile_axis_build(extent, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == count && axis.length == 256);
+    CHECK(axis.starts[0] == 0);
+    for (int index = 1; index < count; index++) {
+        CHECK(axis.overlaps[index - 1] == overlaps[index - 1]);
+        CHECK(axis.starts[index] ==
+              axis.starts[index - 1] + 256 - overlaps[index - 1]);
+    }
+    CHECK(axis.starts[count - 1] + axis.length == extent);
+    h3_vae_tile_axis_free(&axis);
+}
+
+static void test_image_vae_tiles(void) {
+    int overlaps[20];
+    for (int index = 0; index < 20; index++) overlaps[index] = 64;
+    check_tile_axis(4096, 21, overlaps);
+    h3_vae_tile_axis axis;
+    char error[256];
+    CHECK(h3_vae_tile_axis_build(4096, 256, &axis, error, sizeof(error)));
+    CHECK(axis.starts[1] == 192 && axis.starts[2] == 384);
+    h3_vae_tile_axis_free(&axis);
+
+    for (int index = 0; index < 8; index++) overlaps[index] = 80;
+    overlaps[8] = overlaps[9] = 64;
+    check_tile_axis(2048, 11, overlaps);
+    overlaps[0] = overlaps[1] = 128;
+    check_tile_axis(512, 3, overlaps);
+
+    CHECK(h3_vae_tile_axis_build(256, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == 1 && axis.length == 256 && axis.starts[0] == 0);
+    h3_vae_tile_axis_free(&axis);
+    CHECK(h3_vae_tile_axis_build(160, 256, &axis, error, sizeof(error)));
+    CHECK(axis.count == 1 && axis.length == 160);
+    h3_vae_tile_axis_free(&axis);
+    CHECK(!h3_vae_tile_axis_build(250, 256, &axis, error, sizeof(error)));
+    CHECK(error[0] != '\0');
+    CHECK(h3_vae_tile_count(4096, 256) == 21);
+    CHECK(h3_vae_tile_count(2048, 256) == 11);
+}
+
+static void test_image_unpack_2d(void) {
+    enum { HL = 2, WL = 3, PATCH = 768 };
+    float *rows = malloc((size_t)HL * WL * PATCH * sizeof(*rows));
+    float *rgb = malloc((size_t)HL * WL * 256 * 3 * sizeof(*rgb));
+    CHECK(rows && rgb);
+    for (int patch = 0; patch < HL * WL; patch++)
+        for (int component = 0; component < PATCH; component++)
+            rows[patch * PATCH + component] = (float)(patch * 1000 + component);
+    h3_image_vae_unpack_patches(rows, HL, WL, rgb);
+    const int width = WL * 16;
+    /* pixel (y, x, channel): patch (y / 16) * WL + x / 16, component
+     * (channel * 16 + y % 16) * 16 + x % 16 */
+    CHECK(rgb[(0 * width + 0) * 3 + 0] == 0.0f);
+    CHECK(rgb[(0 * width + 1) * 3 + 0] == 1.0f);
+    CHECK(rgb[(1 * width + 0) * 3 + 0] == 16.0f);
+    CHECK(rgb[(0 * width + 0) * 3 + 1] == 256.0f);
+    CHECK(rgb[(0 * width + 0) * 3 + 2] == 512.0f);
+    CHECK(rgb[(0 * width + 16) * 3 + 0] == 1000.0f);
+    CHECK(rgb[(17 * width + 35) * 3 + 2] == 5531.0f);
+    CHECK(rgb[(31 * width + 47) * 3 + 1] == 5511.0f);
+    free(rows);
+    free(rgb);
+
+    /* Raw decoder values 0, 3, -5 per channel: 0 maps to the ImageNet mean,
+     * 3 and -5 clamp to the ends of [0, 1]; 0.9999 truncates to 254. */
+    const float raw_nine = (0.9999f - 0.485f) / 0.229f;
+    float data[3 * 4] = {
+        0.0f, 3.0f, -5.0f, raw_nine,
+        0.0f, 3.0f, -5.0f, 0.0f,
+        0.0f, 3.0f, -5.0f, 0.0f
+    };
+    h3_image_planes planes = {2, 2, data, {0}};
+    h3_image_planes_to_rgb(&planes);
+    CHECK(close_enough(data[0], 0.485, 1e-6) && data[1] == 1.0f && data[2] == 0.0f);
+    CHECK(close_enough(data[3], 0.9999, 1e-6));
+    CHECK(close_enough(data[4], 0.456, 1e-6));
+    CHECK(close_enough(data[8], 0.406, 1e-6));
+    uint8_t bytes[12];
+    h3_image_planes_to_u8(&planes, bytes);
+    CHECK(bytes[0] == 123 && bytes[1] == 255 && bytes[2] == 0 && bytes[3] == 254);
+    CHECK(bytes[4] == 116 && bytes[8] == 103);
+}
+
+static void test_image_vae_config_parse(void) {
+    float values[3];
+    char error[256];
+    CHECK(h3_image_vae_parse_float_array("{\"a\": 1, \"m\": [0.5, -1.5,\n 2e1]}",
+                                         "m", values, 3, error, sizeof(error)));
+    CHECK(values[0] == 0.5f && values[1] == -1.5f && values[2] == 20.0f);
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2]}", "m", values, 3,
+                                          error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2, 3, 4]}", "m", values,
+                                          3, error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, NaN, 3]}", "m", values,
+                                          3, error, sizeof(error)));
+    CHECK(!h3_image_vae_parse_float_array("{\"m\": [1, 2, 3]}", "n", values, 3,
+                                          error, sizeof(error)));
+    CHECK(error[0] != '\0');
+}
+
+static void test_reference_size_rule(void) {
+    /* width, height, then the expected size with the reference bounds
+     * (1024, 2048) and with the vision bounds (1024, 1024). */
+    const struct { int width, height, reference_w, reference_h, vision_w,
+                   vision_h; } cases[] = {
+        {256, 256, 1024, 1024, 1024, 1024},
+        /* 260 * 4 / 32 = 32.5 rounds to 32, not 33 */
+        {260, 256, 1024, 1024, 1024, 1024},
+        {1023, 1500, 1024, 1504, 1024, 1504},
+        {1024, 1024, 1024, 1024, 1024, 1024},
+        {1024, 1100, 1024, 1100, 1024, 1100},
+        {1100, 1050, 1100, 1050, 1088, 1024},
+        {2048, 3000, 2048, 3000, 1024, 1504},
+        {2049, 2049, 2048, 2048, 1024, 1024},
+        {2100, 4000, 2048, 3904, 1024, 1952},
+        {3000, 2100, 2912, 2048, 1472, 1024},
+        {500, 3000, 1024, 6144, 1024, 6144},
+        {250, 370, 1024, 1504, 1024, 1504},
+        {370, 250, 1504, 1024, 1504, 1024},
+        {32, 32, 1024, 1024, 1024, 1024},
+        {1030, 1050, 1030, 1050, 1024, 1056},
+        {4096, 2160, 3872, 2048, 1952, 1024},
+        {1500, 1500, 1500, 1500, 1024, 1024},
+        {777, 513, 1536, 1024, 1536, 1024},
+        {1920, 1080, 1920, 1080, 1824, 1024},
+        {1080, 1920, 1080, 1920, 1024, 1824},
+        {3000, 2000, 3000, 2000, 1536, 1024},
+        {4000, 3000, 2720, 2048, 1376, 1024},
+        {640, 480, 1376, 1024, 1376, 1024},
+        {1500, 1024, 1500, 1024, 1500, 1024},
+        {1024, 1500, 1024, 1500, 1024, 1500},
+        {2000, 3000, 2000, 3000, 1024, 1536}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int width = 0, height = 0;
+        CHECK(h3_image_edit_bound_short_edge(
+            cases[index].width, cases[index].height,
+            H3_REFERENCE_MIN_SHORT_EDGE, H3_REFERENCE_MAX_SHORT_EDGE,
+            &width, &height));
+        CHECK(width == cases[index].reference_w &&
+              height == cases[index].reference_h);
+        CHECK(h3_image_edit_bound_short_edge(
+            cases[index].width, cases[index].height,
+            H3_VISION_MIN_SHORT_EDGE, H3_VISION_MAX_SHORT_EDGE,
+            &width, &height));
+        CHECK(width == cases[index].vision_w && height == cases[index].vision_h);
+    }
+    int width, height;
+    CHECK(!h3_image_edit_bound_short_edge(0, 256, 1024, 2048, &width, &height));
+    CHECK(!h3_image_edit_bound_short_edge(256, 256, 0, 2048, &width, &height));
+    CHECK(!h3_image_edit_bound_short_edge(33, 2000000000, 1024, 2048, &width,
+                                          &height));
+}
+
+static void test_image_edit_smart_resize(void) {
+    /* (h, w) -> (h, w) */
+    const struct { int h, w, out_h, out_w; } cases[] = {
+        {1024, 1024, 1024, 1024}, {1024, 1500, 1024, 1504},
+        {1504, 1024, 1504, 1024}, {1024, 1040, 1024, 1024},
+        {1024, 1056, 1024, 1056}, {200, 200, 256, 256},
+        {4096, 8192, 2880, 5792}, {32, 32, 256, 256}, {100, 40, 416, 192}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        int w, h;
+        CHECK(h3_image_edit_smart_resize(cases[index].w, cases[index].h, &w, &h));
+        CHECK(w == cases[index].out_w && h == cases[index].out_h);
+    }
+    int w, h;
+    CHECK(!h3_image_edit_smart_resize(6500, 32, &w, &h));
+}
+
+static void test_image_edit_geometry(void) {
+    h3_image_reference_geometry g;
+    CHECK(h3_image_edit_reference_geometry(256, 256, &g));
+    CHECK(g.vae_w == 1024 && g.vae_h == 1024 && g.crop_w == 1024 &&
+          g.crop_h == 1024 && g.latent_w == 64 && g.latent_h == 64 &&
+          g.dit_rows == 1024 && g.vision_w == 1024 && g.vision_h == 1024 &&
+          g.vision_tokens == 1024);
+    CHECK(h3_image_edit_reference_geometry(1500, 1024, &g));
+    CHECK(g.vae_w == 1500 && g.vae_h == 1024 && g.crop_w == 1488 &&
+          g.crop_h == 1024 && g.latent_w == 92 && g.latent_h == 64 &&
+          g.dit_rows == 46 * 32 && g.vision_w == 1504 && g.vision_h == 1024 &&
+          g.vision_tokens == 1504);
+    CHECK(h3_image_edit_reference_geometry(1046, 1050, &g));
+    CHECK(g.crop_w == 1040 && g.crop_h == 1040 && g.latent_w == 64 &&
+          g.latent_h == 64);
+    CHECK(!h3_image_edit_reference_geometry(31, 100, &g));
+}
+
+static void test_image_edit_aug_constant(void) {
+    float aug = H3_REFERENCE_NOISE_AUG, remainder = 1.0f - H3_REFERENCE_NOISE_AUG;
+    float decimal = 0.001f;
+    uint32_t aug_bits, remainder_bits, decimal_bits;
+    memcpy(&aug_bits, &aug, 4);
+    memcpy(&remainder_bits, &remainder, 4);
+    memcpy(&decimal_bits, &decimal, 4);
+    CHECK(aug_bits == 0x3F7FBE77u);
+    CHECK(remainder_bits == 0x3A831200u);
+    CHECK(decimal_bits == 0x3A83126Fu);
+    CHECK(remainder != decimal);
+}
+
+static void test_image_edit_tags(void) {
+    size_t largest = 99;
+    uint32_t mask = 99;
+    h3_image_edit_scan_tags("<Picture 1> and <Picture 2>", 2, &largest, &mask);
+    CHECK(largest == 2 && mask == 3u);
+    h3_image_edit_scan_tags("<Picture 3>", 1, &largest, &mask);
+    CHECK(largest == 3 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture1> <picture 1> <Picture 1 > <Picture >",
+                            2, &largest, &mask);
+    CHECK(largest == 0 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture 0> no tags", 2, &largest, &mask);
+    CHECK(largest == 0 && mask == 0u);
+    h3_image_edit_scan_tags("<Picture 2><Picture 2> <Picture 12> <Picture 99999999999>",
+                            3, &largest, &mask);
+    CHECK(largest == 12 && mask == 2u);
+    h3_image_edit_scan_tags("", 1, &largest, NULL);
+    CHECK(largest == 0);
+    h3_image_edit_scan_tags("<Picture 1>", 1, NULL, &mask);
+    CHECK(mask == 1u);
+}
+
+static void test_image_edit_streams(void) {
+    const uint64_t seed = 42;
+    CHECK(h3_image_edit_stream(seed, 1, 0) != seed);
+    CHECK(h3_image_edit_stream(seed, 2, 0) != seed);
+    CHECK(h3_image_edit_stream(seed, 1, 0) != h3_image_edit_stream(seed, 2, 0));
+    CHECK(h3_image_edit_stream(seed, 1, 0) != h3_image_edit_stream(seed, 1, 1));
+    CHECK(h3_image_edit_stream(seed, 1, 0) == h3_image_edit_stream(seed, 1, 0));
+    CHECK(h3_image_edit_stream(seed, 1, 0) == (42u ^ UINT64_C(0x9E3779B97F4A7C15) * 2u));
+    CHECK(h3_image_edit_stream(seed, 2, 3) == (42u ^ UINT64_C(0x9E3779B97F4A7C15) * 9u));
+    uint64_t seen[16];
+    for (size_t index = 0; index < 8; index++)
+        for (int role = 1; role <= 2; role++) {
+            uint64_t value = h3_image_edit_stream(seed, role, index);
+            size_t slot = index * 2 + (size_t)role - 1;
+            for (size_t other = 0; other < slot; other++)
+                CHECK(seen[other] != value);
+            seen[slot] = value;
+        }
+}
+
+static void test_image_edit_limits(void) {
+    char error[256];
+    h3_image_reference_geometry geometry[8];
+    int small[8], large[8];
+    for (int index = 0; index < 8; index++) small[index] = 1024, large[index] = 2048;
+    /* eight 64x64 latent references and a 128x128 canvas: 8192 + 4096 rows */
+    CHECK(h3_image_edit_check_limits(small, small, 8, 128, 128, 100, geometry,
+                                     error, sizeof(error)));
+    CHECK(geometry[7].dit_rows == 1024 && geometry[0].latent_w == 64);
+    /* eight 128x128 references plus the canvas: the eighth crosses 32768 */
+    CHECK(!h3_image_edit_check_limits(large, large, 8, 128, 128, 100, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "reference 8 ") == error);
+    CHECK(strstr(error, "36864") != NULL);
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 100, NULL,
+                                     error, sizeof(error)));
+    /* the sequence cap: 32768 rows plus text */
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 4096, NULL,
+                                     error, sizeof(error)));
+    CHECK(!h3_image_edit_check_limits(large, large, 7, 128, 128, 4097, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "36865") != NULL);
+    CHECK(h3_image_edit_check_limits(large, large, 7, 128, 128, 0, NULL,
+                                     error, sizeof(error)));
+    /* too small: both sides must reach 32 (EditResizeStep), not rounded up */
+    int w[2] = {1024, 31}, h[2] = {1024, 100};
+    CHECK(!h3_image_edit_check_limits(w, h, 2, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    CHECK(strstr(error, "reference 2 is 31x100") == error);
+    CHECK(strstr(error, "at least 32") != NULL);
+    w[1] = 100; h[1] = 31;
+    CHECK(!h3_image_edit_check_limits(w, h, 2, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    w[1] = 32; h[1] = 32;
+    CHECK(h3_image_edit_check_limits(w, h, 2, 64, 64, 10, geometry, error,
+                                     sizeof(error)));
+    CHECK(geometry[1].vae_w == 1024 && geometry[1].latent_w == 64);
+    /* an extremely elongated reference fails before any weight loads */
+    int long_w[1] = {2048}, long_h[1] = {100000};
+    CHECK(!h3_image_edit_check_limits(long_w, long_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "reference 1 is 2048x100000") == error);
+    CHECK(strstr(error, "latent grid 128x6250") != NULL);
+    int huge_w[1] = {32}, huge_h[1] = {2000000000};
+    CHECK(!h3_image_edit_check_limits(huge_w, huge_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    int wide_w[1] = {6500}, wide_h[1] = {32};
+    CHECK(!h3_image_edit_check_limits(wide_w, wide_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "aspect ratio") != NULL);
+    /* a latent side above 1024 */
+    int side_w[1] = {16500}, side_h[1] = {2048};
+    CHECK(!h3_image_edit_check_limits(side_w, side_h, 1, 64, 64, 10, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "above 1024 on a side") != NULL);
+    CHECK(!h3_image_edit_check_limits(small, NULL, 1, 64, 64, 10, NULL, error,
+                                      sizeof(error)));
+    CHECK(!h3_image_edit_check_limits(NULL, NULL, 0, 1, 64, 10, NULL, error,
+                                      sizeof(error)));
+}
+
+static void test_image_edit_layout(void) {
+    h3_layout layout;
+    char error[256];
+    const h3_layout_ref one = {H3_LAYOUT_REF_IMAGE, 1, 4, 6, 0};
+    CHECK(h3_layout_build_image(3, 4, 4, &one, 1, &layout, error, sizeof(error)));
+    CHECK(layout.seq_len == 3 + 6 + 4);
+    const size_t bounds[][2] = {{0, 3}, {3, 9}, {9, 13}};
+    const h3_segment_kind kinds[] = {H3_SEG_TEXT, H3_SEG_REF_IMAGE, H3_SEG_VIDEO};
+    check_segments(&layout, bounds, kinds, 3);
+    CHECK(layout.img_cond_rows == 6 && layout.img_target_rows == 4);
+    /* _frame_position_grid(4, 6, 2, 2) */
+    const double heights[2] = {2.9360547052, 16.0};
+    const double widths[3] = {-3.5959179423, 9.4680273526, 22.5319726474};
+    for (size_t row = 0; row < 6; row++) {
+        CHECK(layout.positions[3 + row].t == 3.0);
+        CHECK(close_enough(layout.positions[3 + row].h, heights[row / 3], 1e-6));
+        CHECK(close_enough(layout.positions[3 + row].w, widths[row % 3], 1e-6));
+    }
+    const double axis[2] = {0.0, 16.0};
+    for (size_t row = 0; row < 4; row++) {
+        CHECK(layout.positions[9 + row].t == 4.0);
+        CHECK(close_enough(layout.positions[9 + row].h, axis[row / 2], 1e-6));
+        CHECK(close_enough(layout.positions[9 + row].w, axis[row % 2], 1e-6));
+    }
+    h3_layout_free(&layout);
+
+    const h3_layout_ref two[2] = {
+        {H3_LAYOUT_REF_IMAGE, 1, 4, 6, 0}, {H3_LAYOUT_REF_IMAGE, 1, 2, 2, 0}
+    };
+    CHECK(h3_layout_build_image(3, 4, 4, two, 2, &layout, error, sizeof(error)));
+    CHECK(layout.positions[3].t == 3.0 && layout.positions[9].t == 4.0);
+    CHECK(layout.positions[10].t == 5.0 && layout.seq_len == 3 + 6 + 1 + 4);
+    CHECK(close_enough(layout.positions[9].h, 0.0, 1e-6) &&
+          close_enough(layout.positions[9].w, 0.0, 1e-6));
+    h3_layout_free(&layout);
+
+    const h3_layout_ref odd = {H3_LAYOUT_REF_IMAGE, 1, 4, 5, 0};
+    CHECK(!h3_layout_build_image(3, 4, 4, &odd, 1, &layout, error, sizeof(error)));
+    const h3_layout_ref odd_height = {H3_LAYOUT_REF_IMAGE, 1, 3, 4, 0};
+    CHECK(!h3_layout_build_image(3, 4, 4, &odd_height, 1, &layout, error,
+                                 sizeof(error)));
+}
+
+static void test_image_edit_sequence_cap(void) {
+    char error[256];
+    h3_image_reference_geometry geometry[8];
+    /* The largest vision copy: 1024x16384 is 16777216 pixels, 16384 tokens. */
+    int tall_w[1] = {1024}, tall_h[1] = {16384};
+    CHECK(h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128, 0, geometry,
+                                     error, sizeof(error)));
+    CHECK(geometry[0].vision_tokens == 16384 && geometry[0].dit_rows == 16384);
+    /* label "Picture 1: " 5 tokens + 16384 + 2 + a 3-token prompt */
+    size_t presentation = 5 + 16384 + 2 + 3;
+    CHECK(!h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128,
+                                      presentation, NULL, error, sizeof(error)));
+    CHECK(strstr(error, "packed sequence of 36874 rows") != NULL);
+    CHECK(h3_image_edit_check_limits(tall_w, tall_h, 1, 128, 128,
+                                     presentation - 10, NULL, error,
+                                     sizeof(error)));
+    /* eight 1024x3072 references: 24576 + 4096 rows pass, the text does not */
+    int w[8], h[8];
+    for (int index = 0; index < 8; index++) w[index] = 1024, h[index] = 3072;
+    CHECK(h3_image_edit_check_limits(w, h, 8, 128, 128, 0, geometry, error,
+                                     sizeof(error)));
+    CHECK(geometry[7].vision_tokens == 3072);
+    presentation = 3;
+    for (int index = 0; index < 8; index++)
+        presentation += 5 + (size_t)geometry[index].vision_tokens + 2;
+    CHECK(!h3_image_edit_check_limits(w, h, 8, 128, 128, presentation, NULL,
+                                      error, sizeof(error)));
+    CHECK(strstr(error, "above 36864") != NULL);
+}
+
+static void test_image_edit_layout_ref_mapping(void) {
+    h3_image_reference_geometry g;
+    CHECK(h3_image_edit_reference_geometry(1500, 1024, &g));
+    CHECK(g.latent_h == 64 && g.latent_w == 92);
+    h3_layout_ref reference = h3_image_edit_layout_ref(&g);
+    CHECK(reference.kind == H3_LAYOUT_REF_IMAGE && reference.latent_t == 1);
+    CHECK(reference.latent_h == 64 && reference.latent_w == 92);
+    h3_layout layout;
+    char error[256];
+    CHECK(h3_layout_build_image(2, 4, 4, &reference, 1, &layout, error,
+                                sizeof(error)));
+    CHECK(layout.img_cond_rows == (size_t)g.dit_rows);
+    /* w runs fastest: 46 merged columns share one h value */
+    CHECK(layout.positions[2].h == layout.positions[2 + 45].h);
+    CHECK(layout.positions[2].h != layout.positions[2 + 46].h);
+    CHECK(layout.positions[2].w != layout.positions[3].w);
+    h3_layout_free(&layout);
+}
+
+static void test_image_dit_reference_arguments(void) {
+    uint16_t value = 0;
+    h3_text_embedding text = {3, 5120, &value, {0}, NULL};
+    float rows[8 * 96];
+    memset(rows, 0, sizeof(rows));
+    char error[256];
+#define LOAD(refs, count, cond, elements) \
+    h3_dit_load_image("/nonexistent-h3-weights", "h3_shaders.metal", &text, 4, \
+                      4, refs, count, cond, elements, 50, &(h3_dit_tuning){0}, \
+                      NULL, NULL, error, sizeof(error))
+    const h3_layout_ref four = {H3_LAYOUT_REF_IMAGE, 1, 4, 4, 0};
+    CHECK(LOAD(NULL, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "references are missing") != NULL);
+    CHECK(LOAD(&four, 1, rows, 0) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, rows, 3 * 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, rows, 4 * 96 + 1) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(&four, 1, NULL, 4 * 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    CHECK(LOAD(NULL, 0, rows, 96) == NULL);
+    CHECK(strstr(error, "do not match") != NULL);
+    const h3_layout_ref zero = {H3_LAYOUT_REF_IMAGE, 1, 0, 4, 0};
+    CHECK(LOAD(&zero, 1, rows, 0) == NULL);
+    CHECK(strstr(error, "reference 1 latent size") != NULL);
+    const h3_layout_ref wide[2] = {four, {H3_LAYOUT_REF_IMAGE, 1, 4, 1026, 0}};
+    CHECK(LOAD(wide, 2, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "reference 2 latent size") != NULL);
+    const h3_layout_ref odd = {H3_LAYOUT_REF_IMAGE, 1, 3, 4, 0};
+    CHECK(LOAD(&odd, 1, rows, 3 * 96) == NULL);
+    CHECK(strstr(error, "reference latent canvas") != NULL);
+    const h3_layout_ref audio = {H3_LAYOUT_REF_AUDIO, 1, 4, 4, 4};
+    CHECK(LOAD(&audio, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "only image references") != NULL);
+    /* Valid arguments get past validation and fail on the missing weights. */
+    CHECK(LOAD(&four, 1, rows, 4 * 96) == NULL);
+    CHECK(strstr(error, "do not match") == NULL &&
+          strstr(error, "reference") == NULL && error[0] != '\0');
+    CHECK(LOAD(NULL, 0, NULL, 0) == NULL);
+    CHECK(strstr(error, "do not match") == NULL && error[0] != '\0');
+#undef LOAD
+}
+
+static void test_reference_resize_lanczos(void) {
+    /* PIL Image.resize((w, h), LANCZOS) of this 6x5 planar image. */
+    enum { W = 6, H = 5 };
+    const uint8_t input[3 * H * W] = {
+        0, 53, 106, 159, 212, 9, 37, 97, 157, 217, 21, 81, 74, 141, 208, 19, 86,
+        153, 111, 185, 3, 77, 151, 225, 148, 229, 54, 135, 216, 41, 61, 114,
+        167, 220, 17, 70, 98, 158, 218, 22, 82, 142, 135, 202, 13, 80, 147, 214,
+        172, 246, 64, 138, 212, 30, 209, 34, 115, 196, 21, 102, 122, 175, 228,
+        25, 78, 131, 159, 219, 23, 83, 143, 203, 196, 7, 74, 141, 208, 19, 233,
+        51, 125, 199, 17, 91, 14, 95, 176, 1, 82, 163
+    };
+    const uint8_t down_3x2[18] = {
+        65, 146, 93, 150, 96, 142, 134, 126, 103, 160, 109, 124, 156, 101, 127,
+        104, 107, 99
+    };
+    const uint8_t vertical_6x3[54] = {
+        12, 67, 136, 191, 127, 28, 74, 141, 155, 72, 68, 171, 136, 215, 24, 103,
+        200, 123, 73, 124, 197, 133, 33, 107, 135, 220, 66, 62, 165, 161, 197,
+        125, 85, 182, 106, 65, 129, 203, 139, 39, 113, 168, 214, 60, 56, 159,
+        155, 72, 108, 67, 164, 88, 47, 126
+    };
+    const uint8_t horizontal_4x5[60] = {
+        14, 87, 192, 82, 48, 159, 149, 44, 94, 179, 48, 133, 152, 67, 79, 210,
+        191, 112, 157, 111, 70, 171, 150, 34, 117, 191, 49, 123, 174, 79, 80,
+        201, 213, 124, 158, 102, 139, 93, 138, 59, 139, 203, 50, 114, 196, 91,
+        81, 192, 127, 33, 182, 88, 161, 105, 139, 50, 38, 143, 34, 139
+    };
+    const uint8_t up_10x9[270] = {
+        0, 11, 49, 86, 106, 125, 210, 237, 90, 0, 6, 23, 62, 91, 130, 179, 200,
+        156, 65, 22, 27, 48, 91, 117, 170, 230, 159, 38, 43, 82, 51, 68, 119,
+        190, 209, 162, 66, 16, 71, 124, 69, 88, 141, 216, 179, 48, 11, 86, 139,
+        158, 82, 121, 163, 137, 72, 21, 40, 123, 201, 235, 102, 160, 191, 67, 0,
+        60, 127, 160, 197, 212, 126, 186, 220, 96, 19, 90, 184, 202, 136, 81,
+        137, 194, 233, 131, 56, 107, 207, 221, 92, 0, 54, 73, 110, 126, 183,
+        255, 163, 12, 25, 77, 65, 80, 123, 176, 203, 185, 102, 31, 54, 92, 88,
+        103, 152, 228, 200, 71, 22, 73, 115, 132, 109, 138, 175, 170, 102, 24,
+        25, 110, 183, 213, 122, 175, 202, 84, 2, 56, 111, 147, 196, 219, 133,
+        213, 255, 106, 0, 73, 185, 217, 152, 92, 167, 208, 226, 130, 69, 118,
+        197, 195, 86, 6, 214, 165, 94, 78, 129, 182, 155, 77, 61, 71, 238, 134,
+        7, 38, 159, 216, 118, 0, 57, 136, 117, 122, 162, 255, 222, 58, 3, 73,
+        110, 119, 121, 155, 203, 208, 142, 53, 32, 89, 146, 171, 140, 195, 227,
+        117, 27, 58, 95, 129, 185, 214, 174, 168, 127, 41, 12, 75, 166, 203,
+        159, 116, 219, 127, 7, 22, 92, 123, 193, 208, 88, 0, 255, 160, 1, 22,
+        142, 205, 184, 98, 40, 25, 230, 156, 62, 78, 159, 195, 112, 12, 58, 121,
+        77, 72, 89, 151, 156, 82, 30, 50, 117, 162, 0, 15, 99, 191, 147, 2, 0,
+        96, 158, 173
+    };
+    const struct { int width, height; const uint8_t *want; } cases[] = {
+        {3, 2, down_3x2}, {6, 3, vertical_6x3}, {4, 5, horizontal_4x5},
+        {10, 9, up_10x9}
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        uint8_t got[270];
+        size_t count = (size_t)3 * cases[index].width * cases[index].height;
+        CHECK(h3_reference_resize_lanczos(input, H, W, cases[index].height,
+                                          cases[index].width, got));
+        CHECK(memcmp(got, cases[index].want, count) == 0);
+    }
+    uint8_t same[3 * H * W];
+    CHECK(h3_reference_resize_lanczos(input, H, W, H, W, same));
+    CHECK(memcmp(same, input, sizeof(same)) == 0);
+}
+
+static void test_reference_pipeline_steps(void) {
+    /* Top-left crop of two planes of 3 rows by 4 columns to 2 by 3. */
+    const uint8_t planes[24] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111
+    };
+    uint8_t cropped[12];
+    h3_reference_crop_u8(planes, 2, 3, 4, 2, 3, cropped);
+    const uint8_t want_bytes[12] = {0, 1, 2, 4, 5, 6, 100, 101, 102, 104, 105, 106};
+    CHECK(memcmp(cropped, want_bytes, sizeof(want_bytes)) == 0);
+    float floats[24], cropped_floats[12];
+    for (int index = 0; index < 24; index++) floats[index] = (float)index;
+    h3_reference_crop_f32(floats, 2, 3, 4, 2, 2, cropped_floats);
+    const float want_floats[8] = {0, 1, 4, 5, 12, 13, 16, 17};
+    CHECK(memcmp(cropped_floats, want_floats, sizeof(want_floats)) == 0);
+
+    /* float16 rounding: ties go to even, overflow to infinity. */
+    const struct { float input, want; } rounding[] = {
+        {0.0f, 0.0f}, {1.0f, 1.0f}, {0.100000001f, 0.0999755859f},
+        {-0.100000001f, -0.0999755859f}, {1.00048828f, 1.0f},
+        {1.00024414f, 1.0f}, {1.00073242f, 1.00097656f}, {65504.0f, 65504.0f},
+        {9.99999994e-09f, 0.0f}, {6.09999988e-05f, 6.09755516e-05f},
+        {3.14159274f, 3.140625f}, {-2.71828175f, -2.71875f}, {2049.0f, 2048.0f},
+        {2050.0f, 2050.0f}, {2051.0f, 2052.0f}, {0.333333343f, 0.333251953f},
+        {5.96046448e-08f, 5.96046448e-08f}, {2.98023224e-08f, 0.0f}
+    };
+    for (size_t index = 0; index < sizeof(rounding) / sizeof(rounding[0]); index++)
+        CHECK(h3_round_to_f16(rounding[index].input) == rounding[index].want);
+    CHECK(isinf(h3_round_to_f16(65520.0f)) && h3_round_to_f16(65520.0f) > 0.0f);
+    CHECK(isinf(h3_round_to_f16(100000.0f)));
+
+    /* Posterior sample: log-variance -40 clamps to -30 and 30 to 20. */
+    const float moments[8] = {0.5f, -2.0f, 1.0f, 0.25f, 0.0f, -40.0f, 30.0f, 2.0f};
+    const float noise[4] = {1.5f, -0.5f, 0.001f, 2.0f};
+    const float want_sample[4] = {2.0f, -2.00000024f, 23.0264664f, 5.68656349f};
+    float sample[4];
+    h3_posterior_sample(moments, noise, 4, sample);
+    for (int index = 0; index < 4; index++)
+        CHECK(close_enough(sample[index], want_sample[index],
+                           1e-6 * fabs(want_sample[index])));
+
+    /* (z - mean) / std with latents_mean / latents_std of channels 0 and 1. */
+    float latents[6] = {2.0f, -1.5f, 0.3333333f, 2.0f, -1.5f, 0.3333333f};
+    const float mean[2] = {0.858090341091156f, -0.9606591463088989f};
+    const float deviation[2] = {1.2223774194717407f, 1.2767263650894165f};
+    h3_reference_normalize(latents, 2, 3, mean, deviation);
+    const float want_normal[6] = {
+        0.9341710805892944f, -1.9291017055511475f, -0.42929214239120483f,
+        2.3189456462860107f, -0.42244043946266174f, 1.013523817062378f
+    };
+    for (int index = 0; index < 6; index++)
+        CHECK(latents[index] == want_normal[index]);
+
+    /* scale_noise is t * x + (1.0f - t) * noise in float32; 1.0f - 0.999f is
+     * 0.000999987125, not 0.001. */
+    const float clean[4] = {0.5f, -1.25f, 2.0f, 0.0f};
+    const float mixed_noise[4] = {1.0f, 0.75f, -0.5f, 3.0f};
+    const float want_mixed[4] = {0.500499964f, -1.24800003f, 1.99750006f,
+                                 0.00299996138f};
+    float mixed[4];
+    h3_reference_scale_noise(clean, mixed_noise, H3_REFERENCE_NOISE_AUG, 4, mixed);
+    CHECK(memcmp(mixed, want_mixed, sizeof(mixed)) == 0);
+    h3_reference_scale_noise(clean, mixed_noise, 1.0f, 4, mixed);
+    CHECK(memcmp(mixed, clean, sizeof(mixed)) == 0);
+}
+
 static void test_metal_probe(void) {
     h3_device_info info;
     char error[256];
@@ -403,10 +1541,42 @@ int main(void) {
     test_layout_tiny();
     test_layout_fl2va();
     test_layout_ref2va();
+    test_layout_validate();
     test_safetensors();
     test_rng_and_solver();
     test_rgb_resize();
     test_dit_row_conversions();
+    test_image_schedule();
+    test_image_canvas();
+    test_image_canvas_limits();
+    test_image_parse_size();
+    test_image_layout();
+    test_image_rope_inv_freq();
+    test_image_timestep_features();
+    test_image_patchify();
+    test_image_sampler();
+    test_image_noise_and_interleave();
+    test_image_qkv_interleave();
+    test_dit_names();
+    test_image_dit_bookkeeping();
+    test_qkv_slab_plan();
+    test_missing_weight_names();
+    test_image_vae_tiles();
+    test_image_unpack_2d();
+    test_image_vae_config_parse();
+    test_reference_size_rule();
+    test_image_edit_smart_resize();
+    test_image_edit_geometry();
+    test_image_edit_aug_constant();
+    test_image_edit_tags();
+    test_image_edit_streams();
+    test_image_edit_limits();
+    test_image_edit_layout();
+    test_image_edit_sequence_cap();
+    test_image_edit_layout_ref_mapping();
+    test_image_dit_reference_arguments();
+    test_reference_resize_lanczos();
+    test_reference_pipeline_steps();
     test_metal_probe();
     test_terminal_zoom();
     printf("ok: %d checks\n", tests_run);

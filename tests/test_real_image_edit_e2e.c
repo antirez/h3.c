@@ -289,7 +289,7 @@ static scores score(const h3_image_hooks *hooks, const uint8_t *want,
 }
 
 /* H3_MEASURE=1: every score bound only reports and the run continues, so one
- * gated pass measures all of them. Exact checks always fail the run. */
+ * full run measures all of them. Exact checks always fail the run. */
 static int measure;
 static int over_count;
 

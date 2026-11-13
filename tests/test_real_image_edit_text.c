@@ -32,8 +32,8 @@ static void require(int condition, const char *message) {
     if (!condition) die(message);
 }
 
-/* H3_MEASURE=1: every bound only reports and the run continues, so one gated
- * pass measures all of them. Exact checks always fail the run, but in
+/* H3_MEASURE=1: every bound only reports and the run continues, so one full
+ * run measures all of them. Exact checks always fail the run, but in
  * measure mode a failed one is recorded and the next case still runs. */
 static int measure;
 static int over_count, exact_failures;

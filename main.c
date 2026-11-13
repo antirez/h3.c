@@ -465,42 +465,42 @@ int main(int argc, char **argv) {
                 params.token_reduction = 1;
                 video_only = video_only ? video_only : "--token-reduction";
                 break;
-            case OPT_SSD_STREAMING: params.ssd_streaming = 1; break;
+            case OPT_SSD_STREAMING: params.tuning.ssd_streaming = 1; break;
             case OPT_USE_INT8_ROW_FC2:
-                params.use_int8_row_fc2 = 1;
+                params.tuning.use_int8_row_fc2 = 1;
                 break;
             case OPT_USE_REFERENCE_ROPE: video_only = video_only ? video_only : "--use-reference-rope";
                 params.use_reference_rope = 1;
                 break;
             case OPT_USE_SLOWER_BF16_MLP:
-                params.use_slower_bf16_mlp = 1;
+                params.tuning.use_slower_bf16_mlp = 1;
                 break;
             case OPT_USE_SLOWER_BF16_QKV:
-                params.use_slower_bf16_qkv = 1;
+                params.tuning.use_slower_bf16_qkv = 1;
                 break;
             case OPT_USE_SLOWER_BF16_ATTENTION_OUTPUT:
-                params.use_slower_bf16_attention_output = 1;
+                params.tuning.use_slower_bf16_attention_output = 1;
                 break;
             case OPT_USE_SLOWER_ROW_MAJOR_ATTENTION_OUTPUT:
-                params.use_slower_row_major_attention_output = 1;
+                params.tuning.use_slower_row_major_attention_output = 1;
                 break;
             case OPT_USE_SLOWER_UNFUSED_INT8_INPUTS:
-                params.use_slower_unfused_int8_inputs = 1;
+                params.tuning.use_slower_unfused_int8_inputs = 1;
                 break;
             case OPT_USE_SLOWER_UNFUSED_QKV_ROPE:
-                params.use_slower_unfused_qkv_rope = 1;
+                params.tuning.use_slower_unfused_qkv_rope = 1;
                 break;
             case OPT_USE_SLOWER_SCALAR_QKV_RMS:
-                params.use_slower_scalar_qkv_rms = 1;
+                params.tuning.use_slower_scalar_qkv_rms = 1;
                 break;
             case OPT_USE_SLOWER_UNCACHED_INT8_SCALES:
-                params.use_slower_uncached_int8_scales = 1;
+                params.tuning.use_slower_uncached_int8_scales = 1;
                 break;
             case OPT_USE_SLOWER_DYNAMIC_FC1_K:
-                params.use_slower_dynamic_fc1_k = 1;
+                params.tuning.use_slower_dynamic_fc1_k = 1;
                 break;
             case OPT_USE_SLOWER_GROUPED_QUANTIZER:
-                params.use_slower_grouped_quantizer = 1;
+                params.tuning.use_slower_grouped_quantizer = 1;
                 break;
             case OPT_SEED:
                 params.seed = parse_u64(optarg, "seed");
@@ -612,7 +612,7 @@ int main(int argc, char **argv) {
         image_error = "--int8 applies to image models only";
     else if (!image && no_cache_flag)
         image_error = "--no-cache applies to image models only";
-    else if (image && int8_flag && params.ssd_streaming)
+    else if (image && int8_flag && params.tuning.ssd_streaming)
         image_error = "--int8 and --ssd-streaming exclude each other";
     else if (image && reference_count > H3_IMAGE_MAX_REFERENCES) {
         snprintf(image_error_text, sizeof(image_error_text),
@@ -678,26 +678,7 @@ int main(int argc, char **argv) {
         image_params.output_path = output ? output : "outputs/h3.png";
         image_params.dit_layers = params.dit_layers;
         image_params.use_int8 = int8_flag;
-        image_params.use_int8_row_fc2 = params.use_int8_row_fc2;
-        image_params.ssd_streaming = params.ssd_streaming;
-        image_params.use_slower_bf16_mlp = params.use_slower_bf16_mlp;
-        image_params.use_slower_bf16_qkv = params.use_slower_bf16_qkv;
-        image_params.use_slower_bf16_attention_output =
-            params.use_slower_bf16_attention_output;
-        image_params.use_slower_row_major_attention_output =
-            params.use_slower_row_major_attention_output;
-        image_params.use_slower_unfused_int8_inputs =
-            params.use_slower_unfused_int8_inputs;
-        image_params.use_slower_unfused_qkv_rope =
-            params.use_slower_unfused_qkv_rope;
-        image_params.use_slower_scalar_qkv_rms =
-            params.use_slower_scalar_qkv_rms;
-        image_params.use_slower_uncached_int8_scales =
-            params.use_slower_uncached_int8_scales;
-        image_params.use_slower_dynamic_fc1_k =
-            params.use_slower_dynamic_fc1_k;
-        image_params.use_slower_grouped_quantizer =
-            params.use_slower_grouped_quantizer;
+        image_params.tuning = params.tuning;
         image_cli_state image_cli;
         memset(&image_cli, 0, sizeof(image_cli));
         image_cli.base = cli;

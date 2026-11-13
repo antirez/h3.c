@@ -1684,19 +1684,8 @@ static h3_dit *load_dit(const char *weight_directory,
                         unsigned active_blocks,
                         unsigned core_reuse_interval,
                         int token_reduction,
-                        int ssd_streaming,
+                        const h3_dit_tuning *tuning,
                         float spatial_rope_scale,
-                        int use_slower_bf16_mlp,
-                        int use_slower_bf16_qkv,
-                        int use_slower_bf16_attention_output,
-                        int use_slower_row_major_attention_output,
-                        int use_slower_unfused_int8_inputs,
-                        int use_slower_unfused_qkv_rope,
-                        int use_slower_scalar_qkv_rms,
-                        int use_slower_uncached_int8_scales,
-                        int use_slower_dynamic_fc1_k,
-                        int use_slower_grouped_quantizer,
-                        int use_int8_row_fc2,
                         const float *condition_video_rows,
                         size_t condition_video_elements,
                         const float *condition_audio_rows,
@@ -1706,7 +1695,8 @@ static h3_dit *load_dit(const char *weight_directory,
                         char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
     if (!weight_directory || !shader_source_path || !layout || !sigmas ||
-        (ssd_streaming != 0 && ssd_streaming != 1) ||
+        !tuning ||
+        (tuning->ssd_streaming != 0 && tuning->ssd_streaming != 1) ||
         !isfinite(spatial_rope_scale) || spatial_rope_scale <= 0.0f ||
         active_blocks < H3_DIT_BLOCKS / 2 ||
         active_blocks > H3_DIT_BLOCKS || core_reuse_interval < 1 ||
@@ -1732,7 +1722,7 @@ static h3_dit *load_dit(const char *weight_directory,
      * Keep the old path available for close-reference diagnosis. */
     dit->bf16_final = !image && getenv("H3_DIT_F32_FINAL") == NULL;
     dit->core_reuse_interval = core_reuse_interval;
-    dit->ssd_streaming = ssd_streaming;
+    dit->ssd_streaming = tuning->ssd_streaming;
     dit->spatial_rope_scale = spatial_rope_scale;
     configure_active_blocks(dit, active_blocks);
     if (!copy_layout(dit, layout, error, error_size) ||
@@ -1758,33 +1748,33 @@ static h3_dit *load_dit(const char *weight_directory,
     if (!dit->gpu) goto failed;
     dit->nax_mlp = dit->fused_mlp && h3_gpu_has_nax_mlp(dit->gpu);
     dit->int8_mlp = !dit->ssd_streaming && dit->fused_mlp &&
-                    !use_slower_bf16_mlp && dit->sequence >= 128 &&
+                    !tuning->use_slower_bf16_mlp && dit->sequence >= 128 &&
                     h3_gpu_has_int8_mlp(dit->gpu);
-    dit->int8_qkv = !dit->ssd_streaming && !use_slower_bf16_qkv &&
+    dit->int8_qkv = !dit->ssd_streaming && !tuning->use_slower_bf16_qkv &&
                     dit->sequence >= 128 &&
                     h3_gpu_has_int8_mlp(dit->gpu);
     dit->int8_attention_out = !dit->ssd_streaming &&
-                              !use_slower_bf16_attention_output &&
+                              !tuning->use_slower_bf16_attention_output &&
                               dit->sequence >= 128 &&
                               h3_gpu_has_int8_mlp(dit->gpu);
     dit->use_slower_row_major_attention_output =
-        use_slower_row_major_attention_output;
+        tuning->use_slower_row_major_attention_output;
     dit->use_slower_unfused_int8_inputs =
-        use_slower_unfused_int8_inputs;
+        tuning->use_slower_unfused_int8_inputs;
     dit->use_slower_unfused_qkv_rope =
-        use_slower_unfused_qkv_rope;
-    dit->use_slower_scalar_qkv_rms = use_slower_scalar_qkv_rms;
+        tuning->use_slower_unfused_qkv_rope;
+    dit->use_slower_scalar_qkv_rms = tuning->use_slower_scalar_qkv_rms;
     dit->use_slower_uncached_int8_scales =
-        use_slower_uncached_int8_scales;
-    dit->use_slower_dynamic_fc1_k = use_slower_dynamic_fc1_k;
+        tuning->use_slower_uncached_int8_scales;
+    dit->use_slower_dynamic_fc1_k = tuning->use_slower_dynamic_fc1_k;
     dit->keep_bf16_attention_out = dit->int8_attention_out &&
         (getenv("H3_INT8_KEEP_BF16_ATTENTION_OUT") ||
          getenv("H3_BENCH_INT8_ATTENTION_OUT_AB"));
     dit->keep_bf16_qkv = dit->int8_qkv &&
         (getenv("H3_INT8_KEEP_BF16_QKV") ||
          getenv("H3_BENCH_INT8_QKV_AB"));
-    dit->use_slower_grouped_quantizer = use_slower_grouped_quantizer;
-    dit->use_int8_row_fc2 = dit->int8_mlp && use_int8_row_fc2;
+    dit->use_slower_grouped_quantizer = tuning->use_slower_grouped_quantizer;
+    dit->use_int8_row_fc2 = dit->int8_mlp && tuning->use_int8_row_fc2;
     dit->keep_bf16_mlp = dit->int8_mlp &&
         (getenv("H3_INT8_KEEP_BF16_MLP") ||
          getenv("H3_BENCH_INT8_MLP_AB") ||
@@ -1834,35 +1824,14 @@ h3_dit *h3_dit_load_t2va(const char *weight_directory,
                          unsigned active_blocks,
                          unsigned core_reuse_interval,
                          int token_reduction,
-                         int ssd_streaming,
+                         const h3_dit_tuning *tuning,
                          float spatial_rope_scale,
-                         int use_slower_bf16_mlp,
-                         int use_slower_bf16_qkv,
-                         int use_slower_bf16_attention_output,
-                         int use_slower_row_major_attention_output,
-                         int use_slower_unfused_int8_inputs,
-                         int use_slower_unfused_qkv_rope,
-                         int use_slower_scalar_qkv_rms,
-                         int use_slower_uncached_int8_scales,
-                         int use_slower_dynamic_fc1_k,
-                         int use_slower_grouped_quantizer,
-                         int use_int8_row_fc2,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size) {
     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
                     active_blocks, core_reuse_interval, token_reduction,
-                    ssd_streaming,
+                    tuning,
                     spatial_rope_scale,
-                    use_slower_bf16_mlp, use_slower_bf16_qkv,
-                    use_slower_bf16_attention_output,
-                    use_slower_row_major_attention_output,
-                    use_slower_unfused_int8_inputs,
-                    use_slower_unfused_qkv_rope,
-                    use_slower_scalar_qkv_rms,
-                    use_slower_uncached_int8_scales,
-                    use_slower_dynamic_fc1_k,
-                    use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
                     NULL, 0, NULL, 0, 0, progress, progress_opaque,
                     error, error_size);
 }
@@ -1876,19 +1845,8 @@ h3_dit *h3_dit_load_conditioned(
                          unsigned active_blocks,
                          unsigned core_reuse_interval,
                          int token_reduction,
-                         int ssd_streaming,
+                         const h3_dit_tuning *tuning,
                          float spatial_rope_scale,
-                         int use_slower_bf16_mlp,
-                         int use_slower_bf16_qkv,
-                         int use_slower_bf16_attention_output,
-                         int use_slower_row_major_attention_output,
-                         int use_slower_unfused_int8_inputs,
-                         int use_slower_unfused_qkv_rope,
-                         int use_slower_scalar_qkv_rms,
-                         int use_slower_uncached_int8_scales,
-                         int use_slower_dynamic_fc1_k,
-                         int use_slower_grouped_quantizer,
-                         int use_int8_row_fc2,
                          const float *condition_video_rows,
                          size_t condition_video_elements,
                          const float *condition_audio_rows,
@@ -1897,18 +1855,8 @@ h3_dit *h3_dit_load_conditioned(
                          char *error, size_t error_size) {
     return load_dit(weight_directory, shader_source_path, text, layout, sigmas,
                     active_blocks, core_reuse_interval, token_reduction,
-                    ssd_streaming,
+                    tuning,
                     spatial_rope_scale,
-                    use_slower_bf16_mlp, use_slower_bf16_qkv,
-                    use_slower_bf16_attention_output,
-                    use_slower_row_major_attention_output,
-                    use_slower_unfused_int8_inputs,
-                    use_slower_unfused_qkv_rope,
-                    use_slower_scalar_qkv_rms,
-                    use_slower_uncached_int8_scales,
-                    use_slower_dynamic_fc1_k,
-                    use_slower_grouped_quantizer,
-                    use_int8_row_fc2,
                     condition_video_rows, condition_video_elements,
                     condition_audio_rows, condition_audio_elements, 0,
                     progress, progress_opaque, error, error_size);
@@ -1923,18 +1871,7 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
                           const float *condition_rows,
                           size_t condition_elements,
                           unsigned active_blocks,
-                          int ssd_streaming,
-                          int use_slower_bf16_mlp,
-                          int use_slower_bf16_qkv,
-                          int use_slower_bf16_attention_output,
-                          int use_slower_row_major_attention_output,
-                          int use_slower_unfused_int8_inputs,
-                          int use_slower_unfused_qkv_rope,
-                          int use_slower_scalar_qkv_rms,
-                          int use_slower_uncached_int8_scales,
-                          int use_slower_dynamic_fc1_k,
-                          int use_slower_grouped_quantizer,
-                          int use_int8_row_fc2,
+                          const h3_dit_tuning *tuning,
                           h3_dit_progress progress, void *progress_opaque,
                           char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
@@ -1989,16 +1926,7 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
     h3_dit *dit = NULL;
     if (h3_dit_image_schedule_build(&sigmas))
         dit = load_dit(weight_directory, shader_source_path, text, &layout,
-                       &sigmas, active_blocks, 1, 0, ssd_streaming, 1.0f,
-                       use_slower_bf16_mlp, use_slower_bf16_qkv,
-                       use_slower_bf16_attention_output,
-                       use_slower_row_major_attention_output,
-                       use_slower_unfused_int8_inputs,
-                       use_slower_unfused_qkv_rope,
-                       use_slower_scalar_qkv_rms,
-                       use_slower_uncached_int8_scales,
-                       use_slower_dynamic_fc1_k,
-                       use_slower_grouped_quantizer, use_int8_row_fc2,
+                       &sigmas, active_blocks, 1, 0, tuning, 1.0f,
                        condition_rows, condition_elements, NULL, 0, 1,
                        progress, progress_opaque, error, error_size);
     else

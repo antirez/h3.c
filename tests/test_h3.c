@@ -1346,8 +1346,8 @@ static void test_image_dit_reference_arguments(void) {
     char error[256];
 #define LOAD(refs, count, cond, elements) \
     h3_dit_load_image("/nonexistent-h3-weights", "h3_shaders.metal", &text, 4, \
-                      4, refs, count, cond, elements, 50, 0, 0, 0, 0, 0, 0, 0, \
-                      0, 0, 0, 0, 0, NULL, NULL, error, sizeof(error))
+                      4, refs, count, cond, elements, 50, &(h3_dit_tuning){0}, \
+                      NULL, NULL, error, sizeof(error))
     const h3_layout_ref four = {H3_LAYOUT_REF_IMAGE, 1, 4, 4, 0};
     CHECK(LOAD(NULL, 1, rows, 4 * 96) == NULL);
     CHECK(strstr(error, "references are missing") != NULL);

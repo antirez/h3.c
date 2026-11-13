@@ -434,7 +434,7 @@ int main(int argc, char **argv) {
     params.height = height;
     params.min_generation_area = min_area;
     params.seed = (uint64_t)seed;
-    params.ssd_streaming = stream;
+    params.tuning.ssd_streaming = stream;
     params.use_int8 = int8;
     params.on_progress = progress;
     params.references = references;

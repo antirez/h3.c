@@ -1620,6 +1620,14 @@ int main(int argc, char **argv) {
         getenv("H3_BENCH_USE_SLOWER_GROUPED_QUANTIZER") != NULL;
     int ssd_streaming = getenv("H3_BENCH_SSD_STREAMING") != NULL;
     int all_bf16 = getenv("H3_BENCH_ALL_BF16") != NULL;
+    h3_dit_tuning tuning = {
+        .use_int8_row_fc2 = use_int8_row_fc2,
+        .ssd_streaming = ssd_streaming,
+        .use_slower_bf16_mlp = all_bf16,
+        .use_slower_bf16_qkv = all_bf16,
+        .use_slower_bf16_attention_output = all_bf16,
+        .use_slower_grouped_quantizer = use_slower_grouped_quantizer
+    };
     h3_dit *dit;
     if (ref_layout) {
         size_t video_condition_elements =
@@ -1636,9 +1644,7 @@ int main(int argc, char **argv) {
             die("out of memory allocating reference conditions");
         dit = h3_dit_load_conditioned(
             weights, "h3_shaders.metal", &text, &layout, &sigmas,
-            active_blocks, 1, enable_token_reduction, ssd_streaming, 1.0f,
-            all_bf16, all_bf16, all_bf16, 0, 0, 0, 0, 0, 0,
-            use_slower_grouped_quantizer, use_int8_row_fc2,
+            active_blocks, 1, enable_token_reduction, &tuning, 1.0f,
             video_condition,
             video_condition_elements, audio_condition,
             audio_condition_elements, NULL, NULL, error, sizeof(error));
@@ -1647,9 +1653,7 @@ int main(int argc, char **argv) {
     } else {
         dit = h3_dit_load_t2va(
             weights, "h3_shaders.metal", &text, &layout, &sigmas,
-            active_blocks, 1, enable_token_reduction, ssd_streaming, 1.0f,
-            all_bf16, all_bf16, all_bf16, 0, 0, 0, 0, 0, 0,
-            use_slower_grouped_quantizer, use_int8_row_fc2,
+            active_blocks, 1, enable_token_reduction, &tuning, 1.0f,
             NULL, NULL, error,
             sizeof(error));
     }

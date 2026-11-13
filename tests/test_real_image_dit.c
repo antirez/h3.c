@@ -402,10 +402,14 @@ int main(int argc, char **argv) {
                 "latent size must be a positive even number");
         printf("mode %s: %zu text tokens, random latents %dx%d\n", mode,
                tokens, random_size, random_size);
+        const h3_dit_tuning tuning = {
+            .ssd_streaming = stream, .use_slower_bf16_mlp = bf16,
+            .use_slower_bf16_qkv = bf16,
+            .use_slower_bf16_attention_output = bf16
+        };
         h3_dit *random_dit = h3_dit_load_image(
             weight_directory, "h3_shaders.metal", &text, random_size,
-            random_size, NULL, 0, NULL, 0, 50, stream, bf16, bf16, bf16, 0, 0,
-            0, 0, 0, 0, 0, 0, progress, NULL, error, sizeof(error));
+            random_size, NULL, 0, NULL, 0, 50, &tuning, progress, NULL, error, sizeof(error));
         require(random_dit != NULL, error);
         run_random(random_dit, mode, bf16 ? 0u : stream ? 1u : 2u, tokens,
                    random_size, exchange);
@@ -488,10 +492,13 @@ int main(int argc, char **argv) {
     printf("mode %s: %zu text tokens, latent %dx%d, %zu image rows\n", mode,
            tokens, latent_height, latent_width, rows);
     double started = seconds_now();
+    const h3_dit_tuning tuning = {
+        .ssd_streaming = stream, .use_slower_bf16_mlp = bf16,
+        .use_slower_bf16_qkv = bf16, .use_slower_bf16_attention_output = bf16
+    };
     h3_dit *dit = h3_dit_load_image(
         weight_directory, "h3_shaders.metal", &text, latent_height,
-        latent_width, NULL, 0, NULL, 0, 50, stream, bf16, bf16, bf16, 0, 0, 0,
-        0, 0, 0, 0, 0, progress, NULL, error, sizeof(error));
+        latent_width, NULL, 0, NULL, 0, 50, &tuning, progress, NULL, error, sizeof(error));
     if (!dit) die(error);
     printf("load: %.1f s\n", seconds_now() - started);
     require(h3_dit_image_rows(dit) == rows, "image row count mismatch");

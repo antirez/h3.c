@@ -598,11 +598,15 @@ static h3_dit *load_edit_dit(const char *weight_directory,
     char error[512];
     h3_layout_ref reference = {H3_LAYOUT_REF_IMAGE, 1, edit->reference_height,
                                edit->reference_width, 0};
+    const h3_dit_tuning tuning = {
+        .ssd_streaming = edit->stream, .use_slower_bf16_mlp = edit->bf16,
+        .use_slower_bf16_qkv = edit->bf16,
+        .use_slower_bf16_attention_output = edit->bf16
+    };
     h3_dit *dit = h3_dit_load_image(
         weight_directory, "h3_shaders.metal", &edit->text, edit->latent_height,
         edit->latent_width, &reference, 1, condition_rows,
-        edit->reference_rows * PATCH, 50, edit->stream, edit->bf16,
-        edit->bf16, edit->bf16, 0, 0, 0, 0, 0, 0, 0, 0, progress, NULL, error,
+        edit->reference_rows * PATCH, 50, &tuning, progress, NULL, error,
         sizeof(error));
     if (!dit) die(error);
     return dit;

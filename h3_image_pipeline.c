@@ -1,7 +1,7 @@
 #include "h3_image_pipeline.h"
 
 #include "h3_host.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,7 +97,7 @@ int h3_image_sample(int latent_height, int latent_width, const float *noise,
         return 0;
     }
     h3_sigma_schedule schedule;
-    if (!h3_image_schedule_build(&schedule)) {
+    if (!h3_dit_image_schedule_build(&schedule)) {
         fail(error, error_size, "cannot build the image schedule");
         return 0;
     }

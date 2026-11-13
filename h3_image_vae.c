@@ -1,6 +1,6 @@
 #include "h3_image_vae.h"
 
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_vae_tiles.h"
 #include "h3_weights.h"
 
@@ -10,6 +10,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void h3_image_vae_inv_freq(float *out) {
+    for (int index = 0; index < H3_IMAGE_VAE_ROPE_FREQS; index++)
+        out[index] = 1.0f / powf(100.0f, (float)index / 8.0f);
+}
 
 enum {
     LATENT_CHANNELS = 24,
@@ -192,7 +197,7 @@ static int load_qkv(vae_context *vae, const char *prefix, vae_block *block,
     for (size_t row = 0; ok && row < 3 * (size_t)HIDDEN; row++) {
         unsigned projection;
         size_t source;
-        ok = h3_image_qkv_source(row, HEADS, HEAD_DIM, &projection, &source);
+        ok = h3_dit_qkv_source(row, HEADS, HEAD_DIM, &projection, &source);
         if (!ok) break;
         memcpy(weights + row * HIDDEN,
                source_w + projection * matrix + source * HIDDEN,

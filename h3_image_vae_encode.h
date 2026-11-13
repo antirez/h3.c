@@ -2,7 +2,6 @@
 #define H3_IMAGE_VAE_ENCODE_H
 
 #include "h3_gpu.h"
-#include "h3_image.h"
 #include "h3_image_vae.h"
 #include "h3_video_encoder.h"
 

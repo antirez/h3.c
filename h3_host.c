@@ -793,3 +793,28 @@ int h3_euler_velocity_step(float *sample, const float *velocity, size_t count,
         sample[index] += delta * velocity[index];
     return 1;
 }
+
+static const char *parse_dimension(const char *text, long *value) {
+    if (*text < '0' || *text > '9') return NULL;
+    long parsed = 0;
+    while (*text >= '0' && *text <= '9') {
+        parsed = parsed * 10 + (*text - '0');
+        if (parsed > INT32_MAX) return NULL;
+        text++;
+    }
+    *value = parsed;
+    return text;
+}
+
+int h3_parse_size(const char *text, int *width, int *height) {
+    long parsed_width, parsed_height;
+    if (!text || !width || !height) return 0;
+    const char *middle = parse_dimension(text, &parsed_width);
+    if (!middle || (*middle != 'x' && *middle != 'X')) return 0;
+    const char *end = parse_dimension(middle + 1, &parsed_height);
+    if (!end || *end || parsed_width < 1 || parsed_height < 1) return 0;
+    *width = (int)parsed_width;
+    *height = (int)parsed_height;
+    return 1;
+}
+

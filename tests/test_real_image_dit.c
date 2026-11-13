@@ -1,5 +1,5 @@
 #include "h3_dit.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_image_pipeline.h"
 #include "h3_safetensors.h"
 #include "h3_weights.h"
@@ -475,8 +475,8 @@ int main(int argc, char **argv) {
     h3_weight_store *weights = h3_weight_store_open(
         weight_directory, weights_error, sizeof(weights_error));
     if (!weights) die(weights_error);
-    float *head_weight[H3_IMAGE_STEPS], *head_bias[H3_IMAGE_STEPS];
-    for (unsigned head = 0; head < H3_IMAGE_STEPS; head++) {
+    float *head_weight[H3_DIT_IMAGE_STEPS], *head_bias[H3_DIT_IMAGE_STEPS];
+    for (unsigned head = 0; head < H3_DIT_IMAGE_STEPS; head++) {
         char name[96];
         snprintf(name, sizeof(name), "pdd_proj_out.%u.weight", head);
         head_weight[head] = read_head_tensor(weights, name,
@@ -562,7 +562,7 @@ int main(int argc, char **argv) {
         }
         require(h3_dit_read_final_hidden(dit, hidden, rows * HIDDEN),
                 "cannot read the final hidden state");
-        for (unsigned head = 0; head < H3_IMAGE_STEPS; head++) {
+        for (unsigned head = 0; head < H3_DIT_IMAGE_STEPS; head++) {
             double distance = head_distance(hidden, head_weight[head],
                                             head_bias[head], velocity[index],
                                             rows);

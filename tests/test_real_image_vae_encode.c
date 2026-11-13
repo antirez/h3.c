@@ -1,4 +1,5 @@
 #include "h3_dit.h"
+#include "h3_image_edit.h"
 #include "h3_image_vae_encode.h"
 #include "h3_safetensors.h"
 

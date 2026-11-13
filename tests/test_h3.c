@@ -2,7 +2,9 @@
 #include "h3_dit.h"
 #include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
+#include "h3_dit_family.h"
 #include "h3_image.h"
+#include "h3_image_edit.h"
 #include "h3_image_pipeline.h"
 #include "h3_image_vae.h"
 #include "h3_image_vae_encode.h"
@@ -446,7 +448,7 @@ static uint32_t float_bits(float value) {
 
 static void test_image_schedule(void) {
     h3_sigma_schedule schedule;
-    CHECK(h3_image_schedule_build(&schedule));
+    CHECK(h3_dit_image_schedule_build(&schedule));
     CHECK(schedule.steps == 6);
     const uint32_t sigma_bits[7] = {
         0x3f800000, 0x3f77afa2, 0x3f633661, 0x3f400000,
@@ -468,7 +470,7 @@ static void test_image_schedule(void) {
         CHECK(close_enough(schedule.video[index] - schedule.video[index + 1],
                            deltas[index], 1e-7));
     }
-    CHECK(!h3_image_schedule_build(NULL));
+    CHECK(!h3_dit_image_schedule_build(NULL));
 }
 
 static void test_image_canvas(void) {
@@ -522,11 +524,11 @@ static void test_image_canvas_limits(void) {
 
 static void test_image_parse_size(void) {
     int width = 7, height = 7;
-    CHECK(h3_image_parse_size("512x768", &width, &height));
+    CHECK(h3_parse_size("512x768", &width, &height));
     CHECK(width == 512 && height == 768);
-    CHECK(h3_image_parse_size("1X2", &width, &height));
+    CHECK(h3_parse_size("1X2", &width, &height));
     CHECK(width == 1 && height == 2);
-    CHECK(h3_image_parse_size("2147483647x1", &width, &height));
+    CHECK(h3_parse_size("2147483647x1", &width, &height));
     CHECK(width == 2147483647);
     const char *const bad[] = {
         "", "x", "512", "512x", "x512", " 512x512", "512x512 ", "512 x512",
@@ -536,10 +538,10 @@ static void test_image_parse_size(void) {
     };
     for (size_t index = 0; index < sizeof(bad) / sizeof(bad[0]); index++) {
         width = height = 7;
-        CHECK(!h3_image_parse_size(bad[index], &width, &height));
+        CHECK(!h3_parse_size(bad[index], &width, &height));
         CHECK(width == 7 && height == 7);
     }
-    CHECK(!h3_image_parse_size(NULL, &width, &height));
+    CHECK(!h3_parse_size(NULL, &width, &height));
 }
 
 static void test_image_layout(void) {
@@ -617,7 +619,7 @@ static void test_image_rope_inv_freq(void) {
         0x3a83126f, 0x3a136a16, 0x39a5cb60, 0x393a7753
     };
     float values[16];
-    h3_image_dit_inv_freq(values);
+    h3_dit_image_inv_freq(values);
     for (size_t index = 0; index < 16; index++)
         CHECK(float_bits(values[index]) == dit[index]);
     h3_image_vae_inv_freq(values);
@@ -742,7 +744,7 @@ static void test_image_qkv_interleave(void) {
         for (size_t dest = 0; dest < rows; dest++) {
             unsigned projection;
             size_t source;
-            CHECK(h3_image_qkv_source(dest, heads, dim, &projection, &source));
+            CHECK(h3_dit_qkv_source(dest, heads, dim, &projection, &source));
             size_t head = dest / ((size_t)3 * dim);
             CHECK(projection == (dest / dim) % 3);
             CHECK(source == head * dim + dest % dim);
@@ -753,19 +755,19 @@ static void test_image_qkv_interleave(void) {
         free(seen);
         unsigned projection;
         size_t source;
-        CHECK(!h3_image_qkv_source(rows, heads, dim, &projection, &source));
+        CHECK(!h3_dit_qkv_source(rows, heads, dim, &projection, &source));
     }
     unsigned projection;
     size_t source;
-    CHECK(h3_image_qkv_source(56 * 384 - 1, 56, 128, &projection, &source));
+    CHECK(h3_dit_qkv_source(56 * 384 - 1, 56, 128, &projection, &source));
     CHECK(projection == 2 && source == 56 * 128 - 1);
-    CHECK(h3_image_qkv_source(128, 56, 128, &projection, &source));
+    CHECK(h3_dit_qkv_source(128, 56, 128, &projection, &source));
     CHECK(projection == 1 && source == 0);
-    CHECK(h3_image_qkv_source(384 + 2 * 128 + 5, 56, 128, &projection, &source));
+    CHECK(h3_dit_qkv_source(384 + 2 * 128 + 5, 56, 128, &projection, &source));
     CHECK(projection == 2 && source == 128 + 5);
-    CHECK(h3_image_qkv_source(192 + 64 + 5, 16, 64, &projection, &source));
+    CHECK(h3_dit_qkv_source(192 + 64 + 5, 16, 64, &projection, &source));
     CHECK(projection == 1 && source == 64 + 5);
-    CHECK(!h3_image_qkv_source(0, 0, 128, &projection, &source));
+    CHECK(!h3_dit_qkv_source(0, 0, 128, &projection, &source));
 }
 
 static void test_dit_names(void) {
@@ -859,8 +861,8 @@ static void test_image_dit_bookkeeping(void) {
     CHECK(h3_dit_image_rows(NULL) == 0);
 
     h3_sigma_schedule schedule;
-    CHECK(h3_image_schedule_build(&schedule));
-    for (int step = 0; step < H3_IMAGE_STEPS; step++) {
+    CHECK(h3_dit_image_schedule_build(&schedule));
+    for (int step = 0; step < H3_DIT_IMAGE_STEPS; step++) {
         CHECK(schedule.video[step] == schedule.audio[step]);
         for (int other = 0; other < step; other++)
             CHECK(schedule.video[step] != schedule.video[other]);
@@ -915,7 +917,7 @@ static void test_qkv_slab_plan(void) {
                               &destination));
 
     /* Applying the plan to three small matrices gives the row order that
-     * h3_image_qkv_source describes. */
+     * h3_dit_qkv_source describes. */
     enum { HEADS = 3, DIM = 4, COLUMNS = 5 };
     int matrices[3][HEADS * DIM * COLUMNS];
     int grouped[3 * HEADS * DIM * COLUMNS];
@@ -930,7 +932,7 @@ static void test_qkv_slab_plan(void) {
     }
     for (size_t row = 0; row < 3 * HEADS * DIM; row++) {
         size_t source_row;
-        CHECK(h3_image_qkv_source(row, HEADS, DIM, &projection, &source_row));
+        CHECK(h3_dit_qkv_source(row, HEADS, DIM, &projection, &source_row));
         CHECK(memcmp(grouped + row * COLUMNS,
                      matrices[projection] + source_row * COLUMNS,
                      COLUMNS * sizeof(int)) == 0);

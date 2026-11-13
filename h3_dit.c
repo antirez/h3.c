@@ -2,7 +2,7 @@
 
 #include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_weights.h"
 
 #include <limits.h>
@@ -161,8 +161,8 @@ struct h3_dit {
     h3_gpu_tensor *final_video_b;
     h3_gpu_tensor *final_audio_w;
     h3_gpu_tensor *final_audio_b;
-    h3_gpu_tensor *image_head_w[H3_IMAGE_STEPS];
-    h3_gpu_tensor *image_head_b[H3_IMAGE_STEPS];
+    h3_gpu_tensor *image_head_w[H3_DIT_IMAGE_STEPS];
+    h3_gpu_tensor *image_head_b[H3_DIT_IMAGE_STEPS];
     h3_gpu_tensor *video_input;
     h3_gpu_tensor *audio_input;
     h3_gpu_tensor *video_projected_f32;
@@ -951,7 +951,7 @@ static int prepare_rope(h3_dit *dit, char *error, size_t error_size) {
         }
         free_tensor(&inverse_tensor);
     } else {
-        h3_image_dit_inv_freq(inverse);
+        h3_dit_image_inv_freq(inverse);
     }
     float spatial_scale = dit->spatial_rope_scale;
     size_t count = (size_t)dit->sequence * ROPE_HALF;
@@ -1370,7 +1370,7 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
         dit->stream_read_seconds += job.seconds;
     }
     const h3_dit_names *names = dit->names;
-    unsigned head_count = dit->image ? H3_IMAGE_STEPS : 1;
+    unsigned head_count = dit->image ? H3_DIT_IMAGE_STEPS : 1;
     for (unsigned head = 0; head < head_count; head++) {
         char head_weight[96], head_bias[96];
         if (!h3_dit_name_format(head_weight, sizeof(head_weight),
@@ -1722,7 +1722,7 @@ static h3_dit *load_dit(const char *weight_directory,
     dit->image = image;
     dit->names = h3_dit_names_for(image ? H3_DIT_FAMILY_IMAGE :
                                           H3_DIT_FAMILY_VIDEO);
-    dit->fc1_gate_first = image ? H3_IMAGE_FC1_GATE_FIRST : 1;
+    dit->fc1_gate_first = image ? H3_DIT_IMAGE_FC1_GATE_FIRST : 1;
     dit->adaln_order = image ? H3_DIT_ADALN_SILU_THEN_CAST :
                                H3_DIT_ADALN_CAST_THEN_SILU;
     dit->fused_mlp = getenv("H3_DISABLE_FUSED_MLP") == NULL;
@@ -1987,7 +1987,7 @@ h3_dit *h3_dit_load_image(const char *weight_directory,
                                error_size))
         return NULL;
     h3_dit *dit = NULL;
-    if (h3_image_schedule_build(&sigmas))
+    if (h3_dit_image_schedule_build(&sigmas))
         dit = load_dit(weight_directory, shader_source_path, text, &layout,
                        &sigmas, active_blocks, 1, 0, ssd_streaming, 1.0f,
                        use_slower_bf16_mlp, use_slower_bf16_qkv,
@@ -2788,7 +2788,7 @@ int h3_dit_forward_image(h3_dit *dit, int step, const float *latent_rows,
                          float *velocity_rows, char *error,
                          size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!dit || !dit->image || step < 0 || step >= H3_IMAGE_STEPS ||
+    if (!dit || !dit->image || step < 0 || step >= H3_DIT_IMAGE_STEPS ||
         step >= h3_dit_schedule_steps(dit->schedule) || !latent_rows ||
         !velocity_rows) {
         fail(error, error_size, "invalid image DiT forward arguments");
@@ -3341,7 +3341,7 @@ void h3_dit_free(h3_dit *dit) {
     free_tensor(&dit->final_norm);
     free_tensor(&dit->final_video_w); free_tensor(&dit->final_video_b);
     free_tensor(&dit->final_audio_w); free_tensor(&dit->final_audio_b);
-    for (unsigned head = 0; head < H3_IMAGE_STEPS; head++) {
+    for (unsigned head = 0; head < H3_DIT_IMAGE_STEPS; head++) {
         free_tensor(&dit->image_head_w[head]);
         free_tensor(&dit->image_head_b[head]);
     }

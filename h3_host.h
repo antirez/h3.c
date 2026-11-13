@@ -92,6 +92,10 @@ typedef struct {
     int has_spare;
 } h3_rng;
 
+/* Parse "WxH" (or "WXH"): two plain decimal integers in [1, INT32_MAX], no
+ * sign, no whitespace, nothing after. */
+int h3_parse_size(const char *text, int *width, int *height);
+
 int h3_align_frame_count(int requested);
 int h3_video_latent_t(int frame_count);
 int h3_video_encoder_latent_t(int frame_count);

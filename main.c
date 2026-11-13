@@ -1,7 +1,6 @@
 #include "h3.h"
 #include "h3_cli.h"
 #include "h3_host.h"
-#include "h3_image.h"
 #include "h3_terminal.h"
 
 #include <errno.h>
@@ -424,7 +423,7 @@ int main(int argc, char **argv) {
                 height_given = 1;
                 break;
             case OPT_SIZE:
-                if (!h3_image_parse_size(optarg, &params.width,
+                if (!h3_parse_size(optarg, &params.width,
                                          &params.height)) {
                     fprintf(stderr, "h3: --size must be WxH: %s\n", optarg);
                     return 2;

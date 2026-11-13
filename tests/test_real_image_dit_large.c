@@ -1,6 +1,6 @@
 #include "h3_dit.h"
 #include "h3_gpu.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_safetensors.h"
 
 #include <math.h>

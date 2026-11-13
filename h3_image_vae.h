@@ -6,6 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define H3_IMAGE_VAE_ROPE_FREQS 8
+
+/* Image VAE decoder rotary frequencies. */
+void h3_image_vae_inv_freq(float *out);
+
 typedef struct {
     int height;
     int width;

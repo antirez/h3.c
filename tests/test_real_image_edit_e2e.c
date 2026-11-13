@@ -1,6 +1,7 @@
 #include "h3.h"
 #include "h3_ffmpeg.h"
 #include "h3_image.h"
+#include "h3_image_edit.h"
 #include "h3_image_vae_encode.h"
 #include "h3_internal.h"
 #include "h3_safetensors.h"

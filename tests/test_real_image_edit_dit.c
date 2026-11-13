@@ -2,7 +2,7 @@
 #include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
 #include "h3_gpu.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_image_vae_encode.h"
 #include "h3_safetensors.h"
 #include "h3_weights.h"
@@ -370,7 +370,7 @@ static block_weights load_block(const h3_weight_store *weights,
                                   MODALITIES * SLOTS * HIDDEN, 0);
     weight_name(name, sizeof(name), names, names->fc1);
     h3_gpu_tensor *fc1 = h3_weight_load_bf16_halves(
-        weights, gpu, name, FFN * 2, HIDDEN, !H3_IMAGE_FC1_GATE_FIRST, error,
+        weights, gpu, name, FFN * 2, HIDDEN, !H3_DIT_IMAGE_FC1_GATE_FIRST, error,
         sizeof(error));
     if (!fc1) die(error);
     result.fc1 = own(fc1, name);
@@ -506,7 +506,7 @@ static void check_block0(const char *weight_directory,
     const h3_dit_names *names = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
 
     h3_sigma_schedule schedule;
-    require(h3_image_schedule_build(&schedule), "cannot build the schedule");
+    require(h3_dit_image_schedule_build(&schedule), "cannot build the schedule");
     require(timesteps[0] == 1.0f - schedule.video[0] && timesteps[1] == 0.999f,
             "the fixture's time values are not [1 - sigma, 0.999]");
     float features[2 * TIME_INPUT];
@@ -530,7 +530,7 @@ static void check_block0(const char *weight_directory,
     float *sines = malloc(sequence * ROPE_HALF * sizeof(*sines));
     require(rows && cosines && sines, "host allocation failed");
     float inverse[ROPE_FREQS];
-    h3_image_dit_inv_freq(inverse);
+    h3_dit_image_inv_freq(inverse);
     for (size_t row = 0; row < sequence; row++) {
         require(indices[row] >= 0 && indices[row] < 2 * MODALITIES,
                 "unexpected AdaLN row index");
@@ -715,7 +715,7 @@ static void check_positions(const h3_st_header *step_fixture,
  * step and the step row is float32 1 - sigma. */
 static void check_time_values(const h3_st_header *step_fixture) {
     h3_sigma_schedule schedule;
-    require(h3_image_schedule_build(&schedule), "cannot build the schedule");
+    require(h3_dit_image_schedule_build(&schedule), "cannot build the schedule");
     uint32_t aug_bits;
     float aug = H3_REFERENCE_NOISE_AUG;
     memcpy(&aug_bits, &aug, sizeof(aug_bits));
@@ -892,8 +892,8 @@ int main(int argc, char **argv) {
     h3_weight_store *weights = h3_weight_store_open(
         weight_directory, weights_error, sizeof(weights_error));
     if (!weights) die(weights_error);
-    float *head_weight[H3_IMAGE_STEPS], *head_bias[H3_IMAGE_STEPS];
-    for (unsigned head = 0; head < H3_IMAGE_STEPS; head++) {
+    float *head_weight[H3_DIT_IMAGE_STEPS], *head_bias[H3_DIT_IMAGE_STEPS];
+    for (unsigned head = 0; head < H3_DIT_IMAGE_STEPS; head++) {
         char name[96];
         snprintf(name, sizeof(name), "pdd_proj_out.%u.weight", head);
         head_weight[head] = read_head_tensor(weights, name,
@@ -984,7 +984,7 @@ int main(int argc, char **argv) {
         /* (4) Head binding on the generated rows' final hidden state. */
         require(h3_dit_read_final_hidden(dit, hidden, edit.rows * HIDDEN),
                 "cannot read the final hidden state");
-        for (unsigned head = 0; head < H3_IMAGE_STEPS; head++) {
+        for (unsigned head = 0; head < H3_DIT_IMAGE_STEPS; head++) {
             double distance = head_distance(hidden, head_weight[head],
                                             head_bias[head], velocity[index],
                                             edit.rows);

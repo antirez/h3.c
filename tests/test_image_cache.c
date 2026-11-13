@@ -1,5 +1,6 @@
 #include "h3_ffmpeg.h"
 #include "h3_image.h"
+#include "h3_image_edit.h"
 #include "h3_image_cache.h"
 #include "h3_internal.h"
 

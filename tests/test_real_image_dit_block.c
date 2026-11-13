@@ -1,7 +1,7 @@
 #include "h3_dit_names.h"
 #include "h3_dit_schedule.h"
 #include "h3_gpu.h"
-#include "h3_image.h"
+#include "h3_dit_family.h"
 #include "h3_safetensors.h"
 #include "h3_weights.h"
 
@@ -369,7 +369,7 @@ int main(int argc, char **argv) {
     float *want_f32 = read_fixture(&fixture, "hidden_out_f32", H3_DTYPE_F32,
                                    sequence * HIDDEN);
     int32_t step = read_scalar(&fixture, "step");
-    require(step >= 0 && step < H3_IMAGE_STEPS, "fixture step out of range");
+    require(step >= 0 && step < H3_DIT_IMAGE_STEPS, "fixture step out of range");
 
     h3_weight_store *weights = h3_weight_store_open(weight_directory, error,
                                                     sizeof(error));
@@ -379,7 +379,7 @@ int main(int argc, char **argv) {
     const h3_dit_names *names = h3_dit_names_for(H3_DIT_FAMILY_IMAGE);
 
     h3_sigma_schedule schedule;
-    require(h3_image_schedule_build(&schedule), "cannot build the schedule");
+    require(h3_dit_image_schedule_build(&schedule), "cannot build the schedule");
     float features[TIME_INPUT];
     h3_dit_time_features(1.0f - schedule.video[step], features);
     h3_gpu_tensor *computed_time = own(h3_dit_time_embed(
@@ -400,7 +400,7 @@ int main(int argc, char **argv) {
     float *sines = malloc(sequence * ROPE_HALF * sizeof(*sines));
     require(rows && cosines && sines, "host allocation failed");
     float inverse[ROPE_FREQS];
-    h3_image_dit_inv_freq(inverse);
+    h3_dit_image_inv_freq(inverse);
     for (size_t row = 0; row < sequence; row++) {
         require(indices[row] >= 0 && indices[row] < MODALITIES,
                 "unexpected AdaLN row index");
@@ -458,7 +458,7 @@ int main(int argc, char **argv) {
     int winner = passes[1];
     printf("FC1 half order that matches the reference: fc1_gate_first=%d\n",
            winner);
-    require(winner == H3_IMAGE_FC1_GATE_FIRST,
+    require(winner == H3_DIT_IMAGE_FC1_GATE_FIRST,
             "the image loader default disagrees with the passing FC1 order");
     printf("ok: block 0 matches the diffusers reference (median row rel-L2 %.6g < %g)\n",
            result[winner].row_median, BOUND);

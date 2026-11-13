@@ -1,6 +1,7 @@
 #include "h3_ffmpeg.h"
 #include "h3_image.h"
 #include "h3_image_cache.h"
+#include "h3_internal.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -116,7 +117,7 @@ static char *key_of(h3_ctx *ctx, const char *prompt, size_t count,
                     uint8_t *const *sources, const int *widths,
                     const int *heights) {
     int vision_w[2] = {64, 96}, vision_h[2] = {64, 32};
-    char *key = h3_image_cache_key(ctx, prompt, count, widths, heights,
+    char *key = h3_image_text_cache_key(ctx, prompt, count, widths, heights,
                                    (const uint8_t *const *)sources, vision_w,
                                    vision_h);
     CHECK(key != NULL);
@@ -205,7 +206,7 @@ static void test_key(void) {
 
     /* Everything that can change the embedding changes the key. */
     int other_vision_w[2] = {64, 96}, other_vision_h[2] = {64, 64};
-    char *vision = h3_image_cache_key(ctx, "make <Picture 1> red", 2, widths,
+    char *vision = h3_image_text_cache_key(ctx, "make <Picture 1> red", 2, widths,
                                       heights,
                                       (const uint8_t *const *)sources,
                                       other_vision_w, other_vision_h);
@@ -562,9 +563,9 @@ static void test_wiring(const char *tokenizer_json) {
     const char *prompt = "Keep <Picture 1> as it is, at night.";
     const uint8_t *sources[1] = {decoded};
     int vision_w[1] = {geometry.vision_w}, vision_h[1] = {geometry.vision_h};
-    char *edit_key = h3_image_cache_key(ctx, prompt, 1, &width, &height,
+    char *edit_key = h3_image_text_cache_key(ctx, prompt, 1, &width, &height,
                                         sources, vision_w, vision_h);
-    char *text_key = h3_image_cache_key(ctx, "a red fox", 0, NULL, NULL, NULL,
+    char *text_key = h3_image_text_cache_key(ctx, "a red fox", 0, NULL, NULL, NULL,
                                         NULL, NULL);
     CHECK(edit_key && text_key);
     h3_text_embedding plain = make_text(3, 8, 0);

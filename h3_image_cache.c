@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,23 +78,16 @@ static void file_sha_hex(const char *path,
     hex_digest(digest, out);
 }
 
-static char build_id[2 * CC_SHA256_DIGEST_LENGTH + 1];
+static char build_id_override[2 * CC_SHA256_DIGEST_LENGTH + 1];
 
 void h3_image_cache_set_build_id(const char *id) {
-    if (id) snprintf(build_id, sizeof(build_id), "%s", id);
-    else build_id[0] = '\0';
+    if (id) snprintf(build_id_override, sizeof(build_id_override), "%s", id);
+    else build_id_override[0] = '\0';
 }
 
-/* The code that computes an embedding is the running executable. */
-static const char *executable_hash(void) {
-    if (build_id[0]) return build_id;
-    char path[PATH_MAX], real[PATH_MAX];
-    uint32_t size = sizeof(path);
-    if (_NSGetExecutablePath(path, &size) != 0 || !realpath(path, real))
-        strcpy(build_id, "none");
-    else
-        file_sha_hex(real, build_id);
-    return build_id;
+static const char *build_identity(const h3_image_cache_inputs *inputs) {
+    if (build_id_override[0]) return build_id_override;
+    return inputs->build_id && *inputs->build_id ? inputs->build_id : "none";
 }
 
 static int by_name(const void *a, const void *b) {
@@ -194,7 +186,8 @@ static void directory_hash(const char *path,
     hex_digest(digest, out);
 }
 
-char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
+char *h3_image_cache_key(const h3_image_cache_inputs *inputs,
+                         const char *prompt, size_t count,
                          const int *widths, const int *heights,
                          const uint8_t *const *sources,
                          const int *vision_widths, const int *vision_heights) {
@@ -202,8 +195,8 @@ char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
     size_t length = 0;
     FILE *key = open_memstream(&text, &length);
     if (!key) return NULL;
-    char *real = realpath(ctx->model_dir, NULL);
-    char *tokenizer_path = malloc(strlen(ctx->model_dir) + 32);
+    char *real = realpath(inputs->model_dir, NULL);
+    char *tokenizer_path = malloc(strlen(inputs->model_dir) + 32);
     char tokenizer[2 * CC_SHA256_DIGEST_LENGTH + 1];
     char shaders[2 * CC_SHA256_DIGEST_LENGTH + 1];
     char weights[2 * CC_SHA256_DIGEST_LENGTH + 1];
@@ -214,19 +207,18 @@ char *h3_image_cache_key(const h3_ctx *ctx, const char *prompt, size_t count,
         free(real);
         return NULL;
     }
-    sprintf(tokenizer_path, "%s/tokenizer/tokenizer.json", ctx->model_dir);
+    sprintf(tokenizer_path, "%s/tokenizer/tokenizer.json", inputs->model_dir);
     file_sha_hex(tokenizer_path, tokenizer);
     file_sha_hex("h3_shaders.metal", shaders);
-    sprintf(tokenizer_path, "%s/text_encoder", ctx->model_dir);
+    sprintf(tokenizer_path, "%s/text_encoder", inputs->model_dir);
     directory_hash(tokenizer_path, weights);
     environment_hash(environment);
-    const h3_component_info *encoder = &ctx->model.text_encoder;
     fprintf(key, "edit-cache=%d|build=%s|device=%s|env=%s|model=%s"
             "|text-encoder=%llu:%zu:%zu|weights=%s|tokenizer=%s|shaders=%s"
-            "|prompt=%zu:", H3_EDIT_CACHE_VERSION, executable_hash(),
-            ctx->device.name, environment, real ? real : ctx->model_dir,
-            (unsigned long long)encoder->bytes, encoder->files,
-            encoder->tensors, weights, tokenizer, shaders, strlen(prompt));
+            "|prompt=%zu:", H3_EDIT_CACHE_VERSION, build_identity(inputs),
+            inputs->device_name, environment, real ? real : inputs->model_dir,
+            inputs->text_encoder_bytes, inputs->text_encoder_files,
+            inputs->text_encoder_tensors, weights, tokenizer, shaders, strlen(prompt));
     fwrite(prompt, 1, strlen(prompt), key);
     fprintf(key, "|refs=%zu", count);
     for (size_t index = 0; index < count; index++) {

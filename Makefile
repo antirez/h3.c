@@ -21,6 +21,19 @@ LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
+# The text embedding a request gets depends on these sources (the text path:
+# tokenizer, weights, Metal, vision tower, edit sizing, cache and its caller).
+# Their SHA-256 is the build identity of the text cache, so a rebuild with the
+# same sources keeps the cache and any change to them drops it. The shader file
+# is hashed at run time by the cache key.
+TEXT_BUILD_SRC := h3.h h3_internal.h h3_host.h h3_gpu.h h3_gpu.m h3_metal.h \
+	h3_metal.m h3_tokenizer.h h3_tokenizer.m h3_safetensors.h \
+	h3_safetensors.c h3_weights.h h3_weights.c h3_text_encoder.h \
+	h3_text_encoder.c h3_vision_encoder.h h3_vision_encoder.c \
+	h3_multimodal.h h3_multimodal.c h3_image.h h3_image.c \
+	h3_image_pipeline.h h3_image_pipeline.c h3_image_edit.h h3_image_edit.c \
+	h3_image_cache.h h3_image_cache.c h3_image_generate.c
+
 .PHONY: all test parity real-parity image-check image-edit-check image-edit-fixtures clean
 
 all: h3 libh3.a
@@ -178,8 +191,12 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 	else \
 		echo "skip: released tokenizer is not installed"; \
 	fi
-	./h3_edit_presentation_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
-	./h3_image_cache_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json
+	@if test -f $(H3_IMAGE_DIR)/tokenizer/tokenizer.json; then \
+		./h3_edit_presentation_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json && \
+		./h3_image_cache_tests $(H3_IMAGE_DIR)/tokenizer/tokenizer.json; \
+	else \
+		echo "skip: image tokenizer is not installed"; \
+	fi
 	@if test -f misc/fixtures/h3_text_bf16.safetensors; then \
 		./h3_text_tests misc/fixtures/h3_text_bf16.safetensors; \
 	else \
@@ -464,6 +481,16 @@ real-parity: h3_real_prompt_test h3_real_dit_block_test
 	./h3_real_prompt_test MiniMax-H3 misc/fixtures/h3_real_prompt_bf16.safetensors
 	./h3_real_dit_block_test MiniMax-H3 misc/fixtures/h3_real_dit_block0_bf16.safetensors
 
+# Rewritten only when the digest changes, so a touch does not rebuild.
+h3_text_build_id.h: $(TEXT_BUILD_SRC)
+	@id=$$(cat $(TEXT_BUILD_SRC) | shasum -a 256 | cut -d' ' -f1); \
+	line="#define H3_TEXT_BUILD_ID \"$$id\""; \
+	if test "$$(cat $@ 2>/dev/null)" != "$$line"; then \
+		echo "$$line" > $@; \
+	fi
+
+h3_image_generate.o: h3_text_build_id.h
+
 %.o: %.c
 	$(CC) $(CFLAGS) -I. -c $< -o $@
 
@@ -496,4 +523,4 @@ clean:
 		h3_image_edit_tests h3_image_cache_tests h3_real_image_edit_e2e_test \
 		h3_real_image_edit_text_test h3_real_image_edit_dit_test \
 	h3_dit_bench h3_dit_bench_864 \
-	libh3.a *.o *.d tests/*.o tests/*.d
+	h3_text_build_id.h libh3.a *.o *.d tests/*.o tests/*.d

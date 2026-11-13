@@ -9,6 +9,7 @@
 #include "h3_image_vae.h"
 #include "h3_image_vae_encode.h"
 #include "h3_multimodal.h"
+#include "h3_text_build_id.h"
 #include "h3_text_encoder.h"
 #include "h3_tokenizer.h"
 #include "h3_vision_encoder.h"
@@ -457,6 +458,23 @@ static int h3_edit_encode_text(h3_ctx *ctx, const char *prompt,
     return ok;
 }
 
+/* Gather what names the computation (model directory, text encoder inventory,
+ * device, build identity) and compose the key with the cache module. */
+char *h3_image_text_cache_key(const h3_ctx *ctx, const char *prompt,
+                              size_t count, const int *widths,
+                              const int *heights,
+                              const uint8_t *const *sources,
+                              const int *vision_widths,
+                              const int *vision_heights) {
+    const h3_component_info *encoder = &ctx->model.text_encoder;
+    h3_image_cache_inputs inputs = {
+        ctx->model_dir, ctx->device.name,
+        (unsigned long long)encoder->bytes, encoder->files, encoder->tensors,
+        H3_TEXT_BUILD_ID};
+    return h3_image_cache_key(&inputs, prompt, count, widths, heights,
+                              sources, vision_widths, vision_heights);
+}
+
 typedef struct {
     char *key;
     char path[1024];
@@ -485,9 +503,9 @@ static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
         vision_w[index] = edit->geometry[index].vision_w;
         vision_h[index] = edit->geometry[index].vision_h;
     }
-    cache->key = h3_image_cache_key(ctx, prompt, edit->count, edit->widths,
-                                    edit->heights, sources, vision_w,
-                                    vision_h);
+    cache->key = h3_image_text_cache_key(ctx, prompt, edit->count,
+                                         edit->widths, edit->heights, sources,
+                                         vision_w, vision_h);
     if (!cache->key) return;
     cache->hit = h3_image_cache_load(ctx->cache_dir, cache->key, text,
                                      cache->path, sizeof(cache->path));

@@ -105,6 +105,14 @@ void h3_vision_progress_bridge(int completed, int total, void *opaque);
 /* "root/relative", malloc'd (the caller frees it); NULL when out of memory. */
 char *h3_path(const char *root, const char *relative);
 
+/* The text cache key of a request, composed from ctx (h3_image_generate.c). */
+char *h3_image_text_cache_key(const h3_ctx *ctx, const char *prompt,
+                              size_t count, const int *widths,
+                              const int *heights,
+                              const uint8_t *const *sources,
+                              const int *vision_widths,
+                              const int *vision_heights);
+
 void h3_set_error(h3_ctx *ctx, const char *format, ...)
     __attribute__((format(printf, 2, 3)));
 

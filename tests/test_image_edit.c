@@ -503,17 +503,21 @@ static void test_reference_rows(const char *model_dir) {
     const char *prompt = "<Picture 2> in the style of <Picture 1>";
 
     h3_image_hooks hooks;
+
+    h3_image_probe probe;
     memset(&hooks, 0, sizeof(hooks));
-    hooks.references_only = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.references_only = 1;
     h3_result *result = h3_generate_image_with_hooks(ctx, prompt, &params,
                                                      &hooks);
     CHECK(result != NULL);
     CHECK(result->width == 256 && result->height == 256);
-    CHECK(hooks.condition_elements == offsets[COUNT]);
-    CHECK(hooks.condition_rows != NULL &&
-          !memcmp(hooks.condition_rows, expected,
+    CHECK(probe.condition_elements == offsets[COUNT]);
+    CHECK(probe.condition_rows != NULL &&
+          !memcmp(probe.condition_rows, expected,
                   offsets[COUNT] * sizeof(float)));
-    CHECK(hooks.latent == NULL && hooks.rgb == NULL);
+    CHECK(probe.latent == NULL && probe.rgb == NULL);
 
     char *tokenizer_path = malloc(strlen(model_dir) + 32);
     CHECK(tokenizer_path != NULL);
@@ -530,11 +534,11 @@ static void test_reference_rows(const char *model_dir) {
     CHECK(h3_multimodal_edit_presentation(tokenizer, prompt, grid_h, grid_w,
                                           COUNT, &presentation, error,
                                           sizeof(error)));
-    CHECK(hooks.text_tokens == presentation.count);
+    CHECK(probe.text_tokens == presentation.count);
     h3_edit_presentation_free(&presentation);
     h3_tokenizer_free(tokenizer);
     free(tokenizer_path);
-    free(hooks.condition_rows);
+    free(probe.condition_rows);
     h3_result_free(result);
 
     /* Hook inputs: the stream noises and VAE copies that differ from h3's
@@ -565,7 +569,9 @@ static void test_reference_rows(const char *model_dir) {
     const float *posterior_hook[COUNT] = {posterior[0], posterior[1]};
     const float *aug_hook[COUNT] = {aug[0], aug[1]};
     memset(&hooks, 0, sizeof(hooks));
-    hooks.references_only = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.references_only = 1;
     hooks.vae_pixels = vae_hook;
     hooks.vision_pixels = vision_hook;
     hooks.reference_posterior_noise = posterior_hook;
@@ -573,11 +579,11 @@ static void test_reference_rows(const char *model_dir) {
     params.seed = seed + 1000;
     result = h3_generate_image_with_hooks(ctx, prompt, &params, &hooks);
     CHECK(result != NULL);
-    CHECK(hooks.condition_elements == offsets[COUNT]);
-    CHECK(hooks.condition_rows != NULL &&
-          !memcmp(hooks.condition_rows, expected_inverted,
+    CHECK(probe.condition_elements == offsets[COUNT]);
+    CHECK(probe.condition_rows != NULL &&
+          !memcmp(probe.condition_rows, expected_inverted,
                   offsets[COUNT] * sizeof(float)));
-    free(hooks.condition_rows);
+    free(probe.condition_rows);
     h3_result_free(result);
 
     for (int index = 0; index < COUNT; index++) {

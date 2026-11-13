@@ -88,33 +88,6 @@ int h3_dit_forward_image(h3_dit *dit, int step, const float *latent_rows,
 /* Rows of the generated image (P) of an image transformer, else 0. */
 size_t h3_dit_image_rows(const h3_dit *dit);
 
-/* Sequence row of every video row source, in source order: the rows of the
- * COND, REF_IMAGE and VIDEO segments as the layout lists them, which is the
- * order of the F32 video input (condition rows, then generated rows). Writes
- * at most `capacity` entries and returns the total count. The mapped patch
- * projection of the DiT consumes exactly this map. */
-size_t h3_dit_video_source_rows(const h3_layout *layout, uint32_t *rows,
-                                size_t capacity);
-
-/* Number of distinct timestep rows of the AdaLN tables: the six steps plus
- * one for the reference rows of an edit. */
-uint32_t h3_dit_time_rows(const h3_dit *dit);
-
-/* The AdaLN row map the fused kernels use at `step` (time row * 3 + modality
- * tag for each of the `count` rows of the packed sequence), recomputed from
- * the loaded schedule and layout. text_tags is one tag per text row or NULL. */
-int h3_dit_read_row_map(const h3_dit *dit, int step, const uint8_t *text_tags,
-                        size_t text_tag_count, uint32_t *rows, size_t count);
-
-/* Copy the F32 final hidden state [rows, 5376] that fed the output head of
- * the last image forward, for diagnostics. */
-int h3_dit_read_final_hidden(const h3_dit *dit, float *values,
-                             size_t elements);
-
-/* Copy the refined text rows [tokens, 5376] as BF16, for diagnostics. */
-int h3_dit_read_refined_text(const h3_dit *dit, uint16_t *values,
-                             size_t elements);
-
 /* Reset mutable sampler state and replace seed-dependent condition rows before
  * reusing an otherwise identical prepared transformer. */
 int h3_dit_reset_run(h3_dit *dit,
@@ -181,5 +154,35 @@ int h3_dit_pack_audio(const float *latent, int channels, int time,
                       float *rows, size_t row_elements);
 int h3_dit_unpack_audio(const float *rows, int channels, int time,
                         float *latent, size_t latent_elements);
+
+/* ---- For tests only: read-backs and pinned helpers that production code
+ * does not call. ---- */
+
+/* Sequence row of every video row source, in source order: the rows of the
+ * COND, REF_IMAGE and VIDEO segments as the layout lists them, which is the
+ * order of the F32 video input (condition rows, then generated rows). Writes
+ * at most `capacity` entries and returns the total count. The mapped patch
+ * projection of the DiT consumes exactly this map. */
+size_t h3_dit_video_source_rows(const h3_layout *layout, uint32_t *rows,
+                                size_t capacity);
+
+/* Number of distinct timestep rows of the AdaLN tables: the six steps plus
+ * one for the reference rows of an edit. */
+uint32_t h3_dit_time_rows(const h3_dit *dit);
+
+/* The AdaLN row map the fused kernels use at `step` (time row * 3 + modality
+ * tag for each of the `count` rows of the packed sequence), recomputed from
+ * the loaded schedule and layout. text_tags is one tag per text row or NULL. */
+int h3_dit_read_row_map(const h3_dit *dit, int step, const uint8_t *text_tags,
+                        size_t text_tag_count, uint32_t *rows, size_t count);
+
+/* Copy the F32 final hidden state [rows, 5376] that fed the output head of
+ * the last image forward, for diagnostics. */
+int h3_dit_read_final_hidden(const h3_dit *dit, float *values,
+                             size_t elements);
+
+/* Copy the refined text rows [tokens, 5376] as BF16, for diagnostics. */
+int h3_dit_read_refined_text(const h3_dit *dit, uint16_t *values,
+                             size_t elements);
 
 #endif

@@ -487,12 +487,13 @@ typedef struct {
 static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
                                  const h3_edit_state *edit,
                                  size_t presentation_tokens,
-                                 h3_image_hooks *hooks,
+                                 const h3_image_hooks *hooks,
+                                 h3_image_probe *probe,
                                  h3_text_cache_state *cache,
                                  h3_text_embedding *text) {
     const uint8_t *sources[H3_IMAGE_MAX_REFERENCES];
     int vision_w[H3_IMAGE_MAX_REFERENCES], vision_h[H3_IMAGE_MAX_REFERENCES];
-    if (hooks) hooks->cache_result = H3_CACHE_NOT_USED;
+    if (probe) probe->cache_result = H3_CACHE_NOT_USED;
     cache->label = edit->count ? "edit text cache" : "text cache";
     if (!ctx->cache_dir ||
         (hooks && (hooks->vae_pixels || hooks->vision_pixels))) {
@@ -516,7 +517,7 @@ static void h3_text_cache_lookup(const h3_ctx *ctx, const char *prompt,
         h3_text_embedding_free(text);
         cache->hit = 0;
     }
-    if (hooks) hooks->cache_result = cache->hit ? H3_CACHE_HIT :
+    if (probe) probe->cache_result = cache->hit ? H3_CACHE_HIT :
                                                   H3_CACHE_MISS;
     if (cache->hit)
         fprintf(stderr, "h3: %s hit %s\n", cache->label, cache->path);
@@ -547,6 +548,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
         return NULL;
     }
     if (!h3_valid_image_params(ctx, params)) return NULL;
+    h3_image_probe *probe = hooks ? hooks->probe : NULL;
     int profile = getenv("H3_PROFILE") != NULL;
     h3_generation_progress progress = {
         ctx, params->on_progress, params->callback_opaque, NULL, 0};
@@ -608,12 +610,12 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                                          &presentation_tokens) ||
             !h3_edit_check(ctx, &edit_state, latent_height, latent_width,
                            presentation_tokens, size_defaulted)) goto cleanup;
-        if (hooks) hooks->text_tokens = presentation_tokens;
+        if (probe) probe->text_tokens = presentation_tokens;
     }
     h3_text_cache_lookup(ctx, prompt, &edit_state, presentation_tokens, hooks,
-                         &text_cache, &text);
-    if (text_cache.hit && hooks && hooks->stop_after_lookup) {
-        hooks->text = text;
+                         probe, &text_cache, &text);
+    if (text_cache.hit && probe && probe->stop_after_lookup) {
+        probe->text = text;
         memset(&text, 0, sizeof(text));
         goto deliver;
     }
@@ -630,7 +632,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
                                        !text_cache.hit))
             goto cleanup;
         if (profile) h3_image_phase_end(&phase_log, "reference VAE");
-        if (hooks && hooks->references_only) goto deliver;
+        if (probe && probe->references_only) goto deliver;
         if (text_cache.hit) {
             h3_progress_emit(&progress, "text encoder", 50, 50);
         } else {
@@ -681,7 +683,7 @@ h3_result *h3_generate_image_with_hooks(h3_ctx *ctx, const char *prompt,
     }
     if (profile) h3_image_phase_end(&phase_log, "DiT load");
     fprintf(stderr, "h3: image DiT weights: %s\n", h3_dit_weight_mode(dit));
-    if (hooks) hooks->weight_mode = h3_dit_weight_mode(dit);
+    if (probe) probe->weight_mode = h3_dit_weight_mode(dit);
     if (progress.cancelled) goto cleanup;
     size_t latent_elements = (size_t)H3_IMAGE_LATENT_CHANNELS *
                              (size_t)latent_height * (size_t)latent_width;
@@ -781,15 +783,15 @@ deliver:
     result->height = request_height;
     result->frames = 1;
     result->seed = params->seed;
-    if (hooks) {
+    if (probe) {
         if (edit) {
-            hooks->condition_rows = edit_state.condition_rows;
-            hooks->condition_elements = edit_state.condition_elements;
+            probe->condition_rows = edit_state.condition_rows;
+            probe->condition_elements = edit_state.condition_elements;
             edit_state.condition_rows = NULL;
         }
-        hooks->latent = latent;
+        probe->latent = latent;
         latent = NULL;
-        hooks->rgb = rgb;
+        probe->rgb = rgb;
         rgb = NULL;
     }
 

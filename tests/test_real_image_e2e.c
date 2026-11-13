@@ -193,7 +193,8 @@ int main(int argc, char **argv) {
     params.tuning.ssd_streaming = stream;
     params.use_int8 = int8;
     params.on_progress = progress;
-    h3_image_hooks hooks = {.noise = noise};
+    h3_image_probe probe = {0};
+    h3_image_hooks hooks = {.noise = noise, .probe = &probe};
     printf("mode %s: \"%s\" at %dx%d, min area %d, seed %d\n", mode, prompt,
            width, height, min_area, seed);
     double started = seconds_now();
@@ -201,10 +202,10 @@ int main(int argc, char **argv) {
                                                      &hooks);
     if (!result) die(h3_last_error(ctx));
     printf("generation: %.1f s\n", seconds_now() - started);
-    printf("weights that ran: %s%s\n", hooks.weight_mode,
-           strcmp(hooks.weight_mode, mode) ? " (NOT the requested mode)" : "");
+    printf("weights that ran: %s%s\n", probe.weight_mode,
+           strcmp(probe.weight_mode, mode) ? " (NOT the requested mode)" : "");
     if (result->width != width || result->height != height ||
-        !hooks.rgb || !hooks.latent) die("result has the wrong shape");
+        !probe.rgb || !probe.latent) die("result has the wrong shape");
 
     int exact = 0;
     long within2 = 0, within8 = 0, within16 = 0;
@@ -212,7 +213,7 @@ int main(int argc, char **argv) {
     double square_error = 0.0;
     for (size_t pixel = 0; pixel < pixels; pixel++)
         for (size_t channel = 0; channel < 3; channel++) {
-            int got = hooks.rgb[pixel * 3 + channel];
+            int got = probe.rgb[pixel * 3 + channel];
             int expected = want[channel * pixels + pixel];
             int delta = abs(got - expected);
             if (delta > maximum) maximum = delta;
@@ -234,7 +235,7 @@ int main(int argc, char **argv) {
         double square_value = 0.0;
         double square_difference = 0.0;
         for (size_t index = 0; index < latent_elements; index++) {
-            double delta = (double)hooks.latent[index] -
+            double delta = (double)probe.latent[index] -
                            (double)want_latent[index];
             square_difference += delta * delta;
             square_value += (double)want_latent[index] *
@@ -243,18 +244,18 @@ int main(int argc, char **argv) {
         latent_error = sqrt(square_difference / square_value);
         printf("final latent vs reference: rel-L2 %.6g\n", latent_error);
     }
-    const bounds *limit = !strcmp(hooks.weight_mode, "int8") ? &INT8_BOUNDS :
+    const bounds *limit = !strcmp(probe.weight_mode, "int8") ? &INT8_BOUNDS :
                                                                &BF16_BOUNDS;
     if (!(psnr >= limit->psnr)) die("image PSNR is under the bound");
     if (!((double)within16 / bytes >= limit->within16))
         die("too few bytes within +-16 of the reference");
     if (want_latent && !(latent_error < limit->latent))
         die("final latent is over the bound");
-    if (exchange_path && (stream || !strcmp(hooks.weight_mode, "bf16")))
-        check_exchange(exchange_path, stream, noise, hooks.latent,
+    if (exchange_path && (stream || !strcmp(probe.weight_mode, "bf16")))
+        check_exchange(exchange_path, stream, noise, probe.latent,
                        latent_elements);
-    free(hooks.rgb);
-    free(hooks.latent);
+    free(probe.rgb);
+    free(probe.latent);
     h3_result_free(result);
     h3_free(ctx);
     free(noise);

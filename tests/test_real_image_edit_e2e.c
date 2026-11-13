@@ -163,8 +163,11 @@ static void check_reference_rows(h3_ctx *ctx, const char *fixture_path,
     params.references = references;
     params.reference_count = REFERENCE_CASES;
     h3_image_hooks hooks;
+    h3_image_probe probe;
     memset(&hooks, 0, sizeof(hooks));
-    hooks.references_only = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.references_only = 1;
     hooks.reference_posterior_noise = posterior;
     hooks.reference_aug_noise = aug;
     h3_result *result = h3_generate_image_with_hooks(
@@ -173,10 +176,10 @@ static void check_reference_rows(h3_ctx *ctx, const char *fixture_path,
     size_t total = 0;
     for (int index = 0; index < REFERENCE_CASES; index++)
         total += row_elements[index];
-    if (hooks.condition_elements != total) die("condition row count");
+    if (probe.condition_elements != total) die("condition row count");
     size_t offset = 0;
     for (int index = 0; index < REFERENCE_CASES; index++) {
-        double error_l2 = relative_l2(hooks.condition_rows + offset,
+        double error_l2 = relative_l2(probe.condition_rows + offset,
                                       want_rows[index], row_elements[index]);
         printf("reference %d condition rows vs diffusers: rel-L2 %.3g "
                "(bound %.3g)\n", index, error_l2, REFERENCE_ROWS_BOUND);
@@ -188,7 +191,7 @@ static void check_reference_rows(h3_ctx *ctx, const char *fixture_path,
         free(want_rows[index]);
         remove(paths[index]);
     }
-    free(hooks.condition_rows);
+    free(probe.condition_rows);
     h3_result_free(result);
     h3_st_free_header(&fixture);
 }
@@ -250,7 +253,7 @@ typedef struct {
     double psnr, within2, within16, latent;
 } scores;
 
-static scores score(const h3_image_hooks *hooks, const uint8_t *want,
+static scores score(const h3_image_probe *probe, const uint8_t *want,
                     size_t pixels, const float *want_latent,
                     size_t latent_elements) {
     int exact = 0;
@@ -259,7 +262,7 @@ static scores score(const h3_image_hooks *hooks, const uint8_t *want,
     double square_error = 0.0;
     for (size_t pixel = 0; pixel < pixels; pixel++)
         for (size_t channel = 0; channel < 3; channel++) {
-            int got = hooks->rgb[pixel * 3 + channel];
+            int got = probe->rgb[pixel * 3 + channel];
             int expected = want[channel * pixels + pixel];
             int delta = abs(got - expected);
             if (delta > maximum) maximum = delta;
@@ -282,7 +285,7 @@ static scores score(const h3_image_hooks *hooks, const uint8_t *want,
            (double)exact / bytes, result.within2, (double)within8 / bytes,
            result.within16);
     if (want_latent) {
-        result.latent = relative_l2(hooks->latent, want_latent,
+        result.latent = relative_l2(probe->latent, want_latent,
                                     latent_elements);
         printf("  final latent vs reference: rel-L2 %.6g\n", result.latent);
     }
@@ -451,7 +454,10 @@ int main(int argc, char **argv) {
         printf("%s\n", own ? "own resampling of the reference:" :
                              "parity run (fixture resized copies):");
         h3_image_hooks hooks;
+        h3_image_probe probe;
         memset(&hooks, 0, sizeof(hooks));
+        memset(&probe, 0, sizeof(probe));
+        hooks.probe = &probe;
         hooks.noise = noise;
         hooks.reference_posterior_noise = posterior_hook;
         hooks.reference_aug_noise = aug_hook;
@@ -464,15 +470,15 @@ int main(int argc, char **argv) {
                                                          &hooks);
         if (!result) die(h3_last_error(ctx));
         printf("  generation: %.1f s\n", seconds_now() - started);
-        printf("  weights that ran: %s%s\n", hooks.weight_mode,
-               strcmp(hooks.weight_mode, mode) ? " (NOT the requested mode)" :
+        printf("  weights that ran: %s%s\n", probe.weight_mode,
+               strcmp(probe.weight_mode, mode) ? " (NOT the requested mode)" :
                                                  "");
         if (result->width != width || result->height != height ||
-            !hooks.rgb || !hooks.latent) die("result has the wrong shape");
-        if (hooks.condition_elements != condition_elements)
+            !probe.rgb || !probe.latent) die("result has the wrong shape");
+        if (probe.condition_elements != condition_elements)
             die("condition row count");
         if (want_condition) {
-            double rows_error = relative_l2(hooks.condition_rows,
+            double rows_error = relative_l2(probe.condition_rows,
                                             want_condition, condition_elements);
             printf("  condition rows vs diffusers: rel-L2 %.3g (bound %.3g)\n",
                    rows_error, REFERENCE_ROWS_BOUND);
@@ -480,25 +486,25 @@ int main(int argc, char **argv) {
                 die("condition rows are over the bound");
         }
         if (want_tokens) {
-            printf("  text tokens %zu, fixture %zu\n", hooks.text_tokens,
+            printf("  text tokens %zu, fixture %zu\n", probe.text_tokens,
                    want_tokens);
-            if (hooks.text_tokens != want_tokens)
+            if (probe.text_tokens != want_tokens)
                 die("text presentation length differs from the fixture");
         }
-        scores got = score(&hooks, want, pixels, want_latent, latent_elements);
-        int is_int8 = !strcmp(hooks.weight_mode, "int8");
+        scores got = score(&probe, want, pixels, want_latent, latent_elements);
+        int is_int8 = !strcmp(probe.weight_mode, "int8");
         const bounds *limit = own ? (is_int8 ? &OWN_INT8_BOUNDS :
                                                &OWN_BF16_BOUNDS) :
                                     (is_int8 ? &INT8_BOUNDS : &BF16_BOUNDS);
         check_scores(&got, limit, want_latent != NULL);
         if (!own) {
-            if (exchange_path && (stream || !strcmp(hooks.weight_mode, "bf16")))
-                check_exchange(exchange_path, stream, noise, hooks.latent,
+            if (exchange_path && (stream || !strcmp(probe.weight_mode, "bf16")))
+                check_exchange(exchange_path, stream, noise, probe.latent,
                                latent_elements);
         }
-        free(hooks.condition_rows);
-        free(hooks.rgb);
-        free(hooks.latent);
+        free(probe.condition_rows);
+        free(probe.rgb);
+        free(probe.latent);
         h3_result_free(result);
     }
     remove(reference_path);

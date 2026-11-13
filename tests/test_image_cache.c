@@ -583,16 +583,19 @@ static void test_wiring(const char *tokenizer_json) {
     params.min_generation_area = 1024;
     params.seed = 1;
     h3_image_hooks hooks;
+    h3_image_probe probe;
     ctx->cache_dir = strdup(cache);
     CHECK(ctx->cache_dir != NULL);
 
     /* An empty cache: a lookup miss. The run reports the presentation length,
      * which an entry must match. */
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.cache_result == H3_CACHE_MISS && at_vae_open(ctx));
-    size_t rows = hooks.text_tokens;
+    CHECK(probe.cache_result == H3_CACHE_MISS && at_vae_open(ctx));
+    size_t rows = probe.text_tokens;
     CHECK(rows > 0);
 
     /* An entry of another length under the right key is not trusted. */
@@ -601,9 +604,11 @@ static void test_wiring(const char *tokenizer_json) {
                                H3_EDIT_CACHE_DEFAULT_BYTES, file,
                                sizeof(file)));
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.cache_result == H3_CACHE_MISS && hooks.text.values == NULL &&
+    CHECK(probe.cache_result == H3_CACHE_MISS && probe.text.values == NULL &&
           at_vae_open(ctx));
     h3_text_embedding_free(&wrong);
 
@@ -617,33 +622,39 @@ static void test_wiring(const char *tokenizer_json) {
         params.seed = run == 0 ? 1 : 987654321;
         params.width = params.height = run == 2 ? 128 : 0;
         memset(&hooks, 0, sizeof(hooks));
-        hooks.stop_after_lookup = 1;
+        memset(&probe, 0, sizeof(probe));
+        hooks.probe = &probe;
+        probe.stop_after_lookup = 1;
         h3_result *result = h3_generate_image_with_hooks(ctx, prompt, &params,
                                                          &hooks);
         CHECK(result != NULL);
-        CHECK(same_text(&stored, &hooks.text));
-        CHECK(hooks.cache_result == H3_CACHE_HIT);
-        CHECK(hooks.text_tokens > 0 && hooks.condition_rows == NULL &&
-              hooks.latent == NULL && hooks.rgb == NULL);
-        h3_text_embedding_free(&hooks.text);
+        CHECK(same_text(&stored, &probe.text));
+        CHECK(probe.cache_result == H3_CACHE_HIT);
+        CHECK(probe.text_tokens > 0 && probe.condition_rows == NULL &&
+              probe.latent == NULL && probe.rgb == NULL);
+        h3_text_embedding_free(&probe.text);
         h3_result_free(result);
     }
     params.width = params.height = 0;
 
     /* A hit without the stop hook goes on to the reference VAE. */
     memset(&hooks, 0, sizeof(hooks));
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
-    CHECK(hooks.cache_result == H3_CACHE_HIT);
+    CHECK(probe.text.values == NULL && at_vae_open(ctx));
+    CHECK(probe.cache_result == H3_CACHE_HIT);
 
     /* Another prompt, another reference, a disabled cache and test hooks that
      * replace pixels all miss: the run reaches the reference VAE. */
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, "Keep <Picture 1> as it is, by day.",
                                        &params, &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
-    CHECK(hooks.cache_result == H3_CACHE_MISS);
+    CHECK(probe.text.values == NULL && at_vae_open(ctx));
+    CHECK(probe.cache_result == H3_CACHE_MISS);
     const char *other_path = path_in("wire_other.png");
     uint8_t *other = picture(64, 64, 5);
     write_png(other_path, other, 64, 64);
@@ -651,28 +662,34 @@ static void test_wiring(const char *tokenizer_json) {
     h3_image_reference other_reference = {other_path};
     params.references = &other_reference;
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
-    CHECK(hooks.cache_result == H3_CACHE_MISS);
+    CHECK(probe.text.values == NULL && at_vae_open(ctx));
+    CHECK(probe.cache_result == H3_CACHE_MISS);
     params.references = &reference;
 
     char *kept = ctx->cache_dir;
     ctx->cache_dir = NULL;
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
-    CHECK(hooks.cache_result == H3_CACHE_NOT_USED);
+    CHECK(probe.text.values == NULL && at_vae_open(ctx));
+    CHECK(probe.cache_result == H3_CACHE_NOT_USED);
     ctx->cache_dir = kept;
 
     const uint8_t *vae_hook[1] = {decoded};
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     hooks.vae_pixels = vae_hook;
     CHECK(h3_generate_image_with_hooks(ctx, prompt, &params, &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && at_vae_open(ctx));
-    CHECK(hooks.cache_result == H3_CACHE_NOT_USED);
+    CHECK(probe.text.values == NULL && at_vae_open(ctx));
+    CHECK(probe.cache_result == H3_CACHE_NOT_USED);
 
     /* Text-to-image shares the cache with no references. */
     h3_image_params text_params = H3_IMAGE_PARAMS_DEFAULT;
@@ -680,18 +697,22 @@ static void test_wiring(const char *tokenizer_json) {
     text_params.width = text_params.height = 64;
     text_params.seed = 11;
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     h3_result *result = h3_generate_image_with_hooks(ctx, "a red fox",
                                                      &text_params, &hooks);
     CHECK(result != NULL);
-    CHECK(same_text(&plain, &hooks.text) && hooks.cache_result == H3_CACHE_HIT);
-    h3_text_embedding_free(&hooks.text);
+    CHECK(same_text(&plain, &probe.text) && probe.cache_result == H3_CACHE_HIT);
+    h3_text_embedding_free(&probe.text);
     h3_result_free(result);
     memset(&hooks, 0, sizeof(hooks));
-    hooks.stop_after_lookup = 1;
+    memset(&probe, 0, sizeof(probe));
+    hooks.probe = &probe;
+    probe.stop_after_lookup = 1;
     CHECK(h3_generate_image_with_hooks(ctx, "a blue fox", &text_params,
                                        &hooks) == NULL);
-    CHECK(hooks.text.values == NULL && hooks.cache_result == H3_CACHE_MISS);
+    CHECK(probe.text.values == NULL && probe.cache_result == H3_CACHE_MISS);
 
     free(decoded);
     free(edit_key);

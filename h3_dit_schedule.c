@@ -11,12 +11,22 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "h3_safetensors.h"
+
 enum {
     TIME_INPUT = 256,
     TIME_HIDDEN = 5376,
     BLOCK_OUTPUT = H3_DIT_MODALITIES * H3_DIT_ADALN_SLOTS * H3_DIT_HIDDEN,
-    FINAL_OUTPUT = 2 * H3_DIT_HIDDEN
+    FINAL_OUTPUT = 2 * H3_DIT_HIDDEN,
+    TABLE_POINTS = 1025  /* adaln_t_table rows: t = 0, 1/1024, ..., 1 */
 };
+
+static int env_switch(const char *name) {
+    const char *value = getenv(name);
+    return value && strcmp(value, "1") == 0;
+}
+
+int h3_dit_adaln_table_enabled(void) { return env_switch("H3_ADALN_TABLE"); }
 
 struct h3_dit_schedule {
     h3_gpu *gpu;
@@ -83,8 +93,8 @@ static void free_tensor(h3_gpu_tensor **tensor) {
 static int prepare_rows(h3_dit_schedule *schedule,
                         const h3_sigma_schedule *sigmas,
                         int visual_condition, int audio_condition,
-                        float **features_out, char *error,
-                        size_t error_size) {
+                        float **features_out, float **times_out,
+                        char *error, size_t error_size) {
     schedule->steps = sigmas->steps;
     schedule->video_rows = calloc((size_t)sigmas->steps,
                                   sizeof(*schedule->video_rows));
@@ -160,9 +170,68 @@ static int prepare_rows(h3_dit_schedule *schedule,
                 sinf(angle);
         }
     }
-    free(times);
+    *times_out = times;
     *features_out = features;
     return 1;
+}
+
+/* Table path: coefficients[row] = linear interpolation of adaln_t_table at x = t * 1024,
+ * computed in F32 on the host and uploaded as BF16 [rows, rank]. */
+static h3_gpu_tensor *table_coefficients(const h3_weight_store *weights,
+                                         h3_gpu *gpu, uint32_t rank,
+                                         const float *times, uint32_t rows,
+                                         char *error, size_t error_size) {
+    const h3_st_header *header = NULL;
+    const h3_st_tensor *tensor = h3_weight_find(weights, "adaln_t_table", &header);
+    if (!tensor) {
+        fail(error, error_size, "H3_ADALN_TABLE: store has no adaln_t_table tensor");
+        return NULL;
+    }
+    if (tensor->dtype != H3_DTYPE_F32 || tensor->ndim != 2 ||
+        tensor->shape[0] != TABLE_POINTS || tensor->shape[1] != rank) {
+        fail(error, error_size, "H3_ADALN_TABLE: adaln_t_table must be F32 [%d,%u]",
+             TABLE_POINTS, rank);
+        return NULL;
+    }
+    size_t table_elements = (size_t)TABLE_POINTS * rank;
+    float *table = malloc(table_elements * sizeof(*table));
+    uint16_t *bits = malloc((size_t)rows * rank * sizeof(*bits));
+    h3_gpu_tensor *result = NULL;
+    if (!table || !bits) {
+        fail(error, error_size, "out of memory allocating AdaLN table coefficients");
+        goto cleanup;
+    }
+    if (!h3_st_read_data(header, tensor, table, table_elements * sizeof(*table),
+                         error, error_size)) goto cleanup;
+    for (uint32_t row = 0; row < rows; row++) {
+        float x = times[row] * 1024.0f;
+        if (!(x >= 0.0f)) x = 0.0f;
+        if (x > 1024.0f) x = 1024.0f;
+        uint32_t index = (uint32_t)x;
+        if (index > TABLE_POINTS - 2) index = TABLE_POINTS - 2;
+        float fraction = x - (float)index;
+        const float *low = table + (size_t)index * rank;
+        const float *high = low + rank;
+        for (uint32_t k = 0; k < rank; k++) {
+            float value = (1.0f - fraction) * low[k] + fraction * high[k];
+            uint32_t value_bits;
+            memcpy(&value_bits, &value, sizeof(value_bits));
+            if ((value_bits & 0x7fffffffu) > 0x7f800000u) {
+                bits[(size_t)row * rank + k] = 0x7fc0;
+                continue;
+            }
+            value_bits += 0x7fffu + ((value_bits >> 16) & 1u);  /* round to nearest even */
+            bits[(size_t)row * rank + k] = (uint16_t)(value_bits >> 16);
+        }
+    }
+    result = h3_gpu_tensor_from_bf16(gpu, bits, (size_t)rows * rank);
+    if (!result)
+        fail(error, error_size, "cannot upload AdaLN table coefficients: %s",
+             h3_gpu_error(gpu));
+cleanup:
+    free(table);
+    free(bits);
+    return result;
 }
 
 static h3_gpu_tensor *time_embeddings(const h3_weight_store *weights,
@@ -261,6 +330,12 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         fail(error, error_size, "invalid AdaLN schedule arguments");
         return NULL;
     }
+    uint32_t rank = adaln_rank(weights);
+    int table = h3_dit_adaln_table_enabled();
+    if (table && !rank) {
+        fail(error, error_size, "H3_ADALN_TABLE needs a low-rank AdaLN store");
+        return NULL;
+    }
     h3_dit_schedule *schedule = calloc(1, sizeof(*schedule));
     if (!schedule) {
         fail(error, error_size, "out of memory creating AdaLN schedule");
@@ -268,9 +343,10 @@ h3_dit_schedule *h3_dit_schedule_precompute(
     }
     schedule->gpu = gpu;
     float *features = NULL;
+    float *row_times = NULL;
     h3_gpu_tensor *coefficients = NULL;
     if (!prepare_rows(schedule, sigmas, visual_condition, audio_condition,
-                      &features, error, error_size)) goto failed;
+                      &features, &row_times, error, error_size)) goto failed;
     h3_gpu_tensor *time = time_embeddings(weights, gpu, schedule->time_rows,
                                            features, error, error_size);
     free(features);
@@ -279,11 +355,19 @@ h3_dit_schedule *h3_dit_schedule_precompute(
 
     /* Low-rank stores project time once into R coefficients, then every
      * block and the final layer multiply those coefficients by their own
-     * [out, R] weight. Full-rank stores keep the original [out, 2688] path. */
-    uint32_t rank = adaln_rank(weights);
+     * [out, R] weight. Full-rank stores keep the original [out, 2688] path.
+     * H3_ADALN_TABLE replaces the basis projection with table lookups by t. */
     uint32_t modulation_dim = rank ? rank : H3_DIT_TIME_DIM;
     const h3_gpu_tensor *modulation_input = time;
-    if (rank) {
+    if (rank && table) {
+        coefficients = table_coefficients(weights, gpu, rank, row_times,
+                                          schedule->time_rows, error, error_size);
+        if (!coefficients) {
+            h3_gpu_tensor_free(time);
+            goto failed;
+        }
+        modulation_input = coefficients;
+    } else if (rank) {
         h3_gpu_tensor *basis = weight_bf16_2d(weights, gpu, "adaln_basis",
                                               rank, H3_DIT_TIME_DIM,
                                               error, error_size);
@@ -312,6 +396,8 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         }
         modulation_input = coefficients;
     }
+    free(row_times);
+    row_times = NULL;
 
     for (unsigned block = 0; block < H3_DIT_BLOCKS; block++) {
         char weight_name[128], bias_name[128], operation[128];
@@ -385,6 +471,7 @@ h3_dit_schedule *h3_dit_schedule_precompute(
 
 failed:
     free(features);
+    free(row_times);
     free_tensor(&coefficients);
     h3_dit_schedule_free(schedule);
     return NULL;

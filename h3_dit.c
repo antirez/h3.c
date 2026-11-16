@@ -1604,6 +1604,9 @@ static unsigned char *adaln_key_build(const char *weight_directory,
         !adaln_key_append(&key, sigmas->video, points * sizeof(float)) ||
         !adaln_key_append(&key, sigmas->audio, points * sizeof(float)))
         goto failed;
+    /* Appended only when set, so default keys are unchanged. */
+    if (h3_dit_adaln_table_enabled() && !adaln_key_append(&key, "|table", 6))
+        goto failed;
     const char suffix[] = ".safetensors";
     size_t suffix_length = sizeof(suffix) - 1;
     for (struct dirent *entry; (entry = readdir(dir));) {

@@ -147,10 +147,31 @@ int h3_schedule_build(int steps, h3_sigma_schedule *schedule) {
     return 1;
 }
 
+int h3_renoise_enabled(void) {
+    const char *value = getenv("H3_RENOISE");
+    return value && *value && strcmp(value, "0");
+}
+
 int h3_serving_schedule_build(int evaluations, h3_sigma_schedule *schedule) {
     if (!schedule || evaluations < 2 || evaluations > H3_MAX_STEPS) return 0;
     memset(schedule, 0, sizeof(*schedule));
     schedule->steps = evaluations;
+    if (h3_renoise_enabled()) {
+        static const float knots[7] = {1000, 750, 500, 250, 100, 40, 0};
+        for (int index = 0; index <= evaluations; index++) {
+            /* 6 evaluations reproduce the published knots; other counts resample that curve linearly. */
+            float at = (float)index * 6.0f / (float)evaluations;
+            int lo = (int)at;
+            if (lo > 5) lo = 5;
+            float knot = knots[lo] + (knots[lo + 1] - knots[lo]) * (at - (float)lo);
+            float base = knot / 1000.0f;
+            float vs = (float)H3_VIDEO_SIGMA_SHIFT;
+            float as = (float)H3_AUDIO_SIGMA_SHIFT;
+            schedule->video[index] = vs * base / (1.0f + (vs - 1.0f) * base);
+            schedule->audio[index] = as * base / (1.0f + (as - 1.0f) * base);
+        }
+        return 1;
+    }
     float denominator = (float)evaluations;
     for (int index = 0; index <= evaluations; index++) {
         float base = 1.0f - (float)index / denominator;

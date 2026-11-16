@@ -118,6 +118,23 @@ int h3_dit_denoise_euler_preview(
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size);
 
+/* Run Euler steps [first_step, stop_step) of the schedule. A stop before the
+ * last step copies the latents at that sigma into the snapshot buffers and
+ * leaves the clean estimate (one step to sigma 0 with the last velocity) in
+ * the latents; passing a snapshot back with first_step = that stop resumes the
+ * same trajectory. Partial spans need reuse 1 and core reuse 1. renoise_seed
+ * (the bits of the initial video noise's first element) keys the H3_RENOISE
+ * stream, so a resumed span re-noises exactly as an unbroken run. */
+int h3_dit_denoise_euler_span(
+                         h3_dit *dit, float *video_latent,
+                         float *audio_latent, int reuse_interval,
+                         int first_step, int stop_step,
+                         float *snapshot_video, float *snapshot_audio,
+                         uint32_t renoise_seed,
+                         h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_preview preview, void *preview_opaque,
+                         char *error, size_t error_size);
+
 /* Build the velocity-evaluation mask used by the serving sampler. Returns the
  * evaluation count, or -1 for invalid arguments. Public internally so the
  * quality-tuned aggressive schedule remains pinned by cheap host tests. */

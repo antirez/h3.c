@@ -114,6 +114,10 @@ double h3_time_shift_slope(double sigma, double from_shift, double to_shift);
 int h3_schedule_build(int steps, h3_sigma_schedule *schedule);
 /* Released linear base grid: evaluations model forwards plus terminal zero. */
 int h3_serving_schedule_build(int evaluations, h3_sigma_schedule *schedule);
+/* H3_RENOISE=1: renoise sampler. Six forwards on knots
+ * 1000/750/500/250/100/40/0 (shifted by video/audio shift), each step jumping
+ * to the clean estimate and re-noising with fresh noise. */
+int h3_renoise_enabled(void);
 
 int h3_layout_build(const h3_layout_spec *spec, h3_layout *layout,
                     char *error, size_t error_size);

@@ -14,6 +14,16 @@
 
 extern char **environ;
 
+/* H3_MP4_HEVC10=1 encodes MP4 as x265 10-bit and tags BT.709 limited range.
+ * Unset, the x264 8-bit command line is unchanged. */
+static int hevc10_requested(void) {
+    const char *value = getenv("H3_MP4_HEVC10");
+    return value && *value && strcmp(value, "0");
+}
+
+#define H3_BT709_ARGS "-vf", "scale=out_color_matrix=bt709:out_range=tv"
+#define H3_X265_PARAMS "log-level=error:colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited"
+
 static const char *ffmpeg_program(void) {
     const char *override = getenv("H3_FFMPEG");
     return override && *override ? override : "ffmpeg";
@@ -528,7 +538,7 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
     char size[64], rate[32];
     snprintf(size, sizeof(size), "%dx%d", width, height);
     snprintf(rate, sizeof(rate), "%d", fps);
-    char *arguments[] = {
+    char *x264_arguments[] = {
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24",
         "-video_size", size, "-framerate", rate,
@@ -536,6 +546,16 @@ int h3_ffmpeg_write_rgb24(const char *path, const uint8_t *frames,
         "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
         "-movflags", "+faststart", (char *)path, NULL
     };
+    char *hevc10_arguments[] = {
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", size, "-framerate", rate,
+        "-i", "pipe:0", "-an", H3_BT709_ARGS, "-c:v", "libx265",
+        "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p10le",
+        "-x265-params", H3_X265_PARAMS, "-tag:v", "hvc1",
+        "-movflags", "+faststart", (char *)path, NULL
+    };
+    char **arguments = hevc10_requested() ? hevc10_arguments : x264_arguments;
     posix_spawn_file_actions_t actions;
     int code = posix_spawn_file_actions_init(&actions);
     if (!code) code = posix_spawn_file_actions_adddup2(&actions, stream[0], STDIN_FILENO);
@@ -664,7 +684,7 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
     snprintf(audio_rate, sizeof(audio_rate), "%d", sample_rate);
     snprintf(audio_channels, sizeof(audio_channels), "%d", channels);
     snprintf(audio_input, sizeof(audio_input), "pipe:%d", audio_target);
-    char *arguments[] = {
+    char *x264_arguments[] = {
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24",
         "-video_size", size, "-framerate", rate,
@@ -676,6 +696,20 @@ int h3_ffmpeg_write_av_rgb24_f32(const char *path, const uint8_t *frames,
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", (char *)path, NULL
     };
+    char *hevc10_arguments[] = {
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", size, "-framerate", rate,
+        "-i", "pipe:0",
+        "-f", "f32le", "-ar", audio_rate, "-ac", audio_channels,
+        "-i", audio_input,
+        "-map", "0:v:0", "-map", "1:a:0", H3_BT709_ARGS,
+        "-c:v", "libx265", "-preset", "fast", "-crf", "20",
+        "-pix_fmt", "yuv420p10le", "-x265-params", H3_X265_PARAMS,
+        "-tag:v", "hvc1", "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", (char *)path, NULL
+    };
+    char **arguments = hevc10_requested() ? hevc10_arguments : x264_arguments;
     posix_spawn_file_actions_t actions;
     int code = posix_spawn_file_actions_init(&actions);
     if (!code) code = posix_spawn_file_actions_adddup2(

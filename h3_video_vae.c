@@ -812,7 +812,7 @@ static int weight_fingerprint(const char *directory, uint8_t out[32]) {
 }
 
 /* Open through the resolved path so linked model directories (for example a
- * folded-LoRA checkpoint linking back to video_vae) share one VAE cache. */
+ * symlink to another model's video_vae directory) share one VAE cache. */
 static h3_weight_store *open_weights(vae_context *vae, const char *directory,
                                      char *error, size_t error_size) {
     char *resolved = realpath(directory, NULL);

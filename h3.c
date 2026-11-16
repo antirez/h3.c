@@ -1797,7 +1797,6 @@ cleanup:
     h3_layout_free(&layout);
     if (!dit_is_cached) h3_dit_free(dit);
     if (!decoder_is_cached) h3_video_vae_decoder_free(preview_decoder);
-    if (prefetching) pthread_join(prefetch_thread, NULL);
     h3_video_vae_decoder_free(prefetch.decoder);
     free(video); free(audio); free(rgb8);
     h3_video_frames_free(&frames);

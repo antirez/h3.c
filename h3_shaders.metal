@@ -4675,7 +4675,6 @@ kernel void h3_attn_tiled_tg2_bf16_impl(
         }
     };
     auto compute = [&](int block, int buffer) {
-        if (!active) return;
         const int valid = min(BK, sequence - block * BK);
         if (buffer == 0) {
             if (QREG) h3_attn_tiled_step<RQ, BK, false>(qreg, kts0, vts0, acc,

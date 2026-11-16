@@ -42,18 +42,19 @@ enum { LP_QKV = 0, LP_OUT = 1, LP_W1 = 2, LP_W2 = 3, LP_COUNT = 4 };
 
 /* H3_VAE_CACHE=<directory>: with bf16 precision, the resident decoder reads the
  * lowered projections from this file (about 4.8 GiB) instead of reading
- * 9.7 GiB of F32 and casting. A missing or stale file (weight fingerprint
- * mismatch) is rebuilt from the F32 weights during that load. */
+ * 9.7 GiB of F32 and casting. A missing or stale file (format version,
+ * dimensions or weight fingerprint mismatch, or wrong size) is rebuilt from
+ * the F32 weights during that load. The last magic byte is the format
+ * version: bump it when the lowering or the file layout changes. */
 static const size_t LOWP_ELEMENTS[LP_COUNT] = {
     (size_t)INNER * 3 * HIDDEN, (size_t)HIDDEN * INNER,
     (size_t)FFN * 2 * HIDDEN, (size_t)HIDDEN * FFN
 };
-static const char VAE_CACHE_MAGIC[8] = {'H','3','V','A','E','B','F','1'};
+static const char VAE_CACHE_MAGIC[8] = {'H','3','V','A','E','B','F','2'};
 
 typedef struct {
     char magic[8];
-    uint32_t layers;
-    uint32_t reserved;
+    uint32_t layers, hidden, inner, ffn;
     uint8_t fingerprint[32];
 } vae_cache_header;
 
@@ -744,14 +745,12 @@ static int run_decoder(vae_context *vae, h3_video_vae_progress progress,
     return 1;
 }
 
-static int cache_is_valid(const char *path, const uint8_t fingerprint[32]) {
+static int cache_is_valid(const char *path, const vae_cache_header *want) {
     FILE *file = fopen(path, "rb");
     if (!file) return 0;
     vae_cache_header header;
     int ok = fread(&header, sizeof(header), 1, file) == 1 &&
-             !memcmp(header.magic, VAE_CACHE_MAGIC, sizeof(header.magic)) &&
-             header.layers == LAYERS &&
-             !memcmp(header.fingerprint, fingerprint, 32) &&
+             !memcmp(&header, want, sizeof(header)) &&
              !fseeko(file, 0, SEEK_END) &&
              ftello(file) == (off_t)(sizeof(header) +
                                      (size_t)LAYERS * cache_block_bytes());
@@ -773,8 +772,9 @@ static int is_safetensors(const struct dirent *entry) {
 }
 
 /* Cheap staleness check, not a content hash: FNV-1a over the resolved
- * directory and each shard's name, size and mtime. */
-static void weight_fingerprint(const char *directory, uint8_t out[32]) {
+ * directory and each shard's name, size and mtime. Returns 0 when the
+ * directory or a shard cannot be read; the caller then skips the cache. */
+static int weight_fingerprint(const char *directory, uint8_t out[32]) {
     uint64_t hash = 1469598103934665603ULL;
 #define MIX(data, length) do {                                                  \
     const uint8_t *bytes = (const uint8_t *)(data);                             \
@@ -786,17 +786,21 @@ static void weight_fingerprint(const char *directory, uint8_t out[32]) {
     MIX(directory, strlen(directory));
     struct dirent **entries = NULL;
     int count = scandir(directory, &entries, is_safetensors, alphasort);
+    int ok = count > 0;
     for (int index = 0; index < count; index++) {
         char path[2048];
         struct stat info;
-        snprintf(path, sizeof(path), "%s/%s", directory,
-                 entries[index]->d_name);
-        if (!stat(path, &info)) {
+        int length = snprintf(path, sizeof(path), "%s/%s", directory,
+                              entries[index]->d_name);
+        if (ok && length > 0 && (size_t)length < sizeof(path) &&
+            !stat(path, &info)) {
             int64_t fields[] = {(int64_t)info.st_size,
                                 (int64_t)info.st_mtimespec.tv_sec,
                                 (int64_t)info.st_mtimespec.tv_nsec};
             MIX(entries[index]->d_name, strlen(entries[index]->d_name));
             MIX(fields, sizeof(fields));
+        } else {
+            ok = 0;
         }
         free(entries[index]);
     }
@@ -804,6 +808,7 @@ static void weight_fingerprint(const char *directory, uint8_t out[32]) {
 #undef MIX
     memset(out, 0, 32);
     memcpy(out, &hash, sizeof(hash));
+    return ok;
 }
 
 /* Open through the resolved path so linked model directories (for example a
@@ -811,9 +816,14 @@ static void weight_fingerprint(const char *directory, uint8_t out[32]) {
 static h3_weight_store *open_weights(vae_context *vae, const char *directory,
                                      char *error, size_t error_size) {
     char *resolved = realpath(directory, NULL);
-    snprintf(vae->weight_path, sizeof(vae->weight_path), "%s",
-             resolved ? resolved : directory);
+    int length = snprintf(vae->weight_path, sizeof(vae->weight_path), "%s",
+                          resolved ? resolved : directory);
     free(resolved);
+    if (length < 0 || (size_t)length >= sizeof(vae->weight_path)) {
+        fail(error, error_size, "video VAE weight path too long: %s",
+             directory);
+        return NULL;
+    }
     return h3_weight_store_open(vae->weight_path, error, error_size);
 }
 
@@ -826,16 +836,28 @@ static void open_vae_cache(vae_context *vae, char **temp_path) {
     memset(&header, 0, sizeof(header));
     memcpy(header.magic, VAE_CACHE_MAGIC, sizeof(header.magic));
     header.layers = LAYERS;
-    weight_fingerprint(vae->weight_path, header.fingerprint);
+    header.hidden = HIDDEN;
+    header.inner = INNER;
+    header.ffn = FFN;
+    if (!weight_fingerprint(vae->weight_path, header.fingerprint)) {
+        fprintf(stderr, "h3: warning: cannot stat video VAE weights; "
+                "cache skipped\n");
+        return;
+    }
     /* One file per weight set, named by its fingerprint. */
-    snprintf(vae->cache_file, sizeof(vae->cache_file),
+    int length = snprintf(vae->cache_file, sizeof(vae->cache_file),
              "%s/video-vae-bf16-%02x%02x%02x%02x%02x%02x%02x%02x.cache",
              directory, header.fingerprint[0], header.fingerprint[1],
              header.fingerprint[2], header.fingerprint[3],
              header.fingerprint[4], header.fingerprint[5],
              header.fingerprint[6], header.fingerprint[7]);
+    if (length < 0 || (size_t)length >= sizeof(vae->cache_file)) {
+        fprintf(stderr, "h3: warning: H3_VAE_CACHE path too long; "
+                "cache skipped\n");
+        return;
+    }
     const char *path = vae->cache_file;
-    if (cache_is_valid(path, header.fingerprint)) {
+    if (cache_is_valid(path, &header)) {
         vae->cache_path = path;
         fprintf(stderr, "h3: video VAE BF16 cache hit %s\n", path);
         return;

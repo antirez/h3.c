@@ -35,8 +35,9 @@ Without `-p`, the same binary starts an Iris-style interactive session:
 Type a prompt to generate a numbered video. The session keeps the exact BF16
 prompt conditioning, prepared DiT, and video decoder in memory, so repeating a
 prompt with another seed avoids loading and encoding them again. Useful commands
-are `!status`, `!seed random`, `!seconds 2`, `!show`, `!save output.mp4`, and
-`!cache`. Use `!help` for the full, short list.
+are `!status`, `!seed random`, `!seconds 2`, `!show`, `!save output.mp4`, `!cache`,
+and `!offload` (frees the DiT and video decoder and keeps the prompt conditioning
+cache; the next render reloads the DiT). Use `!help` for the full, short list.
 
 First/last-frame conditioning is persistent in the session:
 

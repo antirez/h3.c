@@ -63,6 +63,20 @@ void h3_cache_clear(h3_ctx *ctx) {
     ctx->video_decoder_key = NULL;
 }
 
+/* Frees the DiT (prepared and retained core) and the video decoder. The prompt conditioning cache stays,
+ * so the next render with the same prompt skips the text encoder. */
+void h3_offload(h3_ctx *ctx) {
+    if (!ctx) return;
+    h3_dit_free(ctx->dit);
+    ctx->dit = NULL;
+    free(ctx->dit_key);
+    ctx->dit_key = NULL;
+    h3_video_vae_decoder_free(ctx->video_decoder);
+    ctx->video_decoder = NULL;
+    free(ctx->video_decoder_key);
+    ctx->video_decoder_key = NULL;
+}
+
 void h3_cache_set_enabled(h3_ctx *ctx, int enabled) {
     if (!ctx) return;
     if (!enabled) h3_cache_clear(ctx);

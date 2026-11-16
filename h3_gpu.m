@@ -126,6 +126,24 @@
 @implementation H3GPU
 @end
 
+/* Dense tiled attention kernels: rows per SIMD group and SIMD groups per
+ * threadgroup. The first entry is the default; H3_ATTN_TILED_VARIANT picks
+ * another by name substring for tuning. */
+typedef struct {
+    const char *name;
+    uint32_t rows;
+    uint32_t simdgroups;
+} h3_attn_tiled_variant;
+
+static const h3_attn_tiled_variant h3_attn_tiled_variants[] = {
+    {"h3_attn_tiled_bf16_r16s4k64", 16, 4},
+    {"h3_attn_tiled_bf16_r16s4k32", 16, 4},
+    {"h3_attn_tiled_bf16_r32s4k64", 32, 4},
+    {"h3_attn_tiled_bf16_r16s8k64", 16, 8},
+};
+#define H3_ATTN_TILED_VARIANT_COUNT \
+    (sizeof(h3_attn_tiled_variants) / sizeof(h3_attn_tiled_variants[0]))
+
 static H3GPU *GPU(h3_gpu *gpu) {
     return (__bridge H3GPU *)gpu;
 }
@@ -481,6 +499,9 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
                 @"h3_linear_int8_grouped_local_nax_r128x64"];
             [names addObject:
                 @"h3_linear_int8_grouped_local_nax_r128x128"];
+            for (size_t index = 0; index < H3_ATTN_TILED_VARIANT_COUNT;
+                 index++)
+                [names addObject:@(h3_attn_tiled_variants[index].name)];
         }
         NSMutableDictionary *pipelines = [NSMutableDictionary dictionary];
         for (NSString *name in names) {
@@ -1609,6 +1630,79 @@ int h3_gpu_sdpa_bf16_head_major_output(
     return h3_gpu_sdpa(opaque, output, query, key, value, 1, sequence, heads,
                        head_dim, scale, H3_GPU_BF16, MPSDataTypeBFloat16, 0,
                        1);
+}
+
+int h3_gpu_has_tiled_attention(const h3_gpu *opaque) {
+    if (!opaque) return 0;
+    return GPU((h3_gpu *)(void *)opaque).tensorOpsEnabled;
+}
+
+int h3_gpu_attention_tiled_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
+                                const h3_gpu_tensor *query,
+                                const h3_gpu_tensor *key,
+                                const h3_gpu_tensor *value,
+                                uint32_t sequence, uint32_t heads,
+                                uint32_t head_dim, float scale,
+                                int output_head_major) {
+    H3GPU *gpu = GPU(opaque);
+    int head_major = gpu.headMajorSDPAInputs;
+    gpu.headMajorSDPAInputs = NO;
+    size_t count = (size_t)sequence * heads * head_dim;
+    if (!gpu.tensorOpsEnabled || head_dim != 128 || !sequence || !heads) {
+        h3_gpu_set_error(gpu, @"tiled attention needs TensorOps and head_dim 128");
+        return 0;
+    }
+    if (!h3_gpu_require_elements(gpu, query, count, @"tiled attention query") ||
+        !h3_gpu_require_elements(gpu, key, count, @"tiled attention key") ||
+        !h3_gpu_require_elements(gpu, value, count, @"tiled attention value") ||
+        !h3_gpu_require_elements(gpu, output, count, @"tiled attention output"))
+        return 0;
+    if (TENSOR(query).dtype != H3_GPU_BF16 || TENSOR(key).dtype != H3_GPU_BF16 ||
+        TENSOR(value).dtype != H3_GPU_BF16 ||
+        TENSOR(output).dtype != H3_GPU_BF16) {
+        h3_gpu_set_error(gpu, @"tiled attention tensors must be BF16");
+        return 0;
+    }
+    const char *requested = getenv("H3_ATTN_TILED_VARIANT");
+    const h3_attn_tiled_variant *variant = &h3_attn_tiled_variants[0];
+    for (size_t index = 0; requested && index < H3_ATTN_TILED_VARIANT_COUNT;
+         index++)
+        if (strstr(h3_attn_tiled_variants[index].name, requested))
+            variant = &h3_attn_tiled_variants[index];
+    id<MTLComputePipelineState> pipeline =
+        h3_gpu_pipeline(gpu, @(variant->name));
+    if (!pipeline || !h3_gpu_require_command(gpu)) return 0;
+    struct {
+        uint32_t sequence, in_row_stride, in_head_stride;
+        uint32_t out_row_stride, out_head_stride;
+        float scale_log2;
+    } args = {
+        sequence,
+        head_major ? head_dim : heads * head_dim,
+        head_major ? sequence * head_dim : head_dim,
+        output_head_major ? head_dim : heads * head_dim,
+        output_head_major ? sequence * head_dim : head_dim,
+        scale * 1.4426950408889634f,
+    };
+    uint32_t rows_per_group = variant->rows * variant->simdgroups;
+    @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder = [gpu.command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:TENSOR(query).buffer offset:0 atIndex:0];
+        [encoder setBuffer:TENSOR(key).buffer offset:0 atIndex:1];
+        [encoder setBuffer:TENSOR(value).buffer offset:0 atIndex:2];
+        [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:3];
+        [encoder setBytes:&args length:sizeof(args) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(
+                     (sequence + rows_per_group - 1) / rows_per_group, heads, 1)
+                 threadsPerThreadgroup:MTLSizeMake(32 * variant->simdgroups,
+                                                   1, 1)];
+        [encoder endEncoding];
+    }
+    h3_gpu_stats stats = gpu.stats;
+    stats.direct_dispatches++;
+    gpu.stats = stats;
+    return 1;
 }
 
 int h3_gpu_swiglu_f32(h3_gpu *opaque, h3_gpu_tensor *output,

@@ -4330,3 +4330,155 @@ kernel void h3_silu_mul_bf16(device const ushort *gate [[buffer(0)]],
     float other = h3_bf16_to_f32(up[gid]);
     output[gid] = h3_f32_to_bf16(value / (1.0f + exp(-value)) * other);
 }
+
+#ifdef H3_METAL_HAS_TENSOR
+/*
+ * Dense flash attention on M5 TensorOps (no mask), the dense core for a later
+ * block-sparse variant.  Each SIMD group owns RQ query rows of one head and
+ * walks key blocks of BK tokens with an fp32 online softmax; a threadgroup is
+ * NSG such groups over consecutive rows of the same head, so they share K/V
+ * blocks through the cache.  The key loop body is per-(query-group, key-block)
+ * so a routed key-block list can replace the dense range later.
+ *
+ * Probed TensorOps layout for execution_simdgroup bf16xbf16->f32 destinations
+ * (M5, macOS 27): rows are held in 16-row bands; within a band each lane owns
+ * rows r and r+8, four columns per 16-column group.  Element i of an N-wide
+ * destination therefore belongs to the lane's row slot
+ * (i / (N / 2)) * 2 + ((i >> 2) & 1), which is also the index order of the
+ * row-reduction tensor.  Lanes {l, l^1, l^8, l^9} share a row.
+ */
+struct h3_attn_tiled_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint out_row_stride;
+    uint out_head_stride;
+    float scale_log2;
+};
+
+constexpr inline int h3_attn_row_slot(int element, int width) {
+    return (element / (width / 2)) * 2 + ((element >> 2) & 1);
+}
+
+template <int RQ, int NSG, int BK>
+kernel void h3_attn_tiled_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_tiled_args &args [[buffer(4)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    if (q0 >= sequence) return;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto kt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        key + in_head, extents, in_strides);
+    auto vt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        value + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, false);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+
+    auto qs = qt.slice(0, q0);
+    auto ks0 = kt.slice(0, 0);
+    auto vs0 = vt.slice(0, 0);
+    auto scores = qk.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(ks0), float>();
+    auto probs = qk.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(ks0), bfloat>();
+    auto row_max = qk.template get_row_reduction_destination_cooperative_tensor<
+        decltype(qs), decltype(ks0), float>();
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vs0), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    const int key_blocks = (sequence + BK - 1) / BK;
+    for (int block = 0; block < key_blocks; block++) {
+        const int k0 = block * BK;
+        auto ks = kt.slice(0, k0);
+        auto vs = vt.slice(0, k0);
+        qk.run(qs, ks, scores);
+        const int valid = sequence - k0;
+        if (valid < BK) {
+            #pragma clang loop unroll(full)
+            for (ushort i = 0; i < scores.get_capacity(); i++) {
+                auto index = scores.get_multidimensional_index(i);
+                if (index[0] >= valid) scores[i] = -1.0e30f;
+            }
+        }
+        reduce_rows(scores, row_max, reduction_operation::max, -INFINITY);
+        float alpha[SLOTS];
+        float offset[SLOTS];
+        #pragma clang loop unroll(full)
+        for (int s = 0; s < SLOTS; s++) {
+            float next = max(m[s], row_max[s]);
+            alpha[s] = fast::exp2((m[s] - next) * c);
+            m[s] = next;
+            offset[s] = next * c;
+            l[s] *= alpha[s];
+        }
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < scores.get_capacity(); i++) {
+            const int s = h3_attn_row_slot(i, BK);
+            float p = fast::exp2(fma(scores[i], c, -offset[s]));
+            l[s] += p;
+            probs[i] = (bfloat)p;
+        }
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); i++)
+            acc[i] *= alpha[h3_attn_row_slot(i, D)];
+        auto left = pv.template get_left_input_cooperative_tensor<
+            bfloat, bfloat, float>(probs);
+        pv.run(left, vs, acc);
+    }
+
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vs0), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_tiled_bf16_impl<16, 4, 64>) h3_attn_tiled_bf16_t;
+template [[host_name("h3_attn_tiled_bf16_r16s4k64")]]
+kernel h3_attn_tiled_bf16_t h3_attn_tiled_bf16_impl<16, 4, 64>;
+template [[host_name("h3_attn_tiled_bf16_r16s4k32")]]
+kernel h3_attn_tiled_bf16_t h3_attn_tiled_bf16_impl<16, 4, 32>;
+template [[host_name("h3_attn_tiled_bf16_r32s4k64")]]
+kernel h3_attn_tiled_bf16_t h3_attn_tiled_bf16_impl<32, 4, 64>;
+template [[host_name("h3_attn_tiled_bf16_r16s8k64")]]
+kernel h3_attn_tiled_bf16_t h3_attn_tiled_bf16_impl<16, 8, 64>;
+#endif

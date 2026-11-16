@@ -501,6 +501,18 @@ int h3_gpu_sdpa_bf16_head_major_output(
                      const h3_gpu_tensor *query, const h3_gpu_tensor *key,
                      const h3_gpu_tensor *value, uint32_t sequence,
                      uint32_t heads, uint32_t head_dim, float scale);
+/* Dense tiled flash attention on M5 TensorOps with the same contract as
+ * h3_gpu_sdpa_bf16 (output_head_major=0) or the head-major-output variant
+ * (output_head_major=1), including head-major inputs announced by the QKV
+ * projection. Requires head_dim 128 and h3_gpu_has_tiled_attention(). */
+int h3_gpu_has_tiled_attention(const h3_gpu *gpu);
+int h3_gpu_attention_tiled_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
+                                const h3_gpu_tensor *query,
+                                const h3_gpu_tensor *key,
+                                const h3_gpu_tensor *value,
+                                uint32_t sequence, uint32_t heads,
+                                uint32_t head_dim, float scale,
+                                int output_head_major);
 int h3_gpu_swiglu_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                        const h3_gpu_tensor *fused, uint32_t rows,
                        uint32_t width);

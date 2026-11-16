@@ -1923,7 +1923,15 @@ static int run_block(h3_dit *dit, unsigned index, int step,
         !dit->use_slower_row_major_attention_output &&
         !dit->use_slower_uncached_int8_scales &&
         !getenv("H3_DISABLE_HEAD_MAJOR_ATTENTION_OUTPUT");
-    if (head_major_attention_output)
+    const char *tiled_attention = getenv("H3_ATTN_TILED");
+    if (tiled_attention && *tiled_attention && strcmp(tiled_attention, "0") &&
+        h3_gpu_has_tiled_attention(dit->gpu))
+        OP(h3_gpu_attention_tiled_bf16(
+            dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
+            rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM),
+            head_major_attention_output),
+           "DiT tiled full attention");
+    else if (head_major_attention_output)
         OP(h3_gpu_sdpa_bf16_head_major_output(
             dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
             rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),

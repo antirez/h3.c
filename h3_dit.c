@@ -2579,6 +2579,7 @@ static int parse_reuse_steps(int steps, uint8_t *selected) {
 static int gpu_sampler_requested(const h3_dit *dit) {
     const char *cpu = getenv("H3_CPU_SAMPLER");
     if (cpu && *cpu && strcmp(cpu, "0")) return 0;
+    if (h3_renoise_enabled()) return 0;
     const char *value = getenv("H3_GPU_SAMPLER");
     if (value) return *value && strcmp(value, "0");
     return h3_gpu_is_m5(dit->gpu);
@@ -2888,11 +2889,24 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
+/* Renoise: jump to the clean estimate (velocity = x0 - noise), then re-noise to
+ * sigma_next with fresh noise. */
+static void renoise_step(float *sample, const float *velocity, size_t count,
+                         float sigma, float sigma_next, h3_rng *rng) {
+    for (size_t i = 0; i < count; i++) {
+        float x0 = sample[i] + sigma * velocity[i];
+        sample[i] = sigma_next > 0.0f
+            ? (1.0f - sigma_next) * x0 + sigma_next * h3_rng_normal(rng)
+            : x0;
+    }
+}
+
 int h3_dit_denoise_euler_span(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          int first_step, int stop_step,
                          float *snapshot_video, float *snapshot_audio,
+                         uint32_t renoise_seed,
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
@@ -2968,6 +2982,29 @@ int h3_dit_denoise_euler_span(
     int ok = 1;
     int last_evaluated = -1;
     int previous_evaluated = -1;
+    h3_rng renoise_rng;
+    /* Re-noising overwrites the latent with fresh noise each step, so the clean estimate for a stopped
+     * (preview) run is the last x0 taken before the re-noise, not an Euler step from the re-noised state. */
+    float *estimate_video = NULL, *estimate_audio = NULL;
+    if (h3_renoise_enabled() && stop_step < dit->sigmas.steps) {
+        estimate_video = malloc(video_count * sizeof(*estimate_video));
+        estimate_audio = malloc(audio_count * sizeof(*estimate_audio));
+        if (!estimate_video || !estimate_audio) {
+            fail(error, error_size, "out of memory allocating the re-noise estimate");
+            free(estimate_video); free(estimate_audio);
+            free(video_velocity); free(audio_velocity); free(last_video);
+            free(previous_video); free(last_audio); free(previous_audio);
+            return 0;
+        }
+    }
+    h3_rng_seed(&renoise_rng, 0x9e3779b97f4a7c15ULL ^ renoise_seed);
+    /* A resumed span draws the same noise as an unbroken run: skip the draws of the earlier steps. */
+    if (h3_renoise_enabled())
+        for (int step = 0; step < first_step; step++) {
+            size_t draws = (dit->sigmas.video[step + 1] > 0.0f ? video_count : 0) +
+                           (dit->sigmas.audio[step + 1] > 0.0f ? audio_count : 0);
+            for (size_t i = 0; i < draws; i++) (void)h3_rng_normal(&renoise_rng);
+        }
     for (int step = first_step; step < stop_step && ok; step++) {
         report(progress, progress_opaque, "denoise", step, dit->sigmas.steps);
         int evaluate = selected[step];
@@ -3003,7 +3040,20 @@ int h3_dit_denoise_euler_span(
                     ? dit->sigmas.audio[previous_evaluated] : 0.0f,
                 previous_evaluated >= 0);
         }
-        if (ok) {
+        if (ok && h3_renoise_enabled()) {
+            if (estimate_video && step + 1 == stop_step) {
+                for (size_t i = 0; i < video_count; i++)
+                    estimate_video[i] = video_latent[i] + dit->sigmas.video[step] * video_velocity[i];
+                for (size_t i = 0; i < audio_count; i++)
+                    estimate_audio[i] = audio_latent[i] + dit->sigmas.audio[step] * audio_velocity[i];
+            }
+            renoise_step(video_latent, video_velocity, video_count,
+                         dit->sigmas.video[step], dit->sigmas.video[step + 1],
+                         &renoise_rng);
+            renoise_step(audio_latent, audio_velocity, audio_count,
+                         dit->sigmas.audio[step], dit->sigmas.audio[step + 1],
+                         &renoise_rng);
+        } else if (ok) {
             ok = h3_euler_velocity_step(
                      video_latent, video_velocity, video_count,
                      dit->sigmas.video[step], dit->sigmas.video[step + 1]) &&
@@ -3028,13 +3078,20 @@ int h3_dit_denoise_euler_span(
                video_count * sizeof(*snapshot_video));
         memcpy(snapshot_audio, audio_latent,
                audio_count * sizeof(*snapshot_audio));
-        ok = h3_euler_velocity_step(video_latent, video_velocity, video_count,
-                                    dit->sigmas.video[stop_step], 0.0f) &&
-             h3_euler_velocity_step(audio_latent, audio_velocity, audio_count,
-                                    dit->sigmas.audio[stop_step], 0.0f);
-        if (!ok) fail(error, error_size, "Euler estimate rejected step %d",
-                      stop_step);
+        if (estimate_video) {
+            memcpy(video_latent, estimate_video, video_count * sizeof(*video_latent));
+            memcpy(audio_latent, estimate_audio, audio_count * sizeof(*audio_latent));
+        } else {
+            ok = h3_euler_velocity_step(video_latent, video_velocity, video_count,
+                                        dit->sigmas.video[stop_step], 0.0f) &&
+                 h3_euler_velocity_step(audio_latent, audio_velocity, audio_count,
+                                        dit->sigmas.audio[stop_step], 0.0f);
+            if (!ok) fail(error, error_size, "Euler estimate rejected step %d",
+                          stop_step);
+        }
     }
+    free(estimate_video);
+    free(estimate_audio);
     free(video_velocity);
     free(audio_velocity);
     free(last_video);
@@ -3051,9 +3108,12 @@ int h3_dit_denoise_euler_preview(
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
+    uint32_t renoise_seed = 0;
+    if (video_latent) memcpy(&renoise_seed, video_latent, sizeof(renoise_seed));
     return h3_dit_denoise_euler_span(
         dit, video_latent, audio_latent, reuse_interval, 0,
-        dit ? dit->sigmas.steps : 0, NULL, NULL, progress, progress_opaque,
+        dit ? dit->sigmas.steps : 0, NULL, NULL, renoise_seed,
+        progress, progress_opaque,
         preview, preview_opaque, error, error_size);
 }
 

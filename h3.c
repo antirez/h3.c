@@ -161,6 +161,79 @@ failed:
     return NULL;
 }
 
+static char *h3_key_join(const char *prepared, uint64_t seed,
+                         const char *dit_path) {
+    h3_key key = {0};
+    if (!h3_key_append(&key, "%s|seed=%llu|dit=%s", prepared,
+                       (unsigned long long)seed, dit_path)) {
+        free(key.text);
+        return NULL;
+    }
+    return key.text;
+}
+
+static const char H3_LATENT_MAGIC[8] = {'H','3','L','A','T','N','T','1'};
+
+/* Stopped denoising state: magic, key length, key, step, element counts, then
+ * F32 video and audio latents. The key binds it to one prepared run. */
+static int h3_latent_write(const char *path, const char *key, int32_t step,
+                           const float *video, uint64_t video_count,
+                           const float *audio, uint64_t audio_count) {
+    FILE *file = fopen(path, "wb");
+    if (!file) return 0;
+    uint32_t key_length = (uint32_t)strlen(key);
+    int ok = fwrite(H3_LATENT_MAGIC, sizeof(H3_LATENT_MAGIC), 1, file) == 1 &&
+        fwrite(&key_length, sizeof(key_length), 1, file) == 1 &&
+        fwrite(key, 1, key_length, file) == key_length &&
+        fwrite(&step, sizeof(step), 1, file) == 1 &&
+        fwrite(&video_count, sizeof(video_count), 1, file) == 1 &&
+        fwrite(&audio_count, sizeof(audio_count), 1, file) == 1 &&
+        fwrite(video, sizeof(*video), video_count, file) == video_count &&
+        fwrite(audio, sizeof(*audio), audio_count, file) == audio_count;
+    return fclose(file) == 0 && ok;
+}
+
+static int h3_latent_read(h3_ctx *ctx, const char *path, const char *key,
+                          int32_t *step, float *video, uint64_t video_count,
+                          float *audio, uint64_t audio_count) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        h3_set_error(ctx, "cannot open resume latent %s: %s", path,
+                     strerror(errno));
+        return 0;
+    }
+    char magic[sizeof(H3_LATENT_MAGIC)];
+    uint32_t key_length = 0;
+    uint64_t stored_video = 0, stored_audio = 0;
+    char *stored_key = NULL;
+    int ok = fread(magic, sizeof(magic), 1, file) == 1 &&
+        !memcmp(magic, H3_LATENT_MAGIC, sizeof(magic)) &&
+        fread(&key_length, sizeof(key_length), 1, file) == 1 &&
+        key_length < (1u << 24) && (stored_key = malloc(key_length + 1)) &&
+        fread(stored_key, 1, key_length, file) == key_length;
+    if (!ok) {
+        h3_set_error(ctx, "%s is not an h3 resume latent", path);
+    } else {
+        stored_key[key_length] = '\0';
+        ok = !strcmp(stored_key, key);
+        if (!ok) h3_set_error(ctx, "resume latent %s was made for a different "
+                              "prompt, input, canvas, step count or seed", path);
+    }
+    if (ok) {
+        ok = fread(step, sizeof(*step), 1, file) == 1 &&
+            fread(&stored_video, sizeof(stored_video), 1, file) == 1 &&
+            fread(&stored_audio, sizeof(stored_audio), 1, file) == 1 &&
+            stored_video == video_count && stored_audio == audio_count &&
+            fread(video, sizeof(*video), video_count, file) == video_count &&
+            fread(audio, sizeof(*audio), audio_count, file) == audio_count;
+        if (!ok) h3_set_error(ctx, "resume latent %s is truncated or the wrong "
+                              "size", path);
+    }
+    free(stored_key);
+    fclose(file);
+    return ok;
+}
+
 static char *h3_prepared_key(const char *conditioning,
                              const h3_params *params,
                              int render_width, int render_height) {
@@ -517,6 +590,10 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
     }
     if (params->steps < 2 || params->steps > H3_MAX_STEPS) {
         h3_set_error(ctx, "denoising steps must be in [2, 1000]");
+        return 0;
+    }
+    if (params->stop_step < 0 || params->stop_step >= params->steps) {
+        h3_set_error(ctx, "stop step must be 0 (run all) or below the step count");
         return 0;
     }
     if (params->denoise_reuse < 1 || params->denoise_reuse > 3) {
@@ -913,6 +990,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_result *result = NULL;
     char *conditioning_key = NULL;
     char *prepared_key = NULL;
+    char *latent_key = NULL;
+    float *snapshot_video = NULL, *snapshot_audio = NULL;
     char *decoder_key = NULL;
     int conditioning_hit = 0;
     int conditioned = 0;
@@ -1566,15 +1645,48 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         h3_set_error(ctx, "out of memory allocating joint H3 noise");
         goto cleanup;
     }
-    /* The released server initializes each modality from a separate generator
-     * carrying the same requested seed. */
-    h3_rng video_rng, audio_rng;
-    h3_rng_seed(&video_rng, params->seed);
-    h3_rng_seed(&audio_rng, params->seed);
-    h3_rng_fill_normal(&video_rng, video, video_count);
-    h3_rng_fill_normal(&audio_rng, audio, audio_count);
-    if (!h3_dit_denoise_euler_preview(
-            dit, video, audio, params->denoise_reuse,
+    int first_step = 0;
+    int stop_step = params->stop_step ? params->stop_step : params->steps;
+    if (params->latent_resume || params->latent_save) {
+        latent_key = h3_key_join(prepared_key, params->seed, dit_path);
+        if (!latent_key) {
+            h3_set_error(ctx, "out of memory constructing resume latent key");
+            goto cleanup;
+        }
+    }
+    if (params->latent_resume) {
+        int32_t step = 0;
+        if (!h3_latent_read(ctx, params->latent_resume, latent_key, &step,
+                            video, video_count, audio, audio_count))
+            goto cleanup;
+        first_step = step;
+        if (first_step < 1 || first_step >= stop_step) {
+            h3_set_error(ctx, "resume latent stops at step %d, outside 1..%d",
+                         first_step, stop_step - 1);
+            goto cleanup;
+        }
+        fprintf(stderr, "h3: resuming at step %d of %d\n", first_step,
+                params->steps);
+    } else {
+        /* The released server initializes each modality from a separate
+         * generator carrying the same requested seed. */
+        h3_rng video_rng, audio_rng;
+        h3_rng_seed(&video_rng, params->seed);
+        h3_rng_seed(&audio_rng, params->seed);
+        h3_rng_fill_normal(&video_rng, video, video_count);
+        h3_rng_fill_normal(&audio_rng, audio, audio_count);
+    }
+    if (stop_step < params->steps) {
+        snapshot_video = malloc(video_count * sizeof(*snapshot_video));
+        snapshot_audio = malloc(audio_count * sizeof(*snapshot_audio));
+        if (!snapshot_video || !snapshot_audio) {
+            h3_set_error(ctx, "out of memory allocating the stopped latent");
+            goto cleanup;
+        }
+    }
+    if (!h3_dit_denoise_euler_span(
+            dit, video, audio, params->denoise_reuse, first_step, stop_step,
+            snapshot_video, snapshot_audio,
             h3_dit_progress_bridge, &progress,
             preview_decoder ? h3_deliver_denoise_preview : NULL,
             preview_decoder ? &live_preview : NULL,
@@ -1591,6 +1703,14 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
     if (progress.cancelled) goto cleanup;
+    if (snapshot_video && params->latent_save &&
+        !h3_latent_write(params->latent_save, latent_key, stop_step,
+                         snapshot_video, video_count,
+                         snapshot_audio, audio_count)) {
+        h3_set_error(ctx, "cannot write stopped latent %s: %s",
+                     params->latent_save, strerror(errno));
+        goto cleanup;
+    }
     h3_progress_emit(&progress, "audio VAE", 0, 7);
     if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
                              temporal.audio_t, h3_audio_vae_progress_bridge,
@@ -1692,6 +1812,9 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
 cleanup:
     free(conditioning_key);
     free(prepared_key);
+    free(latent_key);
+    free(snapshot_video);
+    free(snapshot_audio);
     free(decoder_key);
     free(tokenizer_path); free(text_path); free(dit_path); free(vae_path);
     free(audio_vae_path);

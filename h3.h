@@ -126,12 +126,20 @@ typedef struct {
     h3_frame_callback on_frame;
     h3_progress_callback on_progress;
     void *callback_opaque;
+    /* Stop after this many of the `steps` Euler steps (0 runs them all) and
+     * decode the clean estimate at that point. With latent_save the stopped
+     * state is written there; a later run with latent_resume and identical
+     * prompt, inputs, canvas, frames, steps and seed continues it from that
+     * step, so the preview and the finished clip share one trajectory. */
+    int stop_step;
+    const char *latent_save;
+    const char *latent_resume;
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, 0, NULL, NULL \
 }
 
 typedef struct {

@@ -31,6 +31,8 @@ typedef struct {
     char *last_frame;
     char output_dir[H3_CLI_PATH];
     char last_output[H3_CLI_PATH];
+    char latent_save[H3_CLI_PATH];
+    char latent_resume[H3_CLI_PATH];
     char *last_prompt;
     unsigned output_count;
     int random_seed;
@@ -157,6 +159,9 @@ static void print_help(void) {
     puts("  !seconds [N]             Set duration at 24 fps");
     puts("  !steps [N]               Set or show denoising steps");
     puts("  !reuse [N]               Set or show denoiser reuse");
+    puts("  !stop [N]                Stop after N steps and decode the estimate (0: all)");
+    puts("  !save-latent [PATH|clear]  Write the stopped state to PATH");
+    puts("  !resume [PATH|clear]     Continue a stopped state from PATH");
     puts("  !layers [N]              Set or show active DiT blocks");
     puts("  !core-reuse [N]          Set or show core reuse");
     puts("  !token-reduction [on|off]  Toggle token reduction");
@@ -200,6 +205,9 @@ static void print_status(const h3_cli_state *state) {
            "released reference" : "native 256 adapted");
     if (state->random_seed) puts("Seed: random");
     else printf("Seed: %" PRIu64 "\n", state->params.seed);
+    printf("Stop: %d | save latent: %s | resume: %s\n", state->params.stop_step,
+           state->latent_save[0] ? state->latent_save : "none",
+           state->latent_resume[0] ? state->latent_resume : "none");
     printf("First: %s\n", state->first_frame ? state->first_frame : "none");
     printf("Last: %s\n", state->last_frame ? state->last_frame : "none");
     printf("References: %zu%s\n", state->params.reference_count,
@@ -435,6 +443,8 @@ static int generate(h3_cli_state *state, const char *prompt) {
     params.seed = state->random_seed ? random_seed() : state->params.seed;
     params.first_frame = state->first_frame;
     params.last_frame = state->last_frame;
+    params.latent_save = state->latent_save[0] ? state->latent_save : NULL;
+    params.latent_resume = state->latent_resume[0] ? state->latent_resume : NULL;
     params.output_path = output;
     params.preview_denoise = state->show && state->terminal != H3_TERM_NONE;
     params.on_frame = params.preview_denoise ? cli_frame : NULL;
@@ -570,6 +580,22 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
         }
     } else if (!strcasecmp(command, "steps")) {
         set_integer(argument, "Steps", 1, H3_MAX_STEPS, &state->params.steps);
+    } else if (!strcasecmp(command, "stop")) {
+        set_integer(argument, "Stop", 0, H3_MAX_STEPS - 1,
+                    &state->params.stop_step);
+    } else if (!strcasecmp(command, "save-latent") ||
+               !strcasecmp(command, "resume")) {
+        char *slot = !strcasecmp(command, "resume") ? state->latent_resume
+                                                    : state->latent_save;
+        argument = skip_spaces(argument);
+        if (!strcasecmp(argument, "clear")) slot[0] = '\0';
+        else if (*argument &&
+                 snprintf(slot, H3_CLI_PATH, "%s", argument) >= H3_CLI_PATH) {
+            fprintf(stderr, "h3: latent path is too long\n");
+            slot[0] = '\0';
+        }
+        printf("%s: %s\n", slot == state->latent_resume ? "Resume" : "Save latent",
+               slot[0] ? slot : "none");
     } else if (!strcasecmp(command, "reuse")) {
         set_integer(argument, "Reuse", 1, 32, &state->params.denoise_reuse);
     } else if (!strcasecmp(command, "layers")) {

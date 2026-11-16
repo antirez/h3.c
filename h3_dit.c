@@ -2612,6 +2612,8 @@ static int ensure_previous_velocities(h3_dit *dit, char *error,
 
 static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                              float *audio_latent, int reuse_interval,
+                             int first_step, int stop_step,
+                             float *snapshot_video, float *snapshot_audio,
                              h3_dit_progress progress, void *progress_opaque,
                              h3_dit_preview preview, void *preview_opaque,
                              char *error, size_t error_size) {
@@ -2670,7 +2672,7 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
     int previous_evaluated = -1;
     unsigned pending_evaluations = 0;
     int command_active = 0;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    for (int step = first_step; step < stop_step && ok; step++) {
         report(progress, progress_opaque, "denoise enqueue", step,
                dit->sigmas.steps);
         if (!command_active) {
@@ -2727,7 +2729,7 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 dit->sigmas.audio[step] - dit->sigmas.audio[step + 1],
                 audio_ratio), error, error_size, "GPU audio Euler step");
         if (ok && (evaluate || preview)) {
-            int finish = preview || step + 1 == dit->sigmas.steps ||
+            int finish = preview || step + 1 == stop_step ||
                          (window && pending_evaluations >= window);
             ok = gpu_op(dit, finish ? h3_gpu_submit(dit->gpu)
                                     : h3_gpu_continue(dit->gpu),
@@ -2766,6 +2768,34 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                      dit->video_input, video_offset, video_rows, video_count) &&
                  h3_gpu_tensor_read_f32_range(
                      dit->audio_input, audio_offset, audio_rows, audio_count);
+    if (ok && stop_step < dit->sigmas.steps) {
+        /* Keep the state at the stop sigma for a later resume, then step
+         * from it straight to sigma 0 with the last velocity: the clean
+         * estimate the remaining steps would refine. */
+        ok = h3_dit_unpatchify_video(
+                 video_rows, VIDEO_CHANNELS, dit->latent_t, dit->latent_h,
+                 dit->latent_w, snapshot_video, h3_dit_video_elements(dit)) &&
+             h3_dit_unpack_audio(audio_rows, AUDIO_CHANNELS, dit->audio_t,
+                                 snapshot_audio, h3_dit_audio_elements(dit)) &&
+             gpu_op(dit, h3_gpu_begin(dit->gpu), error, error_size,
+                    "begin GPU Euler estimate") &&
+             gpu_op(dit, h3_gpu_euler_bf16(
+                dit->gpu, dit->video_input, video_offset,
+                dit->video_output_bf16, dit->video_output_bf16,
+                (uint32_t)video_count, dit->sigmas.video[stop_step], 0.0f),
+                error, error_size, "GPU video Euler estimate") &&
+             gpu_op(dit, h3_gpu_euler_bf16(
+                dit->gpu, dit->audio_input, audio_offset,
+                dit->audio_output_bf16, dit->audio_output_bf16,
+                (uint32_t)audio_count, dit->sigmas.audio[stop_step], 0.0f),
+                error, error_size, "GPU audio Euler estimate") &&
+             gpu_op(dit, h3_gpu_submit(dit->gpu), error, error_size,
+                    "submit GPU Euler estimate") &&
+             h3_gpu_tensor_read_f32_range(
+                 dit->video_input, video_offset, video_rows, video_count) &&
+             h3_gpu_tensor_read_f32_range(
+                 dit->audio_input, audio_offset, audio_rows, audio_count);
+    }
     if (!ok && (!error || !*error))
         fail(error, error_size, "cannot read GPU Euler latents");
     if (ok) ok = h3_dit_unpatchify_video(
@@ -2858,9 +2888,11 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
     return ok;
 }
 
-int h3_dit_denoise_euler_preview(
+int h3_dit_denoise_euler_span(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
+                         int first_step, int stop_step,
+                         float *snapshot_video, float *snapshot_audio,
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
@@ -2871,9 +2903,27 @@ int h3_dit_denoise_euler_preview(
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
+    int partial = first_step != 0 || stop_step != dit->sigmas.steps;
+    if (first_step < 0 || stop_step <= first_step ||
+        stop_step > dit->sigmas.steps ||
+        (stop_step < dit->sigmas.steps &&
+         (!snapshot_video || !snapshot_audio))) {
+        fail(error, error_size, "invalid Euler step span %d..%d of %d",
+             first_step, stop_step, dit->sigmas.steps);
+        return 0;
+    }
+    /* Velocity extrapolation and core reuse carry state between steps that a
+     * stopped or resumed run does not have. */
+    if (partial && (reuse_interval != 1 || dit->core_reuse_interval != 1)) {
+        fail(error, error_size,
+             "stopping or resuming denoising needs reuse 1 and core reuse 1");
+        return 0;
+    }
     if (gpu_sampler_requested(dit))
         return denoise_euler_gpu(dit, video_latent, audio_latent,
-                                 reuse_interval, progress, progress_opaque,
+                                 reuse_interval, first_step, stop_step,
+                                 snapshot_video, snapshot_audio,
+                                 progress, progress_opaque,
                                  preview, preview_opaque,
                                  error, error_size);
     uint8_t selected[H3_MAX_STEPS] = {0};
@@ -2918,7 +2968,7 @@ int h3_dit_denoise_euler_preview(
     int ok = 1;
     int last_evaluated = -1;
     int previous_evaluated = -1;
-    for (int step = 0; step < dit->sigmas.steps && ok; step++) {
+    for (int step = first_step; step < stop_step && ok; step++) {
         report(progress, progress_opaque, "denoise", step, dit->sigmas.steps);
         int evaluate = selected[step];
         if (evaluate) {
@@ -2973,6 +3023,18 @@ int h3_dit_denoise_euler_preview(
         if (ok) report(progress, progress_opaque, "denoise", step + 1,
                        dit->sigmas.steps);
     }
+    if (ok && stop_step < dit->sigmas.steps) {
+        memcpy(snapshot_video, video_latent,
+               video_count * sizeof(*snapshot_video));
+        memcpy(snapshot_audio, audio_latent,
+               audio_count * sizeof(*snapshot_audio));
+        ok = h3_euler_velocity_step(video_latent, video_velocity, video_count,
+                                    dit->sigmas.video[stop_step], 0.0f) &&
+             h3_euler_velocity_step(audio_latent, audio_velocity, audio_count,
+                                    dit->sigmas.audio[stop_step], 0.0f);
+        if (!ok) fail(error, error_size, "Euler estimate rejected step %d",
+                      stop_step);
+    }
     free(video_velocity);
     free(audio_velocity);
     free(last_video);
@@ -2981,6 +3043,18 @@ int h3_dit_denoise_euler_preview(
     free(previous_audio);
     h3_gpu_profile_mark(dit->gpu, "Euler denoise");
     return ok;
+}
+
+int h3_dit_denoise_euler_preview(
+                         h3_dit *dit, float *video_latent,
+                         float *audio_latent, int reuse_interval,
+                         h3_dit_progress progress, void *progress_opaque,
+                         h3_dit_preview preview, void *preview_opaque,
+                         char *error, size_t error_size) {
+    return h3_dit_denoise_euler_span(
+        dit, video_latent, audio_latent, reuse_interval, 0,
+        dit ? dit->sigmas.steps : 0, NULL, NULL, progress, progress_opaque,
+        preview, preview_opaque, error, error_size);
 }
 
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,

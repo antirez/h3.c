@@ -27,6 +27,13 @@ h3: $(CLI_OBJ) $(LIB_OBJ)
 libh3.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
+# Diagnostic: replay a video VAE decode from H3_DUMP_VIDEO_LATENT output.
+vae_bench: tools/vae_bench.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+tools/%.o: tools/%.c
+	$(CC) $(CFLAGS) -I. -c $< -o $@
+
 h3_tests: tests/test_h3.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -211,5 +218,5 @@ clean:
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
 		h3_real_video_vae_test h3_semantic_vae_test \
-	h3_dit_bench h3_dit_bench_864 \
-	libh3.a *.o *.d tests/*.o tests/*.d
+	h3_dit_bench h3_dit_bench_864 vae_bench \
+	libh3.a *.o *.d tests/*.o tests/*.d tools/*.o tools/*.d

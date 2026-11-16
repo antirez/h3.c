@@ -406,7 +406,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             @"h3_linear_f32_tiled_bf16", @"h3_silu_f32",
             @"h3_linear_f32_tiled_bf16_map",
             @"h3_cast_f32_to_bf16",
-            @"h3_cast_bf16_to_f32",
+            @"h3_cast_bf16_to_f32", @"h3_bias_bf16_to_f32",
             @"h3_rms_norm_f32",
             @"h3_scale_add_f32", @"h3_layer_norm_f32",
             @"h3_video_qkv_rope_f32",
@@ -1272,6 +1272,30 @@ int h3_gpu_cast_bf16_to_f32(h3_gpu *opaque, h3_gpu_tensor *output,
             [encoder setBuffer:TENSOR(input).buffer offset:0 atIndex:0];
             [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:1];
             [encoder setBytes:&elements length:sizeof(elements) atIndex:2];
+        });
+}
+
+static int h3_gpu_require_bf16(H3GPU *gpu, const h3_gpu_tensor *tensor,
+                               size_t elements, NSString *label);
+static int h3_gpu_require_f32(H3GPU *gpu, const h3_gpu_tensor *tensor,
+                              size_t elements, NSString *label);
+
+int h3_gpu_bias_bf16_to_f32(h3_gpu *opaque, h3_gpu_tensor *output,
+                            const h3_gpu_tensor *input,
+                            const h3_gpu_tensor *bias, uint32_t rows,
+                            uint32_t width) {
+    H3GPU *gpu = GPU(opaque);
+    uint32_t elements = rows * width;
+    if (!h3_gpu_require_bf16(gpu, input, elements, @"bias input") ||
+        !h3_gpu_require_f32(gpu, bias, width, @"bias vector") ||
+        !h3_gpu_require_f32(gpu, output, elements, @"bias output")) return 0;
+    struct { uint32_t rows, width; } args = {rows, width};
+    return h3_gpu_dispatch_1d(gpu, @"h3_bias_bf16_to_f32", elements,
+        ^(id<MTLComputeCommandEncoder> encoder) {
+            [encoder setBuffer:TENSOR(input).buffer offset:0 atIndex:0];
+            [encoder setBuffer:TENSOR(bias).buffer offset:0 atIndex:1];
+            [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:2];
+            [encoder setBytes:&args length:sizeof(args) atIndex:3];
         });
 }
 

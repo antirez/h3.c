@@ -1591,6 +1591,19 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
     if (progress.cancelled) goto cleanup;
+    /* Diagnostic: save the normalized video latent so tools/vae_bench can
+     * replay the VAE decode alone. Layout: int32 t,h,w then F32 [24,t,h,w]. */
+    const char *dump_path = getenv("H3_DUMP_VIDEO_LATENT");
+    if (dump_path && *dump_path) {
+        FILE *dump = fopen(dump_path, "wb");
+        int32_t dims[3] = {temporal.video_t, latent_h, latent_w};
+        size_t count = (size_t)24 * (size_t)temporal.video_t *
+                       (size_t)latent_h * (size_t)latent_w;
+        if (!dump || fwrite(dims, sizeof(dims), 1, dump) != 1 ||
+            fwrite(video, sizeof(*video), count, dump) != count)
+            fprintf(stderr, "h3: cannot write %s\n", dump_path);
+        if (dump) fclose(dump);
+    }
     h3_progress_emit(&progress, "audio VAE", 0, 7);
     if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
                              temporal.audio_t, h3_audio_vae_progress_bridge,

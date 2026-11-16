@@ -136,10 +136,19 @@ typedef struct {
 } h3_attn_tiled_variant;
 
 static const h3_attn_tiled_variant h3_attn_tiled_variants[] = {
+    {"h3_attn_tiled_bf16_tg_r16s16k32", 16, 16},
     {"h3_attn_tiled_bf16_r16s4k64", 16, 4},
     {"h3_attn_tiled_bf16_r16s4k32", 16, 4},
     {"h3_attn_tiled_bf16_r32s4k64", 32, 4},
     {"h3_attn_tiled_bf16_r16s8k64", 16, 8},
+    {"h3_attn_tiled_bf16_r32s8k64", 32, 8},
+    {"h3_attn_tiled_bf16_r16s4k128", 16, 4},
+    {"h3_attn_tiled_bf16_r16s16k64", 16, 16},
+    {"h3_attn_tiled_bf16_r16s8k128", 16, 8},
+    {"h3_attn_tiled_bf16_r16s8k64_relaxed", 16, 8},
+    {"h3_attn_tiled_bf16_tg_r16s8k64", 16, 8},
+    {"h3_attn_tiled_bf16_tg_r16s16k64", 16, 16},
+    {"h3_attn_tiled_bf16_tg_r16s32k32", 16, 32},
 };
 #define H3_ATTN_TILED_VARIANT_COUNT \
     (sizeof(h3_attn_tiled_variants) / sizeof(h3_attn_tiled_variants[0]))
@@ -1667,8 +1676,10 @@ int h3_gpu_attention_tiled_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     const h3_attn_tiled_variant *variant = &h3_attn_tiled_variants[0];
     for (size_t index = 0; requested && index < H3_ATTN_TILED_VARIANT_COUNT;
          index++)
-        if (strstr(h3_attn_tiled_variants[index].name, requested))
+        if (strstr(h3_attn_tiled_variants[index].name, requested)) {
             variant = &h3_attn_tiled_variants[index];
+            break;
+        }
     id<MTLComputePipelineState> pipeline =
         h3_gpu_pipeline(gpu, @(variant->name));
     if (!pipeline || !h3_gpu_require_command(gpu)) return 0;

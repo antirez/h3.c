@@ -1591,9 +1591,10 @@ static unsigned char *adaln_key_build(const char *weight_directory,
     adaln_key key = {malloc(1024), 0, 1024};
     DIR *dir = weight_directory ? opendir(weight_directory) : NULL;
     if (!key.bytes || !dir) goto failed;
-    uint32_t header[8] = {ADALN_SCHEDULE_VERSION, (uint32_t)sigmas->steps,
-                          (uint32_t)visual, (uint32_t)audio, H3_DIT_TIME_DIM,
-                          H3_DIT_HIDDEN, ADALN_BLOCK_OUTPUT, ADALN_FINAL_OUTPUT};
+    uint32_t header[9] = {ADALN_SCHEDULE_VERSION, (uint32_t)sigmas->steps,
+                          (uint32_t)visual, (uint32_t)audio, TEXT_DIM,
+                          H3_DIT_TIME_DIM, H3_DIT_HIDDEN, ADALN_BLOCK_OUTPUT,
+                          ADALN_FINAL_OUTPUT};
     size_t points = (size_t)sigmas->steps + 1;
     size_t directory_length = strlen(weight_directory);
     uint32_t directory_bytes = (uint32_t)directory_length;

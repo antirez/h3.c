@@ -1,10 +1,15 @@
 #include "h3_dit_schedule.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 enum {
     TIME_INPUT = 256,
@@ -482,4 +487,214 @@ int h3_dit_schedule_row_map(const h3_dit_schedule *schedule, int step,
             rows[row] = modulation;
     }
     return text_index == (size_t)layout->signature[0];
+}
+
+/* On-disk AdaLN schedule cache. One file per key (dit identity, steps, sigmas, condition rows).
+ * The full key is stored in the file and compared on load, so a hash collision cannot hit.
+ * The directory is capped at ADALN_CACHE_MAX_BYTES; the least recently used files go first. */
+#define ADALN_CACHE_MAGIC 0x44414833u /* "3HAD" */
+#define ADALN_CACHE_VERSION 1u
+#define ADALN_CACHE_MAX_BYTES (10ull << 30)
+#define ADALN_PATH_BYTES 4096
+
+static uint64_t adaln_fnv1a(const unsigned char *data, size_t bytes) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t index = 0; index < bytes; index++) {
+        hash ^= data[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static int adaln_write_u32(FILE *file, uint32_t value) {
+    return fwrite(&value, sizeof(value), 1, file) == 1;
+}
+
+static int adaln_read_u32(FILE *file, uint32_t *value) {
+    return fread(value, sizeof(*value), 1, file) == 1;
+}
+
+static int adaln_save(const h3_dit_schedule *schedule, const char *path,
+                      const char *key, size_t key_bytes) {
+    char temporary[ADALN_PATH_BYTES];
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    FILE *file = fopen(temporary, "wb");
+    if (!file) return 0;
+    size_t steps = (size_t)schedule->steps, rows = schedule->time_rows;
+    uint32_t has_visual = schedule->visual_condition_rows != NULL;
+    uint32_t has_audio = schedule->audio_condition_rows != NULL;
+    uint16_t *buffer = malloc(rows * BLOCK_OUTPUT * sizeof(uint16_t));
+    int ok = buffer && adaln_write_u32(file, ADALN_CACHE_MAGIC) &&
+        adaln_write_u32(file, ADALN_CACHE_VERSION) &&
+        adaln_write_u32(file, (uint32_t)key_bytes) &&
+        adaln_write_u32(file, (uint32_t)steps) &&
+        adaln_write_u32(file, (uint32_t)rows) &&
+        adaln_write_u32(file, has_visual) && adaln_write_u32(file, has_audio) &&
+        fwrite(key, 1, key_bytes, file) == key_bytes &&
+        fwrite(schedule->video_rows, sizeof(uint32_t), steps, file) == steps &&
+        fwrite(schedule->audio_rows, sizeof(uint32_t), steps, file) == steps;
+    if (ok && has_visual)
+        ok = fwrite(schedule->visual_condition_rows, sizeof(uint32_t), steps, file) == steps;
+    if (ok && has_audio)
+        ok = fwrite(schedule->audio_condition_rows, sizeof(uint32_t), steps, file) == steps;
+    for (unsigned block = 0; ok && block < H3_DIT_BLOCKS; block++) {
+        size_t elements = rows * BLOCK_OUTPUT;
+        ok = h3_gpu_tensor_read_bf16(schedule->blocks[block], buffer, elements) &&
+            fwrite(buffer, sizeof(uint16_t), elements, file) == elements;
+    }
+    if (ok) {
+        size_t elements = rows * FINAL_OUTPUT;
+        ok = h3_gpu_tensor_read_bf16(schedule->final, buffer, elements) &&
+            fwrite(buffer, sizeof(uint16_t), elements, file) == elements;
+    }
+    free(buffer);
+    ok = fclose(file) == 0 && ok;
+    if (!ok) {
+        unlink(temporary);
+        return 0;
+    }
+    return rename(temporary, path) == 0;
+}
+
+static h3_dit_schedule *adaln_load(h3_gpu *gpu, const char *path,
+                                   const char *key, size_t key_bytes) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return NULL;
+    uint32_t magic, version, stored_key, steps, rows, has_visual, has_audio;
+    int ok = adaln_read_u32(file, &magic) && adaln_read_u32(file, &version) &&
+        adaln_read_u32(file, &stored_key) && adaln_read_u32(file, &steps) &&
+        adaln_read_u32(file, &rows) && adaln_read_u32(file, &has_visual) &&
+        adaln_read_u32(file, &has_audio) &&
+        magic == ADALN_CACHE_MAGIC && version == ADALN_CACHE_VERSION &&
+        stored_key == key_bytes && steps >= 1 && steps <= H3_MAX_STEPS &&
+        rows >= 1 && rows <= UINT32_MAX / BLOCK_OUTPUT;
+    char *stored = ok ? malloc(key_bytes) : NULL;
+    ok = ok && stored && fread(stored, 1, key_bytes, file) == key_bytes &&
+        memcmp(stored, key, key_bytes) == 0;
+    free(stored);
+    if (!ok) {
+        fclose(file);
+        return NULL;
+    }
+    h3_dit_schedule *schedule = calloc(1, sizeof(*schedule));
+    uint16_t *buffer = malloc((size_t)rows * BLOCK_OUTPUT * sizeof(uint16_t));
+    if (!schedule || !buffer) goto failed;
+    schedule->gpu = gpu;
+    schedule->steps = (int)steps;
+    schedule->time_rows = rows;
+    schedule->video_rows = malloc(steps * sizeof(uint32_t));
+    schedule->audio_rows = malloc(steps * sizeof(uint32_t));
+    if (!schedule->video_rows || !schedule->audio_rows) goto failed;
+    if (fread(schedule->video_rows, sizeof(uint32_t), steps, file) != steps ||
+        fread(schedule->audio_rows, sizeof(uint32_t), steps, file) != steps) goto failed;
+    if (has_visual) {
+        schedule->visual_condition_rows = malloc(steps * sizeof(uint32_t));
+        if (!schedule->visual_condition_rows ||
+            fread(schedule->visual_condition_rows, sizeof(uint32_t), steps, file) != steps)
+            goto failed;
+    }
+    if (has_audio) {
+        schedule->audio_condition_rows = malloc(steps * sizeof(uint32_t));
+        if (!schedule->audio_condition_rows ||
+            fread(schedule->audio_condition_rows, sizeof(uint32_t), steps, file) != steps)
+            goto failed;
+    }
+    for (unsigned block = 0; block < H3_DIT_BLOCKS; block++) {
+        size_t elements = (size_t)rows * BLOCK_OUTPUT;
+        if (fread(buffer, sizeof(uint16_t), elements, file) != elements) goto failed;
+        schedule->blocks[block] = h3_gpu_tensor_new_bf16(gpu, elements);
+        if (!schedule->blocks[block] ||
+            !h3_gpu_tensor_write_bf16(schedule->blocks[block], buffer, elements))
+            goto failed;
+    }
+    size_t final_elements = (size_t)rows * FINAL_OUTPUT;
+    if (fread(buffer, sizeof(uint16_t), final_elements, file) != final_elements) goto failed;
+    schedule->final = h3_gpu_tensor_new_bf16(gpu, final_elements);
+    if (!schedule->final ||
+        !h3_gpu_tensor_write_bf16(schedule->final, buffer, final_elements))
+        goto failed;
+    free(buffer);
+    fclose(file);
+    return schedule;
+failed:
+    free(buffer);
+    fclose(file);
+    h3_dit_schedule_free(schedule);
+    return NULL;
+}
+
+typedef struct {
+    char path[ADALN_PATH_BYTES];
+    off_t bytes;
+    time_t used;
+} adaln_entry;
+
+static int adaln_by_age(const void *left, const void *right) {
+    const adaln_entry *a = left, *b = right;
+    return (a->used > b->used) - (a->used < b->used);
+}
+
+static void adaln_evict(const char *directory, const char *keep) {
+    DIR *dir = opendir(directory);
+    if (!dir) return;
+    adaln_entry *entries = NULL;
+    size_t count = 0, capacity = 0;
+    off_t total = 0;
+    for (struct dirent *item; (item = readdir(dir));) {
+        size_t length = strlen(item->d_name);
+        if (length < 6 || strcmp(item->d_name + length - 6, ".adaln") != 0) continue;
+        if (count == capacity) {
+            size_t grown = capacity ? capacity * 2 : 16;
+            adaln_entry *next = realloc(entries, grown * sizeof(*entries));
+            if (!next) break;
+            entries = next;
+            capacity = grown;
+        }
+        adaln_entry *entry = &entries[count];
+        snprintf(entry->path, sizeof(entry->path), "%s/%s", directory, item->d_name);
+        struct stat info;
+        if (stat(entry->path, &info) != 0) continue;
+        entry->bytes = info.st_size;
+        entry->used = info.st_mtime;
+        total += info.st_size;
+        count++;
+    }
+    closedir(dir);
+    qsort(entries, count, sizeof(*entries), adaln_by_age);
+    for (size_t index = 0; total > (off_t)ADALN_CACHE_MAX_BYTES && index < count; index++) {
+        if (strcmp(entries[index].path, keep) == 0) continue;
+        if (unlink(entries[index].path) == 0) total -= entries[index].bytes;
+    }
+    free(entries);
+}
+
+h3_dit_schedule *h3_dit_schedule_cached(const char *cache_directory,
+                                        const char *key, size_t key_bytes,
+                                        const h3_weight_store *weights,
+                                        h3_gpu *gpu,
+                                        const h3_sigma_schedule *sigmas,
+                                        int visual_condition, int audio_condition,
+                                        h3_dit_schedule_progress progress,
+                                        void *progress_opaque,
+                                        char *error, size_t error_size) {
+    if (!cache_directory || !*cache_directory || !key || key_bytes == 0)
+        return h3_dit_schedule_precompute(weights, gpu, sigmas, visual_condition,
+                                          audio_condition, progress, progress_opaque,
+                                          error, error_size);
+    char path[ADALN_PATH_BYTES];
+    snprintf(path, sizeof(path), "%s/%016llx.adaln", cache_directory,
+             (unsigned long long)adaln_fnv1a((const unsigned char *)key, key_bytes));
+    h3_dit_schedule *hit = adaln_load(gpu, path, key, key_bytes);
+    if (hit) {
+        utimes(path, NULL);  /* most recently used */
+        return hit;
+    }
+    h3_dit_schedule *built = h3_dit_schedule_precompute(
+        weights, gpu, sigmas, visual_condition, audio_condition,
+        progress, progress_opaque, error, error_size);
+    if (!built) return NULL;
+    if (mkdir(cache_directory, 0755) == 0 || errno == EEXIST) {
+        if (adaln_save(built, path, key, key_bytes)) adaln_evict(cache_directory, path);
+    }
+    return built;
 }

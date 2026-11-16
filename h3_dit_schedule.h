@@ -28,6 +28,18 @@ h3_dit_schedule *h3_dit_schedule_precompute(
     int audio_condition,
     h3_dit_schedule_progress progress, void *progress_opaque,
     char *error, size_t error_size);
+/* Same as h3_dit_schedule_precompute, but reads the schedule from cache_directory when a file
+ * for this exact key exists, and writes it there after a build. The key must identify the
+ * checkpoint, steps, sigmas and condition rows; the directory is capped at 10 GiB (LRU). */
+h3_dit_schedule *h3_dit_schedule_cached(const char *cache_directory,
+                                        const char *key, size_t key_bytes,
+                                        const h3_weight_store *weights,
+                                        h3_gpu *gpu,
+                                        const h3_sigma_schedule *sigmas,
+                                        int visual_condition, int audio_condition,
+                                        h3_dit_schedule_progress progress,
+                                        void *progress_opaque,
+                                        char *error, size_t error_size);
 void h3_dit_schedule_free(h3_dit_schedule *schedule);
 
 int h3_dit_schedule_steps(const h3_dit_schedule *schedule);

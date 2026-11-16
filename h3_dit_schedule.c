@@ -517,7 +517,8 @@ static int adaln_read_u32(FILE *file, uint32_t *value) {
 static int adaln_save(const h3_dit_schedule *schedule, const char *path,
                       const char *key, size_t key_bytes) {
     char temporary[ADALN_PATH_BYTES];
-    snprintf(temporary, sizeof(temporary), "%s.%ld.tmp", path, (long)getpid());
+    int written = snprintf(temporary, sizeof(temporary), "%s.%ld.tmp", path, (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(temporary)) return 0;
     FILE *file = fopen(temporary, "wb");
     if (!file) return 0;
     size_t steps = (size_t)schedule->steps, rows = schedule->time_rows;
@@ -683,8 +684,12 @@ h3_dit_schedule *h3_dit_schedule_cached(const char *cache_directory,
                                           audio_condition, progress, progress_opaque,
                                           error, error_size);
     char path[ADALN_PATH_BYTES];
-    snprintf(path, sizeof(path), "%s/%016llx.adaln", cache_directory,
-             (unsigned long long)adaln_fnv1a((const unsigned char *)key, key_bytes));
+    int written = snprintf(path, sizeof(path), "%s/%016llx.adaln", cache_directory,
+                           (unsigned long long)adaln_fnv1a((const unsigned char *)key, key_bytes));
+    if (written < 0 || (size_t)written >= sizeof(path))  /* too long: skip the cache */
+        return h3_dit_schedule_precompute(weights, gpu, sigmas, visual_condition,
+                                          audio_condition, progress, progress_opaque,
+                                          error, error_size);
     h3_dit_schedule *hit = adaln_load(gpu, path, key, key_bytes);
     if (hit) {
         utimes(path, NULL);  /* most recently used */

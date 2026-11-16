@@ -1582,15 +1582,55 @@ static int adaln_key_append(adaln_key *key, const void *data, size_t bytes) {
     return 1;
 }
 
-/* Cache key for the AdaLN schedule: everything the schedule reads, including the size and
- * mtime of each safetensors shard load_dit opens, so replacing weights in place misses.
+static uint64_t fnv1a_update(uint64_t hash, const void *data, size_t bytes) {
+    const unsigned char *in = data;
+    for (size_t index = 0; index < bytes; index++) {
+        hash ^= in[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/* Fingerprint of every safetensors shard the weight store opens: name, size and mtime. Per-shard
+ * hashes are summed, so readdir order does not matter; replacing a shard in place changes the
+ * stamp. Returns 0 when the directory or a shard cannot be read, and callers then skip the cache. */
+static int weights_stamp(const char *directory, uint64_t *stamp) {
+    DIR *dir = directory ? opendir(directory) : NULL;
+    if (!dir) return 0;
+    const char suffix[] = ".safetensors";
+    size_t suffix_length = sizeof(suffix) - 1;
+    uint64_t sum = 0;
+    int ok = 1;
+    for (struct dirent *entry; ok && (entry = readdir(dir));) {
+        size_t length = strlen(entry->d_name);
+        if (length <= suffix_length ||
+            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
+            continue;
+        size_t path_bytes = strlen(directory) + length + 2;
+        char *path = malloc(path_bytes);
+        struct stat info;
+        if (path) snprintf(path, path_bytes, "%s/%s", directory, entry->d_name);
+        ok = path && stat(path, &info) == 0;
+        free(path);
+        if (!ok) break;
+        int64_t fields[3] = {(int64_t)info.st_size, (int64_t)info.st_mtimespec.tv_sec,
+                             (int64_t)info.st_mtimespec.tv_nsec};
+        uint64_t hash = fnv1a_update(1469598103934665603ull, entry->d_name, length);
+        sum += fnv1a_update(hash, fields, sizeof(fields));
+    }
+    closedir(dir);
+    if (ok) *stamp = sum;
+    return ok;
+}
+
+/* Cache key for the AdaLN schedule: everything the schedule reads, including the weight stamp
+ * of each safetensors shard load_dit opens, so replacing weights in place misses.
  * Returns a malloc'd key, or NULL when it cannot be built; the caller then skips the cache. */
 static unsigned char *adaln_key_build(const char *weight_directory,
                                       const h3_sigma_schedule *sigmas,
                                       int visual, int audio, size_t *bytes) {
     adaln_key key = {malloc(1024), 0, 1024};
-    DIR *dir = weight_directory ? opendir(weight_directory) : NULL;
-    if (!key.bytes || !dir) goto failed;
+    if (!key.bytes || !weight_directory) goto failed;
     uint32_t header[9] = {ADALN_SCHEDULE_VERSION, (uint32_t)sigmas->steps,
                           (uint32_t)visual, (uint32_t)audio, TEXT_DIM,
                           H3_DIT_TIME_DIM, H3_DIT_HIDDEN, ADALN_BLOCK_OUTPUT,
@@ -1604,36 +1644,13 @@ static unsigned char *adaln_key_build(const char *weight_directory,
         !adaln_key_append(&key, sigmas->video, points * sizeof(float)) ||
         !adaln_key_append(&key, sigmas->audio, points * sizeof(float)))
         goto failed;
-    const char suffix[] = ".safetensors";
-    size_t suffix_length = sizeof(suffix) - 1;
-    for (struct dirent *entry; (entry = readdir(dir));) {
-        size_t length = strlen(entry->d_name);
-        if (length <= suffix_length ||
-            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
-            continue;
-        size_t path_bytes = directory_length + length + 2;
-        char *path = malloc(path_bytes);
-        if (!path) goto failed;
-        snprintf(path, path_bytes, "%s/%s", weight_directory, entry->d_name);
-        struct stat info;
-        int statted = stat(path, &info) == 0;
-        free(path);
-        uint32_t name_bytes = (uint32_t)length;
-        if (!statted ||
-            !adaln_key_append(&key, &name_bytes, sizeof(name_bytes)) ||
-            !adaln_key_append(&key, entry->d_name, length) ||
-            !adaln_key_append(&key, &info.st_size, sizeof(info.st_size)) ||
-            !adaln_key_append(&key, &info.st_mtimespec.tv_sec,
-                              sizeof(info.st_mtimespec.tv_sec)) ||
-            !adaln_key_append(&key, &info.st_mtimespec.tv_nsec,
-                              sizeof(info.st_mtimespec.tv_nsec)))
-            goto failed;
-    }
-    closedir(dir);
+    uint64_t stamp;
+    if (!weights_stamp(weight_directory, &stamp) ||
+        !adaln_key_append(&key, &stamp, sizeof(stamp)))
+        goto failed;
     *bytes = key.used;
     return key.bytes;
 failed:
-    if (dir) closedir(dir);
     free(key.bytes);
     return NULL;
 }

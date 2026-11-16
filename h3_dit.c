@@ -3,6 +3,7 @@
 #include "h3_dit_schedule.h"
 #include "h3_weights.h"
 
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 enum {
@@ -1556,21 +1558,83 @@ static void schedule_report(int completed, int total, void *opaque) {
     report(state->callback, state->opaque, "precompute AdaLN", completed, total);
 }
 
-#define ADALN_KEY_BYTES (1024 + 3 * sizeof(int32_t) + 2 * (H3_MAX_STEPS + 1) * sizeof(float))
+/* Bump when the AdaLN schedule math changes, so cached schedules from older code miss. */
+#define ADALN_SCHEDULE_VERSION 1u
+#define ADALN_BLOCK_OUTPUT (H3_DIT_MODALITIES * H3_DIT_ADALN_SLOTS * H3_DIT_HIDDEN)
+#define ADALN_FINAL_OUTPUT (2u * H3_DIT_HIDDEN)
 
-/* Cache key for the AdaLN schedule: the checkpoint directory plus everything the schedule reads. */
-static size_t adaln_key_build(const char *weight_directory,
-                              const h3_sigma_schedule *sigmas,
-                              int visual, int audio, unsigned char *key) {
-    memset(key, 0, ADALN_KEY_BYTES);
-    snprintf((char *)key, 1024, "%s", weight_directory ? weight_directory : "");
-    int32_t header[3] = {sigmas->steps, visual, audio};
+typedef struct {
+    unsigned char *bytes;
+    size_t used, capacity;
+} adaln_key;
+
+static int adaln_key_append(adaln_key *key, const void *data, size_t bytes) {
+    if (bytes > key->capacity - key->used) {
+        size_t grown = key->capacity * 2;
+        while (grown - key->used < bytes) grown *= 2;
+        unsigned char *next = realloc(key->bytes, grown);
+        if (!next) return 0;
+        key->bytes = next;
+        key->capacity = grown;
+    }
+    memcpy(key->bytes + key->used, data, bytes);
+    key->used += bytes;
+    return 1;
+}
+
+/* Cache key for the AdaLN schedule: everything the schedule reads, including the size and
+ * mtime of each safetensors shard load_dit opens, so replacing weights in place misses.
+ * Returns a malloc'd key, or NULL when it cannot be built; the caller then skips the cache. */
+static unsigned char *adaln_key_build(const char *weight_directory,
+                                      const h3_sigma_schedule *sigmas,
+                                      int visual, int audio, size_t *bytes) {
+    adaln_key key = {malloc(1024), 0, 1024};
+    DIR *dir = weight_directory ? opendir(weight_directory) : NULL;
+    if (!key.bytes || !dir) goto failed;
+    uint32_t header[8] = {ADALN_SCHEDULE_VERSION, (uint32_t)sigmas->steps,
+                          (uint32_t)visual, (uint32_t)audio, H3_DIT_TIME_DIM,
+                          H3_DIT_HIDDEN, ADALN_BLOCK_OUTPUT, ADALN_FINAL_OUTPUT};
     size_t points = (size_t)sigmas->steps + 1;
-    memcpy(key + 1024, header, sizeof(header));
-    memcpy(key + 1024 + sizeof(header), sigmas->video, points * sizeof(float));
-    memcpy(key + 1024 + sizeof(header) + points * sizeof(float), sigmas->audio,
-           points * sizeof(float));
-    return 1024 + sizeof(header) + 2 * points * sizeof(float);
+    size_t directory_length = strlen(weight_directory);
+    uint32_t directory_bytes = (uint32_t)directory_length;
+    if (!adaln_key_append(&key, header, sizeof(header)) ||
+        !adaln_key_append(&key, &directory_bytes, sizeof(directory_bytes)) ||
+        !adaln_key_append(&key, weight_directory, directory_length) ||
+        !adaln_key_append(&key, sigmas->video, points * sizeof(float)) ||
+        !adaln_key_append(&key, sigmas->audio, points * sizeof(float)))
+        goto failed;
+    const char suffix[] = ".safetensors";
+    size_t suffix_length = sizeof(suffix) - 1;
+    for (struct dirent *entry; (entry = readdir(dir));) {
+        size_t length = strlen(entry->d_name);
+        if (length <= suffix_length ||
+            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
+            continue;
+        size_t path_bytes = directory_length + length + 2;
+        char *path = malloc(path_bytes);
+        if (!path) goto failed;
+        snprintf(path, path_bytes, "%s/%s", weight_directory, entry->d_name);
+        struct stat info;
+        int statted = stat(path, &info) == 0;
+        free(path);
+        uint32_t name_bytes = (uint32_t)length;
+        if (!statted ||
+            !adaln_key_append(&key, &name_bytes, sizeof(name_bytes)) ||
+            !adaln_key_append(&key, entry->d_name, length) ||
+            !adaln_key_append(&key, &info.st_size, sizeof(info.st_size)) ||
+            !adaln_key_append(&key, &info.st_mtimespec.tv_sec,
+                              sizeof(info.st_mtimespec.tv_sec)) ||
+            !adaln_key_append(&key, &info.st_mtimespec.tv_nsec,
+                              sizeof(info.st_mtimespec.tv_nsec)))
+            goto failed;
+    }
+    closedir(dir);
+    *bytes = key.used;
+    return key.bytes;
+failed:
+    if (dir) closedir(dir);
+    free(key.bytes);
+    return NULL;
 }
 
 static h3_dit *load_dit(const char *weight_directory,
@@ -1686,15 +1750,19 @@ static h3_dit *load_dit(const char *weight_directory,
     schedule_progress schedule_state = {progress, progress_opaque};
     /* H3_ADALN_CACHE_DIR: the AdaLN schedule is keyed by checkpoint directory, steps,
      * sigmas and condition rows (not seed or prompt), so a repeat of any of those is a hit. */
-    unsigned char adaln_key[ADALN_KEY_BYTES];
-    size_t adaln_key_bytes = adaln_key_build(
-        weight_directory, sigmas, dit->video_condition_rows != 0,
-        dit->audio_condition_rows != 0, adaln_key);
+    const char *adaln_cache_dir = getenv("H3_ADALN_CACHE_DIR");
+    size_t adaln_key_bytes = 0;
+    unsigned char *adaln_key = NULL;
+    if (adaln_cache_dir && *adaln_cache_dir)
+        adaln_key = adaln_key_build(weight_directory, sigmas,
+                                    dit->video_condition_rows != 0,
+                                    dit->audio_condition_rows != 0, &adaln_key_bytes);
     dit->schedule = h3_dit_schedule_cached(
-        getenv("H3_ADALN_CACHE_DIR"), (const char *)adaln_key, adaln_key_bytes,
+        adaln_cache_dir, (const char *)adaln_key, adaln_key_bytes,
         dit->weights, dit->gpu, sigmas, dit->video_condition_rows != 0,
         dit->audio_condition_rows != 0, schedule_report, &schedule_state,
         error, error_size);
+    free(adaln_key);
     if (dit->schedule) {
         configure_gate_ranked_blocks(dit);
         h3_dit_schedule_prune(dit->schedule, dit->block_active,

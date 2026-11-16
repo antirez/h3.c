@@ -517,7 +517,7 @@ static int adaln_read_u32(FILE *file, uint32_t *value) {
 static int adaln_save(const h3_dit_schedule *schedule, const char *path,
                       const char *key, size_t key_bytes) {
     char temporary[ADALN_PATH_BYTES];
-    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    snprintf(temporary, sizeof(temporary), "%s.%ld.tmp", path, (long)getpid());
     FILE *file = fopen(temporary, "wb");
     if (!file) return 0;
     size_t steps = (size_t)schedule->steps, rows = schedule->time_rows;
@@ -609,6 +609,7 @@ static h3_dit_schedule *adaln_load(h3_gpu *gpu, const char *path,
     }
     size_t final_elements = (size_t)rows * FINAL_OUTPUT;
     if (fread(buffer, sizeof(uint16_t), final_elements, file) != final_elements) goto failed;
+    if (fgetc(file) != EOF) goto failed;
     schedule->final = h3_gpu_tensor_new_bf16(gpu, final_elements);
     if (!schedule->final ||
         !h3_gpu_tensor_write_bf16(schedule->final, buffer, final_elements))

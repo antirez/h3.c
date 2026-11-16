@@ -513,6 +513,32 @@ int h3_gpu_attention_tiled_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                                 uint32_t sequence, uint32_t heads,
                                 uint32_t head_dim, float scale,
                                 int output_head_major);
+/* Sol-Attn block-sparse attention (64-token blocks) on the tiled TensorOps
+ * core, same tensor contract as h3_gpu_attention_tiled_bf16. Rows before
+ * sink_rows are exact keys for every query and dense query rows. tau sets
+ * the routing threshold (mean + tau * std of the block scores, log2 domain);
+ * unrouted key blocks are approximated by their key mean and value sum. */
+int h3_gpu_attention_sparse_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
+                                 const h3_gpu_tensor *query,
+                                 const h3_gpu_tensor *key,
+                                 const h3_gpu_tensor *value,
+                                 uint32_t sequence, uint32_t heads,
+                                 uint32_t head_dim, float scale,
+                                 int output_head_major, uint32_t sink_rows,
+                                 float tau);
+/* Query rows per routing unit (one attention threadgroup). */
+uint32_t h3_gpu_sparse_attention_tile_rows(void);
+/* After h3_gpu_submit: copy the last sparse call's fp32 summaries
+ * ([q mean, k mean, v sum][head][block][128] then [head][k mean, k var][128]),
+ * route lists ([head][tile][blocks] u16, routed first) and routed counts
+ * ([head][tile]). Any pointer may be NULL. */
+int h3_gpu_sparse_attention_read(const h3_gpu *gpu, uint32_t sequence,
+                                 uint32_t heads, float *summaries,
+                                 uint16_t *routes, uint32_t *counts);
+/* Whether the next SDPA reads head-major Q/K/V ([heads][seq][dim]), as
+ * announced by the QKV projection; the setter is for offline harnesses. */
+int h3_gpu_sdpa_inputs_head_major(const h3_gpu *gpu);
+void h3_gpu_set_sdpa_inputs_head_major(h3_gpu *gpu, int head_major);
 int h3_gpu_swiglu_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                        const h3_gpu_tensor *fused, uint32_t rows,
                        uint32_t width);

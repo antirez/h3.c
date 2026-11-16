@@ -4752,4 +4752,327 @@ H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s4k128", 16, 4, 128, false)
 H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s16k64", 16, 16, 64, false)
 H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s8k128", 16, 8, 128, false)
 H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s8k64_relaxed", 16, 8, 64, true)
+
+/*
+ * Sol-Attn block-sparse attention (arXiv 2607.24027), opt-in via H3_SPARSE_ATTN.
+ * Blocks are 64 tokens.  The summary buffer holds, in fp32,
+ *   [0][head][block][128] query means, [1][...] key means, [2][...] value sums,
+ * followed by per-head key-mean statistics [head][mean, variance][128].
+ * Routing is decided per attention threadgroup (tile_rows query rows, i.e.
+ * tile_rows / 64 query blocks; their routes are OR-ed) and written as a list
+ * per (head, threadgroup): routed blocks ascending in [0, count), unrouted
+ * blocks in [count, blocks).  The sparse kernel walks unrouted blocks as
+ * "virtual keys" (key mean, value sum) first and routed blocks exactly after,
+ * all through the single h3_attn_tiled_step call site.
+ */
+struct h3_sol_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint heads;
+    uint blocks;
+    uint tile_groups;
+    uint tile_rows;
+    uint sink_blocks;
+    uint forced_block;     /* partial last block, always exact; blocks if none */
+    float scale_log2;
+    float tau;
+};
+
+kernel void h3_sol_summaries_bf16(device const bfloat *query [[buffer(0)]],
+                                  device const bfloat *key [[buffer(1)]],
+                                  device const bfloat *value [[buffer(2)]],
+                                  device float *summaries [[buffer(3)]],
+                                  constant h3_sol_args &args [[buffer(4)]],
+                                  uint2 group [[threadgroup_position_in_grid]],
+                                  ushort dim [[thread_index_in_threadgroup]]) {
+    const uint block = group.x;
+    const uint head = group.y;
+    const uint start = block * 64;
+    const uint length = min(64u, args.sequence - start);
+    const ulong base = (ulong)head * args.in_head_stride + dim;
+    float q_sum = 0.0f, k_sum = 0.0f, v_sum = 0.0f;
+    for (uint row = 0; row < length; row++) {
+        const ulong offset = base + (ulong)(start + row) * args.in_row_stride;
+        q_sum += (float)query[offset];
+        k_sum += (float)key[offset];
+        v_sum += (float)value[offset];
+    }
+    const ulong plane = (ulong)args.heads * args.blocks * 128;
+    const ulong out = ((ulong)head * args.blocks + block) * 128 + dim;
+    summaries[out] = q_sum / (float)length;
+    summaries[plane + out] = k_sum / (float)length;
+    summaries[2 * plane + out] = v_sum;
+}
+
+kernel void h3_sol_key_stats(device float *summaries [[buffer(0)]],
+                             constant h3_sol_args &args [[buffer(1)]],
+                             uint head [[threadgroup_position_in_grid]],
+                             ushort dim [[thread_index_in_threadgroup]]) {
+    const ulong plane = (ulong)args.heads * args.blocks * 128;
+    device const float *centroids =
+        summaries + plane + (ulong)head * args.blocks * 128 + dim;
+    float sum = 0.0f;
+    for (uint block = 0; block < args.blocks; block++)
+        sum += centroids[(ulong)block * 128];
+    const float mean = sum / (float)args.blocks;
+    float squares = 0.0f;
+    for (uint block = 0; block < args.blocks; block++) {
+        const float delta = centroids[(ulong)block * 128] - mean;
+        squares += delta * delta;
+    }
+    device float *stats = summaries + 3 * plane + (ulong)head * 256;
+    stats[dim] = mean;
+    stats[128 + dim] = squares / (float)args.blocks;
+}
+
+/* One threadgroup (256 threads) per (attention threadgroup, head). */
+kernel void h3_sol_route(device const float *summaries [[buffer(0)]],
+                         device ushort *routes [[buffer(1)]],
+                         device uint *counts [[buffer(2)]],
+                         constant h3_sol_args &args [[buffer(3)]],
+                         uint2 group [[threadgroup_position_in_grid]],
+                         ushort tid [[thread_index_in_threadgroup]],
+                         ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                         ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int THREADS = 256;
+    constexpr int MAX_QUERY_BLOCKS = 4;
+    threadgroup float query_means[MAX_QUERY_BLOCKS][128];
+    threadgroup float thresholds[MAX_QUERY_BLOCKS];
+    threadgroup uint simd_totals[THREADS / 32];
+    const uint tile = group.x;
+    const uint head = group.y;
+    const uint blocks = args.blocks;
+    const int query_blocks = (int)(args.tile_rows / 64);
+    const int first_query = (int)(tile * (uint)query_blocks);
+    const int live_queries = min(query_blocks, (int)blocks - first_query);
+    const ulong plane = (ulong)args.heads * blocks * 128;
+    device const float *qc = summaries + (ulong)head * blocks * 128;
+    device const float *kc = summaries + plane + (ulong)head * blocks * 128;
+    device const float *stats = summaries + 3 * plane + (ulong)head * 256;
+    for (int index = tid; index < query_blocks * 128; index += THREADS) {
+        const int qb = index / 128;
+        query_means[qb][index % 128] = qb < live_queries ?
+            qc[(ulong)(first_query + qb) * 128 + index % 128] : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float c = args.scale_log2;
+    if (simdgroup < query_blocks) {
+        float mean = 0.0f, variance = 0.0f;
+        for (int d = lane; d < 128; d += 32) {
+            const float q = query_means[simdgroup][d];
+            mean += q * stats[d];
+            variance += q * q * stats[128 + d];
+        }
+        mean = simd_sum(mean);
+        variance = simd_sum(variance);
+        if (lane == 0)
+            thresholds[simdgroup] = mean * c +
+                args.tau * sqrt(max(variance * c * c, 0.0f) + 1.0e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const bool query_sink = (uint)first_query < args.sink_blocks;
+    device ushort *list =
+        routes + ((ulong)head * args.tile_groups + tile) * blocks;
+    uint routed_base = 0, unrouted_base = 0;
+    for (uint start = 0; start < blocks; start += THREADS) {
+        const uint block = start + tid;
+        uint flag = 0;
+        if (block < blocks) {
+            flag = query_sink || block < args.sink_blocks ||
+                   block == args.forced_block;
+            for (int qb = 0; qb < live_queries; qb++)
+                flag |= abs((int)block - (first_query + qb)) <= 1;
+            if (!flag) {
+                device const float *k = kc + (ulong)block * 128;
+                float score[MAX_QUERY_BLOCKS] = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (int d = 0; d < 128; d++) {
+                    const float kd = k[d];
+                    for (int qb = 0; qb < live_queries; qb++)
+                        score[qb] += query_means[qb][d] * kd;
+                }
+                for (int qb = 0; qb < live_queries; qb++)
+                    flag |= score[qb] * c > thresholds[qb];
+            }
+        }
+        const uint prefix = simd_prefix_exclusive_sum(flag);
+        if (lane == 31) simd_totals[simdgroup] = prefix + flag;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint offset = 0, total = 0;
+        for (int s = 0; s < THREADS / 32; s++) {
+            const uint value = simd_totals[s];
+            offset += s < simdgroup ? value : 0u;
+            total += value;
+        }
+        if (block < blocks) {
+            const uint routed_before = offset + prefix;
+            if (flag)
+                list[routed_base + routed_before] = (ushort)block;
+            else
+                list[blocks - 1 - (unrouted_base + tid - routed_before)] =
+                    (ushort)block;
+        }
+        routed_base += total;
+        unrouted_base += min((uint)THREADS, blocks - start) - total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) counts[(ulong)head * args.tile_groups + tile] = routed_base;
+}
+
+struct h3_attn_sparse_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint out_row_stride;
+    uint out_head_stride;
+    float scale_log2;
+    uint heads;
+    uint blocks;
+    uint tile_groups;
+    uint skipped_tail_tiles;  /* empty BK tiles of the partial last block */
+};
+
+/* The staged tgq kernel with Q in registers, walking a routed key list. */
+template <int RQ, int NSG, int BK>
+kernel void h3_attn_sparse_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_sparse_args &args [[buffer(4)]],
+                           device const float *summaries [[buffer(5)]],
+                           device const ushort *routes [[buffer(6)]],
+                           device const uint *counts [[buffer(7)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort tid [[thread_index_in_threadgroup]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr int THREADS = NSG * 32;
+    constexpr int VECTORS = BK * D / 8;
+    constexpr int HALVES = 64 / BK;
+    threadgroup bfloat k_tile[BK * D];
+    threadgroup bfloat v_tile[BK * D];
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    device bfloat *kh = key + in_head;
+    device bfloat *vh = value + in_head;
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+    auto kts = tensor(k_tile, dextents<int32_t, 2>(D, BK));
+    auto vts = tensor(v_tile, dextents<int32_t, 2>(D, BK));
+
+    const ulong plane = (ulong)args.heads * args.blocks * D;
+    device const float *key_means =
+        summaries + plane + (ulong)group.y * args.blocks * D;
+    device const float *value_sums = key_means + plane;
+    const ulong route_index = (ulong)group.y * args.tile_groups + group.x;
+    device const ushort *list = routes + route_index * args.blocks;
+    const int routed = (int)counts[route_index];
+    const int unrouted = (int)args.blocks - routed;
+    const int virtual_tiles = (unrouted + BK - 1) / BK;
+    const int tiles = virtual_tiles + routed * HALVES -
+                      (int)args.skipped_tail_tiles;
+
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, false);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto qs = qt.slice(0, min(q0, sequence - 1));
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(kts), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+    auto qreg = qk.template get_left_input_cooperative_tensor<
+        bfloat, bfloat, float>();
+    qreg.load(qs);
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    for (int t = 0; t < tiles; t++) {
+        int valid;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t < virtual_tiles) {
+            /* Unrouted blocks as virtual keys: key mean, value sum. */
+            const int first = routed + t * BK;
+            valid = min(BK, unrouted - t * BK);
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                float4 k_lo = 0.0f, k_hi = 0.0f, v_lo = 0.0f, v_hi = 0.0f;
+                if (row < valid) {
+                    const ulong offset = (ulong)list[first + row] * D + column;
+                    k_lo = *(device const float4 *)(key_means + offset);
+                    k_hi = *(device const float4 *)(key_means + offset + 4);
+                    v_lo = *(device const float4 *)(value_sums + offset);
+                    v_hi = *(device const float4 *)(value_sums + offset + 4);
+                }
+                threadgroup bfloat *kd = k_tile + row * D + column;
+                threadgroup bfloat *vd = v_tile + row * D + column;
+                *(threadgroup bfloat4 *)kd = bfloat4(k_lo);
+                *(threadgroup bfloat4 *)(kd + 4) = bfloat4(k_hi);
+                *(threadgroup bfloat4 *)vd = bfloat4(v_lo);
+                *(threadgroup bfloat4 *)(vd + 4) = bfloat4(v_hi);
+            }
+        } else {
+            const int exact = t - virtual_tiles;
+            const int k0 = (int)list[exact / HALVES] * 64 +
+                           (exact % HALVES) * BK;
+            valid = min(BK, sequence - k0);
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                uint4 kv = 0, vv = 0;
+                if (row < valid) {
+                    const ulong offset = (ulong)(k0 + row) * args.in_row_stride +
+                                         column;
+                    kv = *(device const uint4 *)(kh + offset);
+                    vv = *(device const uint4 *)(vh + offset);
+                }
+                *(threadgroup uint4 *)(k_tile + row * D + column) = kv;
+                *(threadgroup uint4 *)(v_tile + row * D + column) = vv;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        h3_attn_tiled_step<RQ, BK, false>(qreg, kts, vts, acc, m, l, c, valid);
+        /* Every unrouted block holds 64 tokens: weight its virtual key's
+         * denominator mass by 64 (the value sums already carry it). */
+        if (t + 1 == virtual_tiles) {
+            #pragma clang loop unroll(full)
+            for (int s = 0; s < SLOTS; s++) l[s] *= 64.0f;
+        }
+    }
+    if (q0 >= sequence) return;
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(kts), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_sparse_bf16_impl<16, 8, 32>) h3_attn_sparse_bf16_t;
+template [[host_name("h3_attn_sparse_bf16_r16s8k32")]]
+kernel h3_attn_sparse_bf16_t h3_attn_sparse_bf16_impl<16, 8, 32>;
 #endif

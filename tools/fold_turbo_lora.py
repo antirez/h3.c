@@ -28,8 +28,11 @@ Pass --skip-curve-pairs to fold the rest and leave those targets unchanged.
 
 Output is written to `<out>.tmp` and renamed to `<out>` only on success. All
 targets are validated (BF16 dtype, shape) before anything is written. Each
-written tensor is read back and compared with W + dW, computed in float64,
-within BF16 rounding tolerance.
+written tensor is checked in two parts: the read-back BF16 bytes must equal the
+BF16 encoding of the float32 fold exactly, and the float32 fold must lie within
+2**-20 of the sum of magnitudes |W| + sum(|scale| * |B| @ |A|) from W + dW
+computed in float64. The check is not a relative tolerance, so near-zero
+elements do not fail.
 
 Requires only numpy. Example, folding the public lightx2v MiniMax-H3 distill
 LoRA (ComfyUI naming) into the Ref2VA transformer; the adapter filename is a
@@ -218,6 +221,7 @@ def main():
 
     tmp = args.out.with_name(args.out.name + ".tmp")
     if tmp.exists():
+        print(f"removing existing partial output {tmp}")
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     try:
@@ -252,13 +256,23 @@ def main():
                     f.write(buf)
                     f.flush()
                     f.seek(base + start)
-                    readback = bf16_to_f32(f.read(end - start), info["shape"]).astype(np.float64)
-                    tol = 2.0 ** -8 * np.abs(expected) + np.finfo(np.float32).tiny
-                    ok = (np.abs(readback - expected) <= tol) | \
-                        (np.isnan(readback) & np.isnan(expected))
+                    raw = f.read(end - start)
+                    # (a) the bytes on disk are exactly the BF16 encoding of the folded float32.
+                    if raw != buf:
+                        raise SystemExit(f"{key}: re-read BF16 bytes differ from the written bytes")
+                    # (b) the float32 fold is within float32 accumulation error of W + dW
+                    # (float64). The bound scales with the sum of magnitudes, not the result,
+                    # so near-zero elements are not held to a relative tolerance.
+                    magnitude = np.abs(W).astype(np.float64)
+                    for A, B, scale in deltas[key]:
+                        magnitude += abs(scale) * (np.abs(B).astype(np.float64)
+                                                   @ np.abs(A).astype(np.float64))
+                    diff = np.abs(folded.astype(np.float64) - expected)
+                    tol = 2.0 ** -20 * magnitude + np.finfo(np.float32).tiny
+                    ok = (diff <= tol) | (np.isnan(folded) & np.isnan(expected))
                     if not ok.all():
-                        raise SystemExit(f"{key}: re-read BF16 tensor differs from W+dW "
-                                         f"at {int((~ok).sum())} elements")
+                        raise SystemExit(f"{key}: folded tensor differs from W+dW "
+                                         f"beyond float32 error at {int((~ok).sum())} elements")
                     patched += 1
             print(f"{shard.name}: cumulative {patched}/{len(deltas)}")
 

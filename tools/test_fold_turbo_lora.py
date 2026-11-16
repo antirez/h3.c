@@ -194,6 +194,29 @@ class FoldTest(unittest.TestCase):
         np.testing.assert_array_equal(got, np.array([0x7FC0, 0xFFC0, 0xFFC0, 0x7FC0, 0x3F80],
                                                     dtype=np.uint16))
 
+    def test_e_real_size_near_zero_elements_pass(self):
+        # Near-zero elements of a real-sized tensor must not fail a relative check.
+        big = self.tmp / "big"
+        big.mkdir()
+        rows = cols = 4096
+        rank = 64
+        W = (self.rng.standard_normal((rows, cols)) * 0.02).astype(np.float32)
+        write_st(big / "model-00001-of-00001.safetensors",
+                 {"blocks.0.attn.qkv.weight": ("BF16", W)})
+        adapter = {
+            "blocks.0.attn.qkv.lora_A.weight": ("F32", (0.01 * self.rng.standard_normal(
+                (rank, cols))).astype(np.float32)),
+            "blocks.0.attn.qkv.lora_B.weight": ("F32", (0.01 * self.rng.standard_normal(
+                (rows, rank))).astype(np.float32)),
+        }
+        lora = self.tmp / "big_lora.safetensors"
+        write_st(lora, adapter)
+        r = subprocess.run([sys.executable, "-I", str(FOLD), "--checkpoint", str(big),
+                            "--lora", f"{lora}:1.0", "--out", str(self.tmp / "big_out")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.tmp / "big_out" / "model-00001-of-00001.safetensors").exists())
+
     def test_c_kohya_no_curve_pairs(self):
         adapter = self.kohya_like()
         r, out = self.fold(adapter)

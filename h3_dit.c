@@ -587,8 +587,8 @@ static int sparse_attention_step(const h3_dit *dit, int step, uint32_t rows) {
 
 /* H3_ATTN_CAPTURE_DIR: dump the bf16 Q/K/V entering joint attention for the
  * selected blocks/steps (H3_ATTN_CAPTURE_BLOCKS, H3_ATTN_CAPTURE_STEPS) as
- * <dir>/b<block>_s<step>.{q,k,v} plus a .json header. Synchronizes the GPU;
- * diagnostics only. */
+ * head-major <dir>/b<block>_s<step>.{q,k,v} plus a .json header.
+ * Synchronizes the GPU; diagnostics only. */
 static int capture_attention_inputs(h3_dit *dit, unsigned index, int step,
                                     uint32_t rows, char *error,
                                     size_t error_size) {
@@ -602,22 +602,40 @@ static int capture_attention_inputs(h3_dit *dit, unsigned index, int step,
              h3_gpu_error(dit->gpu));
         return 0;
     }
+    /* H3_ATTN_CAPTURE_HEADS=N keeps N evenly spaced heads, written head-major. */
+    const char *heads_text = getenv("H3_ATTN_CAPTURE_HEADS");
+    int kept = heads_text && *heads_text ? atoi(heads_text) : HEADS;
+    if (kept < 1 || kept > HEADS) kept = HEADS;
     size_t count = (size_t)rows * HEADS * HEAD_DIM;
+    size_t head_elements = (size_t)rows * HEAD_DIM;
     uint16_t *values = malloc(count * sizeof(*values));
+    uint16_t *packed = malloc((size_t)kept * head_elements * sizeof(*packed));
     const h3_gpu_tensor *tensors[3] = {dit->query, dit->key, dit->value};
     const char *suffix[3] = {"q", "k", "v"};
     char path[4096];
-    int ok = values != NULL;
+    int ok = values && packed;
     for (int t = 0; ok && t < 3; t++) {
         snprintf(path, sizeof(path), "%s/b%02u_s%02d.%s",
                  dit->attention_capture_dir, index, step, suffix[t]);
+        ok = h3_gpu_tensor_read_bf16(tensors[t], values, count);
+        for (int k = 0; ok && k < kept; k++) {
+            size_t head = (size_t)k * HEADS / (size_t)kept;
+            for (uint32_t row = 0; row < rows; row++)
+                memcpy(packed + (size_t)k * head_elements + (size_t)row * HEAD_DIM,
+                       values + (head_major ? head * head_elements +
+                                              (size_t)row * HEAD_DIM :
+                                              ((size_t)row * HEADS + head) *
+                                                  HEAD_DIM),
+                       HEAD_DIM * sizeof(*values));
+        }
         FILE *file = NULL;
-        ok = h3_gpu_tensor_read_bf16(tensors[t], values, count) &&
-             (file = fopen(path, "wb")) != NULL &&
-             fwrite(values, sizeof(*values), count, file) == count;
+        ok = ok && (file = fopen(path, "wb")) != NULL &&
+             fwrite(packed, sizeof(*packed), (size_t)kept * head_elements,
+                    file) == (size_t)kept * head_elements;
         if (file && fclose(file)) ok = 0;
     }
     free(values);
+    free(packed);
     if (ok) {
         snprintf(path, sizeof(path), "%s/b%02u_s%02d.json",
                  dit->attention_capture_dir, index, step);
@@ -627,8 +645,8 @@ static int capture_attention_inputs(h3_dit *dit, unsigned index, int step,
             "\"heads\": %d, \"head_dim\": %d, \"head_major\": %d, "
             "\"sink_rows\": %u, \"video_rows\": %u, \"latent\": [%d, %d, %d], "
             "\"token_reduction\": %d}\n",
-            index, step, (double)dit->sigmas.video[step], rows, HEADS,
-            HEAD_DIM, head_major, dit->video_target_start, dit->video_rows,
+            index, step, (double)dit->sigmas.video[step], rows, kept,
+            HEAD_DIM, 1, dit->video_target_start, dit->video_rows,
             dit->latent_t, dit->latent_h, dit->latent_w,
             dit->token_reduction_active) > 0;
         if (file && fclose(file)) ok = 0;

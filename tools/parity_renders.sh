@@ -24,7 +24,7 @@ seed=${SEED:-101} frames=${FRAMES:-22} size=${SIZE:-768x1024}
 extra=(${=EXTRA_ENV:-})
 mkdir -p $out
 summary=$out/summary.tsv
-[[ -s $summary ]] || print "profile\tresult\tframes_a\tframes_b\tseconds_a\tseconds_b" > $summary
+[[ -s $summary ]] || print "profile\tframes\tlatent\tframes_a\tframes_b\tseconds_a\tseconds_b" > $summary
 failures=0
 
 for profile in "$@"; do
@@ -53,7 +53,8 @@ print({f["id"]: f.get("steps", 6) for f in reg["folds"]}[sys.argv[2]])
     log=$out/${profile}_$label.log
     t0=$SECONDS
     env H3_VIDEO_SHIFT=6 H3_VAE_PRECISION=bf16 H3_VAE_CACHE=$root/models/vae-cache \
-      H3_VAE_PREFETCH=1 $sampler $cache_env $extra \
+      H3_VAE_PREFETCH=1 H3_DUMP_VIDEO_LATENT=$out/${profile}_$label.latent \
+      $sampler $cache_env $extra \
       $bin -d $dir -p "$(<$prompt_file)" $inputs --width ${size%x*} --height ${size#*x} \
       --frames $frames --steps $steps --seed $seed -o $clip </dev/null >$log 2>&1
     rc=$?
@@ -74,7 +75,8 @@ print({f["id"]: f.get("steps", 6) for f in reg["folds"]}[sys.argv[2]])
     verdict=DIFFERENT
     failures=$((failures + 1))
   fi
-  print "$profile $verdict ($fa/$fb frame hashes; ${results[1]} s / ${results[2]} s)"
-  print "$profile\t$verdict\t$fa\t$fb\t${results[1]}\t${results[2]}" >> $summary
+  latent=$(cmp -s $out/${profile}_a.latent $out/${profile}_b.latent && echo identical || echo DIFFERENT)
+  print "$profile frames=$verdict latent=$latent ($fa/$fb frame hashes; ${results[1]} s / ${results[2]} s)"
+  print "$profile\t$verdict\t$latent\t$fa\t$fb\t${results[1]}\t${results[2]}" >> $summary
 done
 (( failures == 0 ))

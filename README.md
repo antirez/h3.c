@@ -584,6 +584,26 @@ while an otherwise identical macOS 26.5 M5 Max gained 1.4% in a same-context
 forward A/B. The resulting 50-block velocities were close (1.9% video and 2.4%
 audio relative L2), but not byte-identical.
 
+### Sol-Attn block-sparse attention (opt-in, experimental)
+
+`H3_SPARSE_ATTN=1` (M5 TensorOps only) runs the 50 joint self-attention calls
+through a port of Sol-Attn (arXiv 2607.24027). Per 64-token block it builds
+fp32 query/key means and value sums, routes each 128-row query tile to the
+key blocks that are sinks, neighbours, the partial last block, or score above
+mean + `H3_SPARSE_TAU` (1.3) standard deviations in the log2 domain, computes
+those exactly, and approximates every other block by one virtual key (key
+mean, value sum, weight 64). Rows before the target video (text, conditions,
+audio) are exact for every query and their own queries stay dense. Calls stay
+on the dense path outside the sigma window `shift(1-H3_SPARSE_END)` to
+`shift(1-H3_SPARSE_START)` (0.9 and 0.2, ComfyUI `percent_to_sigma`) and below
+`H3_SPARSE_MIN_TOKENS` (20000) tokens. The text refiner stays dense. Token
+reduction and gate-ranked block skipping compose with it. With the variable
+unset nothing on the GPU changes. `H3_ATTN_CAPTURE_DIR` with
+`H3_ATTN_CAPTURE_BLOCKS`, `H3_ATTN_CAPTURE_STEPS` and `H3_ATTN_CAPTURE_HEADS`
+dumps Q/K/V for `h3_sparse_attn_check`; `h3_sparse_attn_test` checks the
+kernel against the dense kernel and a CPU reference;
+`tools/parity_renders.sh` compares two binaries' renders per profile.
+
 ### Specialized projection kernels
 
 The narrow DiT audio/video output heads convert their small released F32

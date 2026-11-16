@@ -3,6 +3,7 @@
 #include "h3_dit_schedule.h"
 #include "h3_weights.h"
 
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -10,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 enum {
     TEXT_DIM = 5120,
@@ -80,6 +83,8 @@ struct h3_dit {
     int keep_bf16_attention_out;
     FILE *int8_cache;       /* per-fold int8 core file, read or written by load_core */
     int int8_cache_loading;
+    char *int8_cache_path;   /* final cache file; a write lands in int8_cache_temp first */
+    char *int8_cache_temp;
     const char *weight_directory;  /* set by load_dit; valid during load only */
     int use_slower_row_major_attention_output;
     int use_slower_unfused_int8_inputs;
@@ -1246,16 +1251,76 @@ static void configure_gate_ranked_blocks(h3_dit *dit) {
  * them on later loads. A file is used only when its header matches this weight directory, the
  * dimensions and the active blocks, and it is marked complete. Delete it after the checkpoint changes. */
 #define INT8_CACHE_MAGIC 0x48334938u /* "H3I8" */
-#define INT8_CACHE_VERSION 1u
+#define INT8_CACHE_VERSION 2u
 #define INT8_CACHE_PATH_BYTES 1024u
 
 typedef struct {
     uint32_t magic, version, hidden, inner, ffn, blocks;
     uint64_t active_mask;
+    uint64_t weights_stamp;
     uint32_t complete;
     char weight_directory[INT8_CACHE_PATH_BYTES];
 } int8_cache_header;
 
+static uint64_t int8_cache_fnv(uint64_t hash, const void *data, size_t bytes) {
+    const unsigned char *in = data;
+    for (size_t index = 0; index < bytes; index++) {
+        hash ^= in[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/* Fingerprint of every safetensors shard in the directory (name, size, mtime). Shards are summed,
+ * so the result does not depend on readdir order. A replaced shard changes the stamp. */
+static int int8_cache_weights_stamp(const char *directory, uint64_t *stamp) {
+    DIR *dir = opendir(directory);
+    if (!dir) return 0;
+    const char suffix[] = ".safetensors";
+    size_t suffix_length = sizeof(suffix) - 1;
+    uint64_t sum = 0;
+    for (struct dirent *entry; (entry = readdir(dir));) {
+        size_t length = strlen(entry->d_name);
+        if (length <= suffix_length ||
+            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
+            continue;
+        size_t path_bytes = strlen(directory) + length + 2;
+        char *path = malloc(path_bytes);
+        if (!path) break;
+        snprintf(path, path_bytes, "%s/%s", directory, entry->d_name);
+        struct stat info;
+        int statted = stat(path, &info) == 0;
+        free(path);
+        if (!statted) break;
+        uint64_t hash = 1469598103934665603ull;
+        hash = int8_cache_fnv(hash, entry->d_name, length);
+        hash = int8_cache_fnv(hash, &info.st_size, sizeof(info.st_size));
+        hash = int8_cache_fnv(hash, &info.st_mtimespec.tv_sec,
+                              sizeof(info.st_mtimespec.tv_sec));
+        hash = int8_cache_fnv(hash, &info.st_mtimespec.tv_nsec,
+                              sizeof(info.st_mtimespec.tv_nsec));
+        sum += hash;
+    }
+    closedir(dir);
+    *stamp = sum;
+    return 1;
+}
+
+/* A complete file holds exactly its header plus one record per active block. */
+static int int8_cache_size_ok(FILE *file, uint64_t active_mask) {
+    size_t blocks = 0;
+    for (unsigned index = 0; index < H3_DIT_BLOCKS; index++)
+        blocks += (size_t)((active_mask >> index) & 1u);
+    size_t per_block = (size_t)2 * FFN * HIDDEN + (size_t)HIDDEN * FFN +
+                       (size_t)3 * INNER * HIDDEN + (size_t)HIDDEN * INNER +
+                       ((size_t)2 * FFN + HIDDEN + (size_t)3 * INNER + HIDDEN) * sizeof(float);
+    if (fseek(file, 0, SEEK_END) != 0) return 0;
+    long end = ftell(file);
+    if (fseek(file, (long)sizeof(int8_cache_header), SEEK_SET) != 0) return 0;
+    return end >= 0 && (size_t)end == sizeof(int8_cache_header) + blocks * per_block;
+}
+
+/* The caller guarantees weight_directory fits INT8_CACHE_PATH_BYTES. */
 static int int8_cache_open(h3_dit *dit, const char *path,
                            char *error, size_t error_size) {
     int8_cache_header want;
@@ -1268,9 +1333,9 @@ static int int8_cache_open(h3_dit *dit, const char *path,
     want.blocks = H3_DIT_BLOCKS;
     for (unsigned index = 0; index < H3_DIT_BLOCKS; index++)
         if (dit->block_active[index]) want.active_mask |= 1ull << index;
-    if (!dit->weight_directory ||
-        strlen(dit->weight_directory) >= INT8_CACHE_PATH_BYTES) {
-        fail(error, error_size, "DiT int8 cache: weight directory path too long");
+    if (!int8_cache_weights_stamp(dit->weight_directory, &want.weights_stamp)) {
+        fail(error, error_size, "DiT int8 cache: cannot read weight directory %s",
+             dit->weight_directory);
         return 0;
     }
     strcpy(want.weight_directory, dit->weight_directory);
@@ -1280,15 +1345,22 @@ static int int8_cache_open(h3_dit *dit, const char *path,
     if (file && fread(&have, sizeof(have), 1, file) == 1 &&
         memcmp(&have, &want, offsetof(int8_cache_header, complete)) == 0 &&
         have.complete == 1 &&
-        strcmp(have.weight_directory, want.weight_directory) == 0) {
+        strcmp(have.weight_directory, want.weight_directory) == 0 &&
+        int8_cache_size_ok(file, have.active_mask)) {
         dit->int8_cache = file;
         dit->int8_cache_loading = 1;
         return 1;
     }
     if (file) fclose(file);
-    file = fopen(path, "wb");
-    if (!file || fwrite(&want, sizeof(want), 1, file) != 1) {
+    dit->int8_cache_path = strdup(path);
+    dit->int8_cache_temp = malloc(strlen(path) + 32);
+    if (dit->int8_cache_temp)
+        snprintf(dit->int8_cache_temp, strlen(path) + 32, "%s.%ld.tmp", path,
+                 (long)getpid());
+    file = dit->int8_cache_temp ? fopen(dit->int8_cache_temp, "wb") : NULL;
+    if (!dit->int8_cache_path || !file || fwrite(&want, sizeof(want), 1, file) != 1) {
         if (file) fclose(file);
+        if (file) unlink(dit->int8_cache_temp);
         fail(error, error_size, "cannot create DiT int8 cache %s", path);
         return 0;
     }
@@ -1308,6 +1380,10 @@ static int int8_cache_finish(h3_dit *dit) {
     }
     ok = fclose(dit->int8_cache) == 0 && ok;
     dit->int8_cache = NULL;
+    if (!dit->int8_cache_loading) {
+        if (ok) ok = rename(dit->int8_cache_temp, dit->int8_cache_path) == 0;
+        if (!ok) unlink(dit->int8_cache_temp);
+    }
     return ok;
 }
 
@@ -1353,6 +1429,7 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
     if (getenv("H3_DIT_INT8_CACHE") && *getenv("H3_DIT_INT8_CACHE") && !dit->ssd_streaming &&
         dit->int8_mlp && dit->int8_qkv && dit->int8_attention_out &&
         !dit->keep_bf16_mlp && !dit->keep_bf16_qkv && !dit->keep_bf16_attention_out &&
+        dit->weight_directory && strlen(dit->weight_directory) < INT8_CACHE_PATH_BYTES &&
         !int8_cache_open(dit, getenv("H3_DIT_INT8_CACHE"), error, error_size)) return 0;
     for (unsigned index = 0; index < H3_DIT_BLOCKS; index++) {
         if (!dit->block_active[index]) {
@@ -3121,7 +3198,12 @@ int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
 
 void h3_dit_free(h3_dit *dit) {
     if (!dit) return;
-    if (dit->int8_cache) fclose(dit->int8_cache);  /* a load that failed mid-cache */
+    if (dit->int8_cache) {  /* a load that failed mid-cache */
+        fclose(dit->int8_cache);
+        if (!dit->int8_cache_loading) unlink(dit->int8_cache_temp);
+    }
+    free(dit->int8_cache_path);
+    free(dit->int8_cache_temp);
     int steps = h3_dit_schedule_steps(dit->schedule);
     if (dit->row_maps) for (int step = 0; step < steps; step++)
         h3_gpu_tensor_free(dit->row_maps[step]);

@@ -78,6 +78,9 @@ struct h3_dit {
     int int8_attention_out;
     int keep_bf16_qkv;
     int keep_bf16_attention_out;
+    FILE *int8_cache;       /* per-fold int8 core file, read or written by load_core */
+    int int8_cache_loading;
+    const char *weight_directory;  /* set by load_dit; valid during load only */
     int use_slower_row_major_attention_output;
     int use_slower_unfused_int8_inputs;
     int use_slower_unfused_qkv_rope;
@@ -1238,8 +1241,119 @@ static void configure_gate_ranked_blocks(h3_dit *dit) {
     }
 }
 
+/* Per-fold int8 core cache. The int8 weights and f32 scales that quantize_block_* build from the
+ * BF16 checkpoint are fixed per checkpoint, so H3_DIT_INT8_CACHE=<file> writes them once and reads
+ * them on later loads. A file is used only when its header matches this weight directory, the
+ * dimensions and the active blocks, and it is marked complete. Delete it after the checkpoint changes. */
+#define INT8_CACHE_MAGIC 0x48334938u /* "H3I8" */
+#define INT8_CACHE_VERSION 1u
+#define INT8_CACHE_PATH_BYTES 1024u
+
+typedef struct {
+    uint32_t magic, version, hidden, inner, ffn, blocks;
+    uint64_t active_mask;
+    uint32_t complete;
+    char weight_directory[INT8_CACHE_PATH_BYTES];
+} int8_cache_header;
+
+static int int8_cache_open(h3_dit *dit, const char *path,
+                           char *error, size_t error_size) {
+    int8_cache_header want;
+    memset(&want, 0, sizeof(want));
+    want.magic = INT8_CACHE_MAGIC;
+    want.version = INT8_CACHE_VERSION;
+    want.hidden = HIDDEN;
+    want.inner = INNER;
+    want.ffn = FFN;
+    want.blocks = H3_DIT_BLOCKS;
+    for (unsigned index = 0; index < H3_DIT_BLOCKS; index++)
+        if (dit->block_active[index]) want.active_mask |= 1ull << index;
+    if (!dit->weight_directory ||
+        strlen(dit->weight_directory) >= INT8_CACHE_PATH_BYTES) {
+        fail(error, error_size, "DiT int8 cache: weight directory path too long");
+        return 0;
+    }
+    strcpy(want.weight_directory, dit->weight_directory);
+
+    int8_cache_header have;
+    FILE *file = fopen(path, "rb");
+    if (file && fread(&have, sizeof(have), 1, file) == 1 &&
+        memcmp(&have, &want, offsetof(int8_cache_header, complete)) == 0 &&
+        have.complete == 1 &&
+        strcmp(have.weight_directory, want.weight_directory) == 0) {
+        dit->int8_cache = file;
+        dit->int8_cache_loading = 1;
+        return 1;
+    }
+    if (file) fclose(file);
+    file = fopen(path, "wb");
+    if (!file || fwrite(&want, sizeof(want), 1, file) != 1) {
+        if (file) fclose(file);
+        fail(error, error_size, "cannot create DiT int8 cache %s", path);
+        return 0;
+    }
+    dit->int8_cache = file;
+    dit->int8_cache_loading = 0;
+    return 1;
+}
+
+static int int8_cache_finish(h3_dit *dit) {
+    if (!dit->int8_cache) return 1;
+    int ok = 1;
+    if (!dit->int8_cache_loading) {
+        uint32_t complete = 1;
+        ok = fseek(dit->int8_cache, (long)offsetof(int8_cache_header, complete),
+                   SEEK_SET) == 0 &&
+             fwrite(&complete, sizeof(complete), 1, dit->int8_cache) == 1;
+    }
+    ok = fclose(dit->int8_cache) == 0 && ok;
+    dit->int8_cache = NULL;
+    return ok;
+}
+
+/* Writes one block's int8 weights and scales, or reads them back and allocates the GPU tensors. */
+static int int8_cache_block(h3_dit *dit, h3_dit_block *block, int loading,
+                            char *error, size_t error_size) {
+    struct { h3_gpu_tensor **data, **scales; size_t bytes, scale_count; } parts[4] = {
+        {&block->fc1_int8, &block->fc1_scales, 2u * FFN * HIDDEN, FFN * 2u},
+        {&block->fc2_int8, &block->fc2_scales, (size_t)HIDDEN * FFN, HIDDEN},
+        {&block->qkv_int8, &block->qkv_scales, (size_t)3 * INNER * HIDDEN, 3u * INNER},
+        {&block->out_int8, &block->out_scales, (size_t)HIDDEN * INNER, HIDDEN},
+    };
+    int8_t *bytes = malloc(2u * FFN * HIDDEN);
+    float *scales = malloc(FFN * 2u * sizeof(float));
+    int ok = bytes && scales;
+    for (unsigned part = 0; ok && part < 4; part++) {
+        if (loading) {
+            *parts[part].data = h3_gpu_tensor_new_i8(dit->gpu, parts[part].bytes);
+            *parts[part].scales = h3_gpu_tensor_new_f32(dit->gpu, parts[part].scale_count);
+            ok = *parts[part].data && *parts[part].scales &&
+                 fread(bytes, 1, parts[part].bytes, dit->int8_cache) == parts[part].bytes &&
+                 fread(scales, sizeof(float), parts[part].scale_count, dit->int8_cache) ==
+                     parts[part].scale_count &&
+                 h3_gpu_tensor_write_i8(*parts[part].data, bytes, parts[part].bytes) &&
+                 h3_gpu_tensor_write_f32(*parts[part].scales, scales, parts[part].scale_count);
+        } else {
+            ok = *parts[part].data && *parts[part].scales &&
+                 h3_gpu_tensor_read_i8(*parts[part].data, bytes, parts[part].bytes) &&
+                 h3_gpu_tensor_read_f32(*parts[part].scales, scales, parts[part].scale_count) &&
+                 fwrite(bytes, 1, parts[part].bytes, dit->int8_cache) == parts[part].bytes &&
+                 fwrite(scales, sizeof(float), parts[part].scale_count, dit->int8_cache) ==
+                     parts[part].scale_count;
+        }
+    }
+    free(bytes);
+    free(scales);
+    if (!ok) fail(error, error_size, "DiT int8 cache %s failed", loading ? "read" : "write");
+    return ok;
+}
+
 static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                      char *error, size_t error_size) {
+    if (getenv("H3_DIT_INT8_CACHE") && *getenv("H3_DIT_INT8_CACHE") && !dit->ssd_streaming &&
+        dit->int8_mlp && dit->int8_qkv && dit->int8_attention_out &&
+        !dit->keep_bf16_mlp && !dit->keep_bf16_qkv && !dit->keep_bf16_attention_out &&
+        !int8_cache_open(dit, getenv("H3_DIT_INT8_CACHE"), error, error_size)) return 0;
     for (unsigned index = 0; index < H3_DIT_BLOCKS; index++) {
         if (!dit->block_active[index]) {
             report(progress, opaque, "load transformer core", (int)index + 1,
@@ -1253,6 +1367,11 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                                   error, error_size) ||
                 !prepare_stream_layer(dit, index, error, error_size))
                 return 0;
+        } else if (dit->int8_cache && dit->int8_cache_loading) {
+            if (!load_block_norms(dit, &dit->blocks[index], prefix,
+                                  error, error_size) ||
+                !int8_cache_block(dit, &dit->blocks[index], 1,
+                                  error, error_size)) return 0;
         } else {
             if (!load_block(dit, &dit->blocks[index], prefix,
                             error, error_size)) return 0;
@@ -1265,9 +1384,16 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
             if (dit->int8_attention_out &&
                 !quantize_block_attention_out(
                     dit, &dit->blocks[index], error, error_size)) return 0;
+            if (dit->int8_cache &&
+                !int8_cache_block(dit, &dit->blocks[index], 0,
+                                  error, error_size)) return 0;
         }
         report(progress, opaque, "load transformer core", (int)index + 1,
                H3_DIT_BLOCKS);
+    }
+    if (!int8_cache_finish(dit)) {
+        fail(error, error_size, "cannot finish DiT int8 cache");
+        return 0;
     }
     if (dit->ssd_streaming) {
         if (!allocate_stream_slot(dit, &dit->stream_slots[0],
@@ -1594,6 +1720,7 @@ static h3_dit *load_dit(const char *weight_directory,
         return NULL;
     }
     h3_dit *dit = calloc(1, sizeof(*dit));
+    if (dit) dit->weight_directory = weight_directory;
     if (!dit) {
         fail(error, error_size, "out of memory creating DiT model");
         return NULL;
@@ -2994,6 +3121,7 @@ int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
 
 void h3_dit_free(h3_dit *dit) {
     if (!dit) return;
+    if (dit->int8_cache) fclose(dit->int8_cache);  /* a load that failed mid-cache */
     int steps = h3_dit_schedule_steps(dit->schedule);
     if (dit->row_maps) for (int step = 0; step < steps; step++)
         h3_gpu_tensor_free(dit->row_maps[step]);

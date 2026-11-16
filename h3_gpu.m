@@ -837,6 +837,22 @@ int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
     return 1;
 }
 
+int h3_gpu_tensor_read_i8(const h3_gpu_tensor *tensor, int8_t *values,
+                          size_t bytes) {
+    if (!tensor || !values || TENSOR(tensor).dtype != H3_GPU_I8 ||
+        bytes > TENSOR(tensor).elements) return 0;
+    memcpy(values, TENSOR(tensor).buffer.contents, bytes);
+    return 1;
+}
+
+int h3_gpu_tensor_write_i8(h3_gpu_tensor *tensor, const int8_t *values,
+                           size_t bytes) {
+    if (!tensor || !values || TENSOR(tensor).dtype != H3_GPU_I8 ||
+        bytes > TENSOR(tensor).elements) return 0;
+    memcpy(TENSOR(tensor).buffer.contents, values, bytes);
+    return 1;
+}
+
 int h3_gpu_tensor_write_f32(h3_gpu_tensor *tensor, const float *values,
                             size_t elements) {
     return h3_gpu_tensor_write_f32_range(tensor, 0, values, elements);

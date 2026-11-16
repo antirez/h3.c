@@ -4,6 +4,7 @@
   python3 tools/test_fold_turbo_lora.py
 Needs numpy.
 """
+import importlib.util
 import json
 import shutil
 import struct
@@ -102,11 +103,11 @@ class FoldTest(unittest.TestCase):
             t[p + ".alpha"] = ("F32", np.array(4.0, dtype=np.float32))
         return t
 
-    def fold(self, adapter, out="out"):
+    def fold(self, adapter, out="out", extra=()):
         lora = self.tmp / "lora.safetensors"
         write_st(lora, adapter)
         r = subprocess.run([sys.executable, "-I", str(FOLD), "--checkpoint", str(self.ckpt),
-                            "--lora", f"{lora}:0.75", "--out", str(self.tmp / out)],
+                            "--lora", f"{lora}:0.75", "--out", str(self.tmp / out), *extra],
                            capture_output=True, text=True)
         return r, self.tmp / out
 
@@ -139,9 +140,17 @@ class FoldTest(unittest.TestCase):
         for k in exp:
             np.testing.assert_array_equal(got[k], exp[k], err_msg=k)
 
-    def test_a_curve_pairs_skipped_rest_folded(self):
+    def test_b_curve_pairs_abort_without_flag(self):
+        r, out = self.fold(self.comfy_like(BLOCKS))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("50 adaln_proj curve pairs", r.stderr)
+        self.assertIn("--skip-curve-pairs", r.stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse(out.with_name(out.name + ".tmp").exists())
+
+    def test_b_curve_pairs_skipped_with_flag(self):
         adapter = self.comfy_like(BLOCKS)
-        r, out = self.fold(adapter)
+        r, out = self.fold(adapter, extra=("--skip-curve-pairs",))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("skipped 50 adaln_proj curve pairs", r.stdout)
         self.assertIn("8 pairs", r.stdout)
@@ -153,10 +162,37 @@ class FoldTest(unittest.TestCase):
             k = f"blocks.{n}.adaln_proj.linear.weight"
             np.testing.assert_array_equal(got[k], self.base[k])
 
-    def test_b_shape_mismatch_aborts(self):
-        r, _ = self.fold(self.comfy_like(BLOCKS, bad_qkv=True))
+    def test_shape_mismatch_aborts(self):
+        r, _ = self.fold(self.comfy_like(BLOCKS, bad_qkv=True), extra=("--skip-curve-pairs",))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not match blocks.0.attn.qkv.weight [24, 8]", r.stderr)
+
+    def test_a_f32_target_aborts_with_no_output(self):
+        # Make one qkv target F32 in shard 2 (block 35 lives there).
+        tensors = {}
+        for n in range(25, BLOCKS):
+            for name, shape in ((f"blocks.{n}.adaln_proj.linear.weight", ADALN),
+                                (f"blocks.{n}.attn.qkv.weight", QKV)):
+                w = self.base[name]
+                dtype = "F32" if name == "blocks.35.attn.qkv.weight" else "BF16"
+                tensors[name] = (dtype, w)
+        write_st(self.ckpt / "model-00002-of-00002.safetensors", tensors)
+        r, out = self.fold(self.comfy_like(BLOCKS, bad_qkv=False), extra=("--skip-curve-pairs",))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("expected BF16, got F32", r.stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse(out.with_name(out.name + ".tmp").exists())
+
+    def test_d_nan_maps_to_canonical_nan(self):
+        spec = importlib.util.spec_from_file_location("fold_turbo_lora", FOLD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        bits = np.array([0x7FC00001, 0xFFC00000, 0xFFFFFFFF, 0x7F800001, 0x3F800000],
+                        dtype=np.uint32)
+        raw = mod.f32_to_bf16_bytes(bits.view(np.float32))
+        got = np.frombuffer(raw, dtype="<u2")
+        np.testing.assert_array_equal(got, np.array([0x7FC0, 0xFFC0, 0xFFC0, 0x7FC0, 0x3F80],
+                                                    dtype=np.uint16))
 
     def test_c_kohya_no_curve_pairs(self):
         adapter = self.kohya_like()

@@ -598,7 +598,9 @@ on the dense path outside the sigma window `shift(1-H3_SPARSE_END)` to
 `shift(1-H3_SPARSE_START)` (0.9 and 0.2, ComfyUI `percent_to_sigma`) and below
 `H3_SPARSE_MIN_TOKENS` (20000) tokens. The text refiner stays dense. Token
 reduction and gate-ranked block skipping compose with it. With the variable
-unset nothing on the GPU changes. `H3_ATTN_CAPTURE_DIR` with
+unset nothing on the GPU changes. On M5 Max at tau 1.3, routing keeps 25-39%
+of key blocks and cuts end-to-end time by 23% at 768x1024x124 and 28% at
+768x1344x124. 1 s clips (about 7-9k tokens) gain under 4%, so they stay dense. `H3_ATTN_CAPTURE_DIR` with
 `H3_ATTN_CAPTURE_BLOCKS`, `H3_ATTN_CAPTURE_STEPS` and `H3_ATTN_CAPTURE_HEADS`
 dumps Q/K/V for `h3_sparse_attn_check`; `h3_sparse_attn_test` checks the
 kernel against the dense kernel and a CPU reference;

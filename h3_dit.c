@@ -524,8 +524,8 @@ static int env_index_mask(const char *name, uint64_t *mask, char *error,
  * ComfyUI's percent_to_sigma on the run's video shift: steps with
  * shift(1 - END) <= sigma <= shift(1 - START) are sparse, the rest dense.
  * Sequences shorter than H3_SPARSE_MIN_TOKENS stay on the dense path; the
- * default 20000 is where the tiled core stops losing clearly to MPSGraph
- * (gate 3a: 1.18x at 15,208 tokens, 1.09x at 29,416). */
+ * default 20000 sits where the end-to-end saving turns significant on M5 Max
+ * (tau 1.3: about -1% at 7.2k tokens, -10% at 15.6k, -23% at 30.6k). */
 static int configure_sparse_attention(h3_dit *dit, char *error,
                                       size_t error_size) {
     const char *enabled = getenv("H3_SPARSE_ATTN");

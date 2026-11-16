@@ -7,7 +7,7 @@
 # Each profile is rendered the way gen.sh renders it (registry run dir + the
 # profile's env map), identically for both binaries. ref2va profiles get --ref-image,
 # fl2va profiles --first-frame, both from $REF with the prompt in $PROMPT_FILE.
-# Env knobs: ROOT (local-video-gen checkout; default: two levels above this repo),
+# Env knobs: ROOT (checkout holding models.json and server/registry.py; required),
 # REF, PROMPT_FILE, SEED (101), FRAMES (22), SIZE (768x1024), STEPS (profile "steps"
 # or 6), EXTRA_ENV (KEY=VALUE ... applied to both binaries, e.g. "H3_SPARSE_ATTN=0").
 # The per-pair int8 DiT cache under models/dit-cache is used only if it already
@@ -17,7 +17,7 @@ set -uo pipefail
 (( $# >= 4 )) || { echo "usage: $0 BIN_A BIN_B OUT_DIR PROFILE..." >&2; exit 2; }
 bin_a=${1:A} bin_b=${2:A} out=${3:A}
 shift 3
-root=${ROOT:-${0:A:h:h:h}}
+root=${ROOT:?set ROOT to the checkout holding models.json and server/registry.py}
 ref=${REF:-$root/test-inputs/ref_woman.png}
 prompt_file=${PROMPT_FILE:-$root/test-inputs/ref_woman.txt}
 seed=${SEED:-101} frames=${FRAMES:-22} size=${SIZE:-768x1024}

@@ -98,6 +98,14 @@ struct h3_dit {
     unsigned token_reduction_early_steps;
     unsigned token_reduction_early_end;
     float token_reduction_scale;
+    int sparse_attention;
+    float sparse_tau;
+    float sparse_sigma_high;
+    float sparse_sigma_low;
+    uint32_t sparse_min_tokens;
+    const char *attention_capture_dir;
+    uint64_t attention_capture_blocks;
+    uint64_t attention_capture_steps;
     float spatial_rope_scale;
     int bf16_final;
     unsigned core_reuse_interval;
@@ -469,6 +477,190 @@ static int configure_token_reduction(h3_dit *dit, int requested,
     dit->token_baseline_rows = dit->video_rows - dit->reduced_video_rows;
     dit->reduced_sequence = dit->video_target_start +
                             dit->reduced_video_rows;
+    return 1;
+}
+
+static int env_float(const char *name, float fallback, float low, float high,
+                     float *value, char *error, size_t error_size) {
+    const char *text = getenv(name);
+    *value = fallback;
+    if (!text || !*text) return 1;
+    char *tail = NULL;
+    float parsed = strtof(text, &tail);
+    if (tail == text || *tail || !isfinite(parsed) || parsed < low ||
+        parsed > high) {
+        fail(error, error_size, "%s must be a number in [%g, %g]", name,
+             (double)low, (double)high);
+        return 0;
+    }
+    *value = parsed;
+    return 1;
+}
+
+/* Comma-separated indices below 64 as a bit mask; "all" selects every one. */
+static int env_index_mask(const char *name, uint64_t *mask, char *error,
+                          size_t error_size) {
+    const char *text = getenv(name);
+    *mask = 0;
+    if (!text || !*text || !strcmp(text, "all")) {
+        *mask = UINT64_MAX;
+        return 1;
+    }
+    while (*text) {
+        char *tail = NULL;
+        unsigned long index = strtoul(text, &tail, 10);
+        if (tail == text || index >= 64 || (*tail && *tail != ',')) {
+            fail(error, error_size,
+                 "%s must be \"all\" or comma-separated indices below 64", name);
+            return 0;
+        }
+        *mask |= UINT64_C(1) << index;
+        text = *tail ? tail + 1 : tail;
+    }
+    return 1;
+}
+
+/* Sol-Attn sparse attention (H3_SPARSE_ATTN=1). The sigma window follows
+ * ComfyUI's percent_to_sigma on the run's video shift: steps with
+ * shift(1 - END) <= sigma <= shift(1 - START) are sparse, the rest dense.
+ * Sequences shorter than H3_SPARSE_MIN_TOKENS stay on the dense path; the
+ * default 20000 sits where the end-to-end saving turns significant on M5 Max
+ * (tau 1.3: about -1% at 7.2k tokens, -10% at 15.6k, -23% at 30.6k). */
+static int configure_sparse_attention(h3_dit *dit, char *error,
+                                      size_t error_size) {
+    const char *enabled = getenv("H3_SPARSE_ATTN");
+    dit->attention_capture_dir = getenv("H3_ATTN_CAPTURE_DIR");
+    if (dit->attention_capture_dir && !*dit->attention_capture_dir)
+        dit->attention_capture_dir = NULL;
+    if (dit->attention_capture_dir &&
+        (!env_index_mask("H3_ATTN_CAPTURE_BLOCKS",
+                         &dit->attention_capture_blocks, error, error_size) ||
+         !env_index_mask("H3_ATTN_CAPTURE_STEPS",
+                         &dit->attention_capture_steps, error, error_size)))
+        return 0;
+    if (!enabled || !*enabled || !strcmp(enabled, "0")) return 1;
+    if (strcmp(enabled, "1")) {
+        fail(error, error_size, "H3_SPARSE_ATTN must be 0 or 1");
+        return 0;
+    }
+    if (!h3_gpu_has_tiled_attention(dit->gpu)) {
+        fail(error, error_size,
+             "H3_SPARSE_ATTN=1 needs the TensorOps attention kernels "
+             "(M5 GPU and a Metal toolchain with <metal_tensor>)");
+        return 0;
+    }
+    float start, end, min_tokens;
+    if (!env_float("H3_SPARSE_TAU", 1.3f, -16.0f, 16.0f, &dit->sparse_tau,
+                   error, error_size) ||
+        !env_float("H3_SPARSE_START", 0.2f, 0.0f, 1.0f, &start,
+                   error, error_size) ||
+        !env_float("H3_SPARSE_END", 0.9f, 0.0f, 1.0f, &end,
+                   error, error_size) ||
+        !env_float("H3_SPARSE_MIN_TOKENS", 20000.0f, 0.0f, 4294967040.0f,
+                   &min_tokens, error, error_size))
+        return 0;
+    if (start > end) {
+        fail(error, error_size, "H3_SPARSE_START must not exceed H3_SPARSE_END");
+        return 0;
+    }
+    double shift = H3_VIDEO_SIGMA_SHIFT;
+    double high = 1.0 - start, low = 1.0 - end;
+    dit->sparse_sigma_high =
+        (float)(shift * high / (1.0 + (shift - 1.0) * high));
+    dit->sparse_sigma_low = (float)(shift * low / (1.0 + (shift - 1.0) * low));
+    dit->sparse_min_tokens = (uint32_t)min_tokens;
+    dit->sparse_attention = 1;
+    fprintf(stderr,
+            "h3: sparse attention tau=%g sigma window [%.4f, %.4f] "
+            "(start %g end %g shift %g) min_tokens=%u sink_rows=%u\n",
+            (double)dit->sparse_tau, (double)dit->sparse_sigma_low,
+            (double)dit->sparse_sigma_high, (double)start, (double)end, shift,
+            dit->sparse_min_tokens, dit->video_target_start);
+    return 1;
+}
+
+static int sparse_attention_step(const h3_dit *dit, int step, uint32_t rows) {
+    if (!dit->sparse_attention || rows < dit->sparse_min_tokens) return 0;
+    float sigma = dit->sigmas.video[step];
+    return sigma <= dit->sparse_sigma_high && sigma >= dit->sparse_sigma_low;
+}
+
+/* H3_ATTN_CAPTURE_DIR: dump the bf16 Q/K/V entering joint attention for the
+ * selected blocks/steps (H3_ATTN_CAPTURE_BLOCKS, H3_ATTN_CAPTURE_STEPS) as
+ * head-major <dir>/b<block>_s<step>.{q,k,v} plus a .json header.
+ * Synchronizes the GPU; diagnostics only. */
+static int capture_attention_inputs(h3_dit *dit, unsigned index, int step,
+                                    uint32_t rows, char *error,
+                                    size_t error_size) {
+    if (!dit->attention_capture_dir || index >= 64 || step < 0 || step >= 64 ||
+        !(dit->attention_capture_blocks >> index & 1u) ||
+        !(dit->attention_capture_steps >> step & 1u))
+        return 1;
+    int head_major = h3_gpu_sdpa_inputs_head_major(dit->gpu);
+    if (!h3_gpu_submit(dit->gpu)) {
+        fail(error, error_size, "attention capture submit: %s",
+             h3_gpu_error(dit->gpu));
+        return 0;
+    }
+    /* H3_ATTN_CAPTURE_HEADS=N keeps N evenly spaced heads, written head-major. */
+    const char *heads_text = getenv("H3_ATTN_CAPTURE_HEADS");
+    int kept = heads_text && *heads_text ? atoi(heads_text) : HEADS;
+    if (kept < 1 || kept > HEADS) kept = HEADS;
+    size_t count = (size_t)rows * HEADS * HEAD_DIM;
+    size_t head_elements = (size_t)rows * HEAD_DIM;
+    uint16_t *values = malloc(count * sizeof(*values));
+    uint16_t *packed = malloc((size_t)kept * head_elements * sizeof(*packed));
+    const h3_gpu_tensor *tensors[3] = {dit->query, dit->key, dit->value};
+    const char *suffix[3] = {"q", "k", "v"};
+    char path[4096];
+    int ok = values && packed;
+    for (int t = 0; ok && t < 3; t++) {
+        snprintf(path, sizeof(path), "%s/b%02u_s%02d.%s",
+                 dit->attention_capture_dir, index, step, suffix[t]);
+        ok = h3_gpu_tensor_read_bf16(tensors[t], values, count);
+        for (int k = 0; ok && k < kept; k++) {
+            size_t head = (size_t)k * HEADS / (size_t)kept;
+            for (uint32_t row = 0; row < rows; row++)
+                memcpy(packed + (size_t)k * head_elements + (size_t)row * HEAD_DIM,
+                       values + (head_major ? head * head_elements +
+                                              (size_t)row * HEAD_DIM :
+                                              ((size_t)row * HEADS + head) *
+                                                  HEAD_DIM),
+                       HEAD_DIM * sizeof(*values));
+        }
+        FILE *file = NULL;
+        ok = ok && (file = fopen(path, "wb")) != NULL &&
+             fwrite(packed, sizeof(*packed), (size_t)kept * head_elements,
+                    file) == (size_t)kept * head_elements;
+        if (file && fclose(file)) ok = 0;
+    }
+    free(values);
+    free(packed);
+    if (ok) {
+        snprintf(path, sizeof(path), "%s/b%02u_s%02d.json",
+                 dit->attention_capture_dir, index, step);
+        FILE *file = fopen(path, "w");
+        ok = file && fprintf(file,
+            "{\"block\": %u, \"step\": %d, \"sigma\": %.6f, \"rows\": %u, "
+            "\"heads\": %d, \"head_dim\": %d, \"head_major\": %d, "
+            "\"sink_rows\": %u, \"video_rows\": %u, \"latent\": [%d, %d, %d], "
+            "\"token_reduction\": %d}\n",
+            index, step, (double)dit->sigmas.video[step], rows, kept,
+            HEAD_DIM, 1, dit->video_target_start, dit->video_rows,
+            dit->latent_t, dit->latent_h, dit->latent_w,
+            dit->token_reduction_active) > 0;
+        if (file && fclose(file)) ok = 0;
+    }
+    if (!ok) {
+        fail(error, error_size, "cannot write attention capture %s", path);
+        return 0;
+    }
+    if (!h3_gpu_begin(dit->gpu)) {
+        fail(error, error_size, "attention capture begin: %s",
+             h3_gpu_error(dit->gpu));
+        return 0;
+    }
+    h3_gpu_set_sdpa_inputs_head_major(dit->gpu, head_major);
     return 1;
 }
 
@@ -1629,6 +1821,7 @@ static h3_dit *load_dit(const char *weight_directory,
     if (!dit->weights) goto failed;
     dit->gpu = h3_gpu_create(shader_source_path, error, error_size);
     if (!dit->gpu) goto failed;
+    if (!configure_sparse_attention(dit, error, error_size)) goto failed;
     dit->nax_mlp = dit->fused_mlp && h3_gpu_has_nax_mlp(dit->gpu);
     dit->int8_mlp = !dit->ssd_streaming && dit->fused_mlp &&
                     !use_slower_bf16_mlp &&
@@ -1923,7 +2116,24 @@ static int run_block(h3_dit *dit, unsigned index, int step,
         !dit->use_slower_row_major_attention_output &&
         !dit->use_slower_uncached_int8_scales &&
         !getenv("H3_DISABLE_HEAD_MAJOR_ATTENTION_OUTPUT");
-    if (head_major_attention_output)
+    if (!capture_attention_inputs(dit, index, step, rows, error, error_size))
+        return 0;
+    const char *tiled_attention = getenv("H3_ATTN_TILED");
+    if (sparse_attention_step(dit, step, rows))
+        OP(h3_gpu_attention_sparse_bf16(
+            dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
+            rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM),
+            head_major_attention_output, dit->video_target_start,
+            dit->sparse_tau),
+           "DiT sparse attention");
+    else if (tiled_attention && *tiled_attention && strcmp(tiled_attention, "0") &&
+        h3_gpu_has_tiled_attention(dit->gpu))
+        OP(h3_gpu_attention_tiled_bf16(
+            dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
+            rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM),
+            head_major_attention_output),
+           "DiT tiled full attention");
+    else if (head_major_attention_output)
         OP(h3_gpu_sdpa_bf16_head_major_output(
             dit->gpu, dit->attention_heads, dit->query, dit->key, dit->value,
             rows, HEADS, HEAD_DIM, 1.0f / sqrtf((float)HEAD_DIM)),

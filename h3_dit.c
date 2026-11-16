@@ -3,6 +3,7 @@
 #include "h3_dit_schedule.h"
 #include "h3_weights.h"
 
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 enum {
@@ -1556,6 +1558,103 @@ static void schedule_report(int completed, int total, void *opaque) {
     report(state->callback, state->opaque, "precompute AdaLN", completed, total);
 }
 
+/* Bump when the AdaLN schedule math changes, so cached schedules from older code miss. */
+#define ADALN_SCHEDULE_VERSION 1u
+#define ADALN_BLOCK_OUTPUT (H3_DIT_MODALITIES * H3_DIT_ADALN_SLOTS * H3_DIT_HIDDEN)
+#define ADALN_FINAL_OUTPUT (2u * H3_DIT_HIDDEN)
+
+typedef struct {
+    unsigned char *bytes;
+    size_t used, capacity;
+} adaln_key;
+
+static int adaln_key_append(adaln_key *key, const void *data, size_t bytes) {
+    if (bytes > key->capacity - key->used) {
+        size_t grown = key->capacity * 2;
+        while (grown - key->used < bytes) grown *= 2;
+        unsigned char *next = realloc(key->bytes, grown);
+        if (!next) return 0;
+        key->bytes = next;
+        key->capacity = grown;
+    }
+    memcpy(key->bytes + key->used, data, bytes);
+    key->used += bytes;
+    return 1;
+}
+
+static uint64_t fnv1a_update(uint64_t hash, const void *data, size_t bytes) {
+    const unsigned char *in = data;
+    for (size_t index = 0; index < bytes; index++) {
+        hash ^= in[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/* Fingerprint of every safetensors shard the weight store opens: name, size and mtime. Per-shard
+ * hashes are summed, so readdir order does not matter; replacing a shard in place changes the
+ * stamp. Returns 0 when the directory or a shard cannot be read, and callers then skip the cache. */
+static int weights_stamp(const char *directory, uint64_t *stamp) {
+    DIR *dir = directory ? opendir(directory) : NULL;
+    if (!dir) return 0;
+    const char suffix[] = ".safetensors";
+    size_t suffix_length = sizeof(suffix) - 1;
+    uint64_t sum = 0;
+    int ok = 1;
+    for (struct dirent *entry; ok && (entry = readdir(dir));) {
+        size_t length = strlen(entry->d_name);
+        if (length <= suffix_length ||
+            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
+            continue;
+        size_t path_bytes = strlen(directory) + length + 2;
+        char *path = malloc(path_bytes);
+        struct stat info;
+        if (path) snprintf(path, path_bytes, "%s/%s", directory, entry->d_name);
+        ok = path && stat(path, &info) == 0;
+        free(path);
+        if (!ok) break;
+        int64_t fields[3] = {(int64_t)info.st_size, (int64_t)info.st_mtimespec.tv_sec,
+                             (int64_t)info.st_mtimespec.tv_nsec};
+        uint64_t hash = fnv1a_update(1469598103934665603ull, entry->d_name, length);
+        sum += fnv1a_update(hash, fields, sizeof(fields));
+    }
+    closedir(dir);
+    if (ok) *stamp = sum;
+    return ok;
+}
+
+/* Cache key for the AdaLN schedule: everything the schedule reads, including the weight stamp
+ * of each safetensors shard load_dit opens, so replacing weights in place misses.
+ * Returns a malloc'd key, or NULL when it cannot be built; the caller then skips the cache. */
+static unsigned char *adaln_key_build(const char *weight_directory,
+                                      const h3_sigma_schedule *sigmas,
+                                      int visual, int audio, size_t *bytes) {
+    adaln_key key = {malloc(1024), 0, 1024};
+    if (!key.bytes || !weight_directory) goto failed;
+    uint32_t header[9] = {ADALN_SCHEDULE_VERSION, (uint32_t)sigmas->steps,
+                          (uint32_t)visual, (uint32_t)audio, TEXT_DIM,
+                          H3_DIT_TIME_DIM, H3_DIT_HIDDEN, ADALN_BLOCK_OUTPUT,
+                          ADALN_FINAL_OUTPUT};
+    size_t points = (size_t)sigmas->steps + 1;
+    size_t directory_length = strlen(weight_directory);
+    uint32_t directory_bytes = (uint32_t)directory_length;
+    if (!adaln_key_append(&key, header, sizeof(header)) ||
+        !adaln_key_append(&key, &directory_bytes, sizeof(directory_bytes)) ||
+        !adaln_key_append(&key, weight_directory, directory_length) ||
+        !adaln_key_append(&key, sigmas->video, points * sizeof(float)) ||
+        !adaln_key_append(&key, sigmas->audio, points * sizeof(float)))
+        goto failed;
+    uint64_t stamp;
+    if (!weights_stamp(weight_directory, &stamp) ||
+        !adaln_key_append(&key, &stamp, sizeof(stamp)))
+        goto failed;
+    *bytes = key.used;
+    return key.bytes;
+failed:
+    free(key.bytes);
+    return NULL;
+}
+
 static h3_dit *load_dit(const char *weight_directory,
                         const char *shader_source_path,
                         const h3_text_embedding *text,
@@ -1667,10 +1766,21 @@ static h3_dit *load_dit(const char *weight_directory,
     if (!refine_text(dit, text, error, error_size)) goto failed;
     report(progress, progress_opaque, "refine text", 1, 1);
     schedule_progress schedule_state = {progress, progress_opaque};
-    dit->schedule = h3_dit_schedule_precompute(
+    /* H3_ADALN_CACHE_DIR: the AdaLN schedule is keyed by checkpoint directory, steps,
+     * sigmas and condition rows (not seed or prompt), so a repeat of any of those is a hit. */
+    const char *adaln_cache_dir = getenv("H3_ADALN_CACHE_DIR");
+    size_t adaln_key_bytes = 0;
+    unsigned char *adaln_key = NULL;
+    if (adaln_cache_dir && *adaln_cache_dir)
+        adaln_key = adaln_key_build(weight_directory, sigmas,
+                                    dit->video_condition_rows != 0,
+                                    dit->audio_condition_rows != 0, &adaln_key_bytes);
+    dit->schedule = h3_dit_schedule_cached(
+        adaln_cache_dir, (const char *)adaln_key, adaln_key_bytes,
         dit->weights, dit->gpu, sigmas, dit->video_condition_rows != 0,
         dit->audio_condition_rows != 0, schedule_report, &schedule_state,
         error, error_size);
+    free(adaln_key);
     if (dit->schedule) {
         configure_gate_ranked_blocks(dit);
         h3_dit_schedule_prune(dit->schedule, dit->block_active,

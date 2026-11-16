@@ -389,6 +389,22 @@ int h3_st_read_header(const char *path, h3_st_header *header,
         close(descriptor);
         return 0;
     }
+    /* The GPU path maps tensors in place, which requires the data section
+     * (8 + header bytes) to start 8-byte aligned. Writers that do not pad
+     * the JSON header (for example MLX's save_safetensors) produce files
+     * that are valid per the format spec but silently decode to garbage
+     * here, rendering black video. Refuse them with an actionable message
+     * instead. Repro: pad the same file's header with spaces to the next
+     * 8-byte boundary and it renders correctly. */
+    if ((8 + header_size) % 8 != 0) {
+        if (error && error_size)
+            snprintf(error, error_size,
+                     "%s: data section starts misaligned (8 + %llu-byte header); "
+                     "re-save with the JSON header padded to an 8-byte boundary",
+                     path, (unsigned long long)header_size);
+        close(descriptor);
+        return 0;
+    }
     char *json = malloc((size_t)header_size + 1);
     if (!json || pread(descriptor, json, (size_t)header_size, 8) != (ssize_t)header_size) {
         if (error && error_size) snprintf(error, error_size, "%s: cannot read header", path);

@@ -668,7 +668,10 @@ static int configured_tile_pixels(int pixel_height, int pixel_width) {
     if (value && *value) {
         char *end = NULL;
         long pixels = strtol(value, &end, 10);
-        if (end && !*end && pixels >= TILE_PIXELS && pixels <= 512 &&
+        /* Cap at 320 to match the automatic search: tiles above 320 pixels
+         * produce a visible grid/quilt artifact across the whole frame
+         * (reproduced at 512 and 1088 on M5 Max). */
+        if (end && !*end && pixels >= TILE_PIXELS && pixels <= 320 &&
             pixels % SPATIAL_RATIO == 0) return (int)pixels;
     }
     int best = TILE_PIXELS;

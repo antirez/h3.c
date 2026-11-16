@@ -239,6 +239,16 @@ cleanup:
     return result;
 }
 
+/* A low-rank store has blocks.0.adaln_proj.linear.weight as [out, R] with R != 2688.
+ * Returns 0 for the full-rank layout. */
+static uint32_t adaln_rank(const h3_weight_store *weights) {
+    const h3_st_tensor *weight = h3_weight_find(
+        weights, "blocks.0.adaln_proj.linear.weight", NULL);
+    if (!weight || weight->ndim != 2 || weight->shape[1] == H3_DIT_TIME_DIM)
+        return 0;
+    return (uint32_t)weight->shape[1];
+}
+
 h3_dit_schedule *h3_dit_schedule_precompute(
     const h3_weight_store *weights, h3_gpu *gpu,
     const h3_sigma_schedule *sigmas, int visual_condition,
@@ -258,6 +268,7 @@ h3_dit_schedule *h3_dit_schedule_precompute(
     }
     schedule->gpu = gpu;
     float *features = NULL;
+    h3_gpu_tensor *coefficients = NULL;
     if (!prepare_rows(schedule, sigmas, visual_condition, audio_condition,
                       &features, error, error_size)) goto failed;
     h3_gpu_tensor *time = time_embeddings(weights, gpu, schedule->time_rows,
@@ -266,6 +277,42 @@ h3_dit_schedule *h3_dit_schedule_precompute(
     features = NULL;
     if (!time) goto failed;
 
+    /* Low-rank stores project time once into R coefficients, then every
+     * block and the final layer multiply those coefficients by their own
+     * [out, R] weight. Full-rank stores keep the original [out, 2688] path. */
+    uint32_t rank = adaln_rank(weights);
+    uint32_t modulation_dim = rank ? rank : H3_DIT_TIME_DIM;
+    const h3_gpu_tensor *modulation_input = time;
+    if (rank) {
+        h3_gpu_tensor *basis = weight_bf16_2d(weights, gpu, "adaln_basis",
+                                              rank, H3_DIT_TIME_DIM,
+                                              error, error_size);
+        h3_gpu_tensor *basis_bias = weight_bf16_1d(weights, gpu,
+                                                   "adaln_cbias", rank,
+                                                   error, error_size);
+        coefficients = h3_gpu_tensor_new_bf16(
+            gpu, (size_t)schedule->time_rows * rank);
+        int ok = basis && basis_bias && coefficients &&
+            gpu_op(gpu, h3_gpu_begin(gpu), error, error_size,
+                   "begin AdaLN coefficients") &&
+            gpu_op(gpu, h3_gpu_linear_bf16(
+                gpu, coefficients, time, basis, basis_bias,
+                schedule->time_rows, H3_DIT_TIME_DIM, rank),
+                error, error_size, "AdaLN low-rank coefficients") &&
+            gpu_op(gpu, h3_gpu_submit(gpu), error, error_size,
+                   "submit AdaLN coefficients");
+        free_tensor(&basis);
+        free_tensor(&basis_bias);
+        if (!ok) {
+            if ((!error || !*error) && !coefficients)
+                fail(error, error_size, "cannot allocate AdaLN coefficients: %s",
+                     h3_gpu_error(gpu));
+            h3_gpu_tensor_free(time);
+            goto failed;
+        }
+        modulation_input = coefficients;
+    }
+
     for (unsigned block = 0; block < H3_DIT_BLOCKS; block++) {
         char weight_name[128], bias_name[128], operation[128];
         snprintf(weight_name, sizeof(weight_name),
@@ -273,7 +320,7 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         snprintf(bias_name, sizeof(bias_name),
                  "blocks.%u.adaln_proj.linear.bias", block);
         h3_gpu_tensor *weight = weight_bf16_2d(
-            weights, gpu, weight_name, BLOCK_OUTPUT, H3_DIT_TIME_DIM,
+            weights, gpu, weight_name, BLOCK_OUTPUT, modulation_dim,
             error, error_size);
         h3_gpu_tensor *bias = weight_bf16_1d(
             weights, gpu, bias_name, BLOCK_OUTPUT, error, error_size);
@@ -291,8 +338,8 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         snprintf(operation, sizeof(operation), "AdaLN block %u", block);
         int ok = gpu_op(gpu, h3_gpu_begin(gpu), error, error_size, operation) &&
             gpu_op(gpu, h3_gpu_linear_bf16(
-                gpu, schedule->blocks[block], time, weight, bias,
-                schedule->time_rows, H3_DIT_TIME_DIM, BLOCK_OUTPUT),
+                gpu, schedule->blocks[block], modulation_input, weight, bias,
+                schedule->time_rows, modulation_dim, BLOCK_OUTPUT),
                 error, error_size, operation) &&
             gpu_op(gpu, h3_gpu_submit(gpu), error, error_size, operation);
         free_tensor(&weight);
@@ -307,7 +354,7 @@ h3_dit_schedule *h3_dit_schedule_precompute(
 
     h3_gpu_tensor *final_w = weight_bf16_2d(
         weights, gpu, "final_layer.adaln_proj.linear.weight",
-        FINAL_OUTPUT, H3_DIT_TIME_DIM, error, error_size);
+        FINAL_OUTPUT, modulation_dim, error, error_size);
     h3_gpu_tensor *final_b = weight_bf16_1d(
         weights, gpu, "final_layer.adaln_proj.linear.bias",
         FINAL_OUTPUT, error, error_size);
@@ -317,8 +364,8 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         !gpu_op(gpu, h3_gpu_begin(gpu), error, error_size,
                 "begin final AdaLN") ||
         !gpu_op(gpu, h3_gpu_linear_bf16(
-            gpu, schedule->final, time, final_w, final_b, schedule->time_rows,
-            H3_DIT_TIME_DIM, FINAL_OUTPUT), error, error_size,
+            gpu, schedule->final, modulation_input, final_w, final_b,
+            schedule->time_rows, modulation_dim, FINAL_OUTPUT), error, error_size,
             "final AdaLN projection") ||
         !gpu_op(gpu, h3_gpu_submit(gpu), error, error_size,
                 "submit final AdaLN")) {
@@ -333,10 +380,12 @@ h3_dit_schedule *h3_dit_schedule_precompute(
     free_tensor(&final_w);
     free_tensor(&final_b);
     h3_gpu_tensor_free(time);
+    free_tensor(&coefficients);
     return schedule;
 
 failed:
     free(features);
+    free_tensor(&coefficients);
     h3_dit_schedule_free(schedule);
     return NULL;
 }

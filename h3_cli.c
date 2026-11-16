@@ -176,6 +176,7 @@ static void print_help(void) {
     puts("  !again                   Repeat the last prompt");
     puts("  !cache                   Show reusable-session cache state");
     puts("  !cache clear             Clear reusable-session caches");
+    puts("  !offload                 Free the DiT and video decoder, keep the text cache");
     puts("  !quit                    Exit");
     puts("\nType a prompt on a line by itself to generate a video.");
 }
@@ -667,6 +668,9 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
                         strerror(errno));
             else printf("Saved: %s\n", destination);
         }
+    } else if (!strcasecmp(command, "offload")) {
+        h3_offload(state->ctx);
+        puts("Offloaded DiT and video decoder.");
     } else if (!strcasecmp(command, "cache")) {
         if (!strcasecmp(argument, "clear")) {
             h3_cache_clear(state->ctx);

@@ -2,7 +2,10 @@
 
 #include "h3_weights.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -36,6 +39,23 @@ enum {
  * QKV/output/MLP projections onto the M5 TensorOps paths. */
 enum { VAE_F32 = 0, VAE_BF16 = 1, VAE_INT8 = 2 };
 enum { LP_QKV = 0, LP_OUT = 1, LP_W1 = 2, LP_W2 = 3, LP_COUNT = 4 };
+
+/* H3_VAE_CACHE=<directory>: with bf16 precision, the resident decoder reads the
+ * lowered projections from this file (about 4.8 GiB) instead of reading
+ * 9.7 GiB of F32 and casting. A missing or stale file (weight fingerprint
+ * mismatch) is rebuilt from the F32 weights during that load. */
+static const size_t LOWP_ELEMENTS[LP_COUNT] = {
+    (size_t)INNER * 3 * HIDDEN, (size_t)HIDDEN * INNER,
+    (size_t)FFN * 2 * HIDDEN, (size_t)HIDDEN * FFN
+};
+static const char VAE_CACHE_MAGIC[8] = {'H','3','V','A','E','B','F','1'};
+
+typedef struct {
+    char magic[8];
+    uint32_t layers;
+    uint32_t reserved;
+    uint8_t fingerprint[32];
+} vae_cache_header;
 
 typedef struct {
     int count;
@@ -99,6 +119,11 @@ typedef struct {
     h3_gpu_tensor *value_bf16;
     int precision;
     int bf16_attention;
+    const char *cache_path;   /* read lowered weights from here */
+    FILE *cache_out;          /* or append freshly lowered weights here */
+    uint16_t *cache_host;
+    char cache_file[1024];
+    char weight_path[1024];   /* weight directory with links resolved */
     uint32_t patches;
     uint32_t sequence;
     int latent_h;
@@ -248,6 +273,51 @@ static int lower_block(vae_context *vae, vae_block *block, char *error,
                         error, error_size);
 }
 
+static size_t cache_block_bytes(void) {
+    size_t total = 0;
+    for (int which = 0; which < LP_COUNT; which++)
+        total += LOWP_ELEMENTS[which] * sizeof(uint16_t);
+    return total;
+}
+
+static int read_cached_block(vae_context *vae, int index, char *error,
+                             size_t error_size) {
+    vae_block *block = &vae->blocks[index];
+    uint64_t offset = sizeof(vae_cache_header) +
+                      (uint64_t)index * cache_block_bytes();
+    for (int which = 0; which < LP_COUNT; which++) {
+        block->lowp[which] = h3_gpu_tensor_new_bf16(vae->gpu,
+                                                    LOWP_ELEMENTS[which]);
+        if (!block->lowp[which] ||
+            !h3_gpu_tensor_read_file_bf16(block->lowp[which],
+                                          vae->cache_path, offset,
+                                          LOWP_ELEMENTS[which], error,
+                                          error_size)) {
+            if (!block->lowp[which])
+                fail(error, error_size, "cannot allocate cached video VAE "
+                     "weight: %s", h3_gpu_error(vae->gpu));
+            return 0;
+        }
+        offset += LOWP_ELEMENTS[which] * sizeof(uint16_t);
+    }
+    return 1;
+}
+
+/* Best effort: a write failure only drops the cache, never the decode. */
+static void append_cached_block(vae_context *vae, const vae_block *block) {
+    for (int which = 0; which < LP_COUNT && vae->cache_out; which++) {
+        size_t count = LOWP_ELEMENTS[which];
+        if (!h3_gpu_tensor_read_bf16(block->lowp[which], vae->cache_host,
+                                     count) ||
+            fwrite(vae->cache_host, sizeof(uint16_t), count,
+                   vae->cache_out) != count) {
+            fprintf(stderr, "h3: warning: cannot write video VAE cache\n");
+            fclose(vae->cache_out);
+            vae->cache_out = NULL;
+        }
+    }
+}
+
 static int load_block(vae_context *vae, int index, char *error,
                       size_t error_size) {
     vae_block *block = &vae->blocks[index];
@@ -264,21 +334,25 @@ static int load_block(vae_context *vae, int index, char *error,
     if (!block->field) return 0;                                                \
 } while (0)
     F1(norm1, "norm1.weight", HIDDEN);
-    F2(qkv_w, "attn.to_qkv.weight", INNER * 3, HIDDEN);
     F1(qkv_b, "attn.to_qkv.bias", INNER * 3);
-    F2(out_w, "attn.to_out.weight", HIDDEN, INNER);
     F1(out_b, "attn.to_out.bias", HIDDEN);
     F1(scale1, "scale1", HIDDEN);
     F1(norm2, "norm2.weight", HIDDEN);
-    F2(w1, "ff.w1.weight", FFN * 2, HIDDEN);
     F1(w1_b, "ff.w1.bias", FFN * 2);
-    F2(w2, "ff.w2.weight", HIDDEN, FFN);
     F1(w2_b, "ff.w2.bias", HIDDEN);
     F1(scale2, "scale2", HIDDEN);
+    if (vae->cache_path) return read_cached_block(vae, index, error,
+                                                  error_size);
+    F2(qkv_w, "attn.to_qkv.weight", INNER * 3, HIDDEN);
+    F2(out_w, "attn.to_out.weight", HIDDEN, INNER);
+    F2(w1, "ff.w1.weight", FFN * 2, HIDDEN);
+    F2(w2, "ff.w2.weight", HIDDEN, FFN);
 #undef F1
 #undef F2
-    return vae->precision == VAE_F32 || lower_block(vae, block, error,
-                                                     error_size);
+    if (vae->precision == VAE_F32) return 1;
+    if (!lower_block(vae, block, error, error_size)) return 0;
+    if (vae->cache_out) append_cached_block(vae, block);
+    return 1;
 }
 
 static int load_input_weights(vae_context *vae, char *error,
@@ -670,16 +744,147 @@ static int run_decoder(vae_context *vae, h3_video_vae_progress progress,
     return 1;
 }
 
+static int cache_is_valid(const char *path, const uint8_t fingerprint[32]) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    vae_cache_header header;
+    int ok = fread(&header, sizeof(header), 1, file) == 1 &&
+             !memcmp(header.magic, VAE_CACHE_MAGIC, sizeof(header.magic)) &&
+             header.layers == LAYERS &&
+             !memcmp(header.fingerprint, fingerprint, 32) &&
+             !fseeko(file, 0, SEEK_END) &&
+             ftello(file) == (off_t)(sizeof(header) +
+                                     (size_t)LAYERS * cache_block_bytes());
+    fclose(file);
+    return ok;
+}
+
+static char *cache_temp_path(const char *path) {
+    size_t size = strlen(path) + 32;
+    char *temp = malloc(size);
+    if (temp) snprintf(temp, size, "%s.tmp.%d", path, (int)getpid());
+    return temp;
+}
+
+static int is_safetensors(const struct dirent *entry) {
+    size_t length = strlen(entry->d_name);
+    return length > 12 && !strcmp(entry->d_name + length - 12,
+                                  ".safetensors");
+}
+
+/* Cheap staleness check, not a content hash: FNV-1a over the resolved
+ * directory and each shard's name, size and mtime. */
+static void weight_fingerprint(const char *directory, uint8_t out[32]) {
+    uint64_t hash = 1469598103934665603ULL;
+#define MIX(data, length) do {                                                  \
+    const uint8_t *bytes = (const uint8_t *)(data);                             \
+    for (size_t at = 0; at < (size_t)(length); at++) {                          \
+        hash ^= bytes[at];                                                      \
+        hash *= 1099511628211ULL;                                               \
+    }                                                                           \
+} while (0)
+    MIX(directory, strlen(directory));
+    struct dirent **entries = NULL;
+    int count = scandir(directory, &entries, is_safetensors, alphasort);
+    for (int index = 0; index < count; index++) {
+        char path[2048];
+        struct stat info;
+        snprintf(path, sizeof(path), "%s/%s", directory,
+                 entries[index]->d_name);
+        if (!stat(path, &info)) {
+            int64_t fields[] = {(int64_t)info.st_size,
+                                (int64_t)info.st_mtimespec.tv_sec,
+                                (int64_t)info.st_mtimespec.tv_nsec};
+            MIX(entries[index]->d_name, strlen(entries[index]->d_name));
+            MIX(fields, sizeof(fields));
+        }
+        free(entries[index]);
+    }
+    free(entries);
+#undef MIX
+    memset(out, 0, 32);
+    memcpy(out, &hash, sizeof(hash));
+}
+
+/* Open through the resolved path so linked model directories (for example a
+ * folded-LoRA checkpoint linking back to video_vae) share one VAE cache. */
+static h3_weight_store *open_weights(vae_context *vae, const char *directory,
+                                     char *error, size_t error_size) {
+    char *resolved = realpath(directory, NULL);
+    snprintf(vae->weight_path, sizeof(vae->weight_path), "%s",
+             resolved ? resolved : directory);
+    free(resolved);
+    return h3_weight_store_open(vae->weight_path, error, error_size);
+}
+
+/* Choose between reading a valid cache and writing a fresh one. */
+static void open_vae_cache(vae_context *vae, char **temp_path) {
+    const char *directory = getenv("H3_VAE_CACHE");
+    *temp_path = NULL;
+    if (!directory || !*directory || vae->precision != VAE_BF16) return;
+    vae_cache_header header;
+    memset(&header, 0, sizeof(header));
+    memcpy(header.magic, VAE_CACHE_MAGIC, sizeof(header.magic));
+    header.layers = LAYERS;
+    weight_fingerprint(vae->weight_path, header.fingerprint);
+    /* One file per weight set, named by its fingerprint. */
+    snprintf(vae->cache_file, sizeof(vae->cache_file),
+             "%s/video-vae-bf16-%02x%02x%02x%02x%02x%02x%02x%02x.cache",
+             directory, header.fingerprint[0], header.fingerprint[1],
+             header.fingerprint[2], header.fingerprint[3],
+             header.fingerprint[4], header.fingerprint[5],
+             header.fingerprint[6], header.fingerprint[7]);
+    const char *path = vae->cache_file;
+    if (cache_is_valid(path, header.fingerprint)) {
+        vae->cache_path = path;
+        fprintf(stderr, "h3: video VAE BF16 cache hit %s\n", path);
+        return;
+    }
+    *temp_path = cache_temp_path(path);
+    vae->cache_host = malloc(LOWP_ELEMENTS[LP_W1] * sizeof(uint16_t));
+    vae->cache_out = *temp_path && vae->cache_host ?
+        fopen(*temp_path, "wb") : NULL;
+    if (vae->cache_out &&
+        fwrite(&header, sizeof(header), 1, vae->cache_out) != 1) {
+        fclose(vae->cache_out);
+        vae->cache_out = NULL;
+    }
+    if (!vae->cache_out)
+        fprintf(stderr, "h3: warning: cannot create video VAE cache %s\n",
+                path);
+}
+
+static void close_vae_cache(vae_context *vae, char *temp_path, int ok) {
+    const char *path = vae->cache_file;
+    if (vae->cache_out) {
+        int written = !fclose(vae->cache_out) && ok;
+        vae->cache_out = NULL;
+        if (written && !rename(temp_path, path))
+            fprintf(stderr, "h3: video VAE BF16 cache written %s\n", path);
+        else
+            fprintf(stderr, "h3: warning: video VAE cache not written\n");
+    }
+    if (temp_path) unlink(temp_path);
+    free(temp_path);
+    free(vae->cache_host);
+    vae->cache_host = NULL;
+    vae->cache_path = NULL;
+}
+
 static int load_resident_weights(vae_context *vae,
                                  h3_video_vae_progress progress,
                                  void *progress_opaque, char *error,
                                  size_t error_size) {
-    if (!load_input_weights(vae, error, error_size)) return 0;
-    for (int index = 0; index < LAYERS; index++) {
-        if (!load_block(vae, index, error, error_size)) return 0;
-        if (progress) progress(index + 1, LAYERS, progress_opaque);
+    char *temp_path = NULL;
+    open_vae_cache(vae, &temp_path);
+    int ok = load_input_weights(vae, error, error_size);
+    for (int index = 0; ok && index < LAYERS; index++) {
+        ok = load_block(vae, index, error, error_size);
+        if (ok && progress) progress(index + 1, LAYERS, progress_opaque);
     }
-    return load_output_weights(vae, error, error_size);
+    ok = ok && load_output_weights(vae, error, error_size);
+    close_vae_cache(vae, temp_path, ok);
+    return ok;
 }
 
 /* Tiled decoding keeps every VAE weight resident for the duration of the phase.
@@ -1086,13 +1291,13 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
         vae->patches = (uint32_t)(CHUNK_LATENT_TIME * vae->latent_h *
                                   vae->latent_w);
         vae->sequence = vae->patches + SUFFIX;
-        vae->weights = h3_weight_store_open(weight_directory,
-                                             error, error_size);
+        vae->weights = open_weights(vae, weight_directory, error,
+                                    error_size);
         if (vae->weights)
             vae->gpu = h3_gpu_create(shader_source_path, error, error_size);
         if (vae->gpu) vae->precision = configured_precision(vae->gpu);
-    if (vae->gpu) vae->bf16_attention = vae->precision != VAE_F32 &&
-        !getenv("H3_VAE_F32_ATTENTION");
+        if (vae->gpu) vae->bf16_attention = vae->precision != VAE_F32 &&
+            !getenv("H3_VAE_F32_ATTENTION");
         if (vae->gpu)
             h3_gpu_profile_set_label(vae->gpu, "resident video VAE decoder");
         ok = vae->weights && vae->gpu &&
@@ -1235,7 +1440,7 @@ static int decode_chunked(const char *weight_directory,
     vae.output_frames = FIRST_CHUNK_FRAMES;
     vae.patches = (uint32_t)(CHUNK_LATENT_TIME * vae.latent_h * vae.latent_w);
     vae.sequence = vae.patches + SUFFIX;
-    vae.weights = h3_weight_store_open(weight_directory, error, error_size);
+    vae.weights = open_weights(&vae, weight_directory, error, error_size);
     if (vae.weights)
         vae.gpu = h3_gpu_create(shader_source_path, error, error_size);
     if (vae.gpu) vae.precision = configured_precision(vae.gpu);
@@ -1394,7 +1599,7 @@ int h3_video_vae_decode(const char *weight_directory,
         if (!ok) h3_video_frames_free(output);
         return ok;
     }
-    vae.weights = h3_weight_store_open(weight_directory, error, error_size);
+    vae.weights = open_weights(&vae, weight_directory, error, error_size);
     if (!vae.weights) return 0;
     vae.gpu = h3_gpu_create(shader_source_path, error, error_size);
     if (vae.gpu) vae.precision = configured_precision(vae.gpu);

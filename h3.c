@@ -13,6 +13,7 @@
 #include "h3_vision_encoder.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -718,6 +719,26 @@ static h3_video_vae_decoder *h3_acquire_video_decoder(
     return decoder;
 }
 
+/* H3_VAE_PREFETCH=1: load the resident video VAE decoder on a second thread
+ * while the DiT denoises, so its weight read overlaps GPU work instead of
+ * following it. The decoder is handed to the normal decoder cache after the
+ * denoise; on any failure the serial load below runs as before. */
+typedef struct {
+    const char *weight_directory;
+    int latent_h;
+    int latent_w;
+    h3_video_vae_decoder *decoder;
+    char error[512];
+} h3_vae_prefetch;
+
+static void *h3_vae_prefetch_run(void *opaque) {
+    h3_vae_prefetch *job = opaque;
+    job->decoder = h3_video_vae_decoder_load(
+        job->weight_directory, "h3_shaders.metal", job->latent_h,
+        job->latent_w, NULL, NULL, job->error, sizeof(job->error));
+    return NULL;
+}
+
 static void h3_vision_progress_bridge(int completed, int total, void *opaque) {
     h3_progress_emit(opaque, "Qwen vision", completed, total);
 }
@@ -902,6 +923,10 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     memset(&layout, 0, sizeof(layout));
     h3_dit *dit = NULL;
     h3_video_vae_decoder *preview_decoder = NULL;
+    h3_vae_prefetch prefetch;
+    memset(&prefetch, 0, sizeof(prefetch));
+    pthread_t prefetch_thread;
+    int prefetching = 0;
     h3_live_preview live_preview;
     memset(&live_preview, 0, sizeof(live_preview));
     float *video = NULL, *audio = NULL;
@@ -1573,12 +1598,31 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_rng_seed(&audio_rng, params->seed);
     h3_rng_fill_normal(&video_rng, video, video_count);
     h3_rng_fill_normal(&audio_rng, audio, audio_count);
-    if (!h3_dit_denoise_euler_preview(
+    const char *prefetch_flag = getenv("H3_VAE_PREFETCH");
+    if (!preview_decoder && prefetch_flag &&
+        *prefetch_flag && strcmp(prefetch_flag, "0") &&
+        !(ctx->video_decoder && ctx->video_decoder_key &&
+          !strcmp(ctx->video_decoder_key, decoder_key))) {
+        prefetch.weight_directory = vae_path;
+        prefetch.latent_h = latent_h;
+        prefetch.latent_w = latent_w;
+        prefetching = !pthread_create(&prefetch_thread, NULL,
+                                      h3_vae_prefetch_run, &prefetch);
+    }
+    int denoise_ok = h3_dit_denoise_euler_preview(
             dit, video, audio, params->denoise_reuse,
             h3_dit_progress_bridge, &progress,
             preview_decoder ? h3_deliver_denoise_preview : NULL,
             preview_decoder ? &live_preview : NULL,
-            detail, sizeof(detail))) {
+            detail, sizeof(detail));
+    if (prefetching) {
+        pthread_join(prefetch_thread, NULL);
+        prefetching = 0;
+        if (!prefetch.decoder)
+            fprintf(stderr, "h3: warning: video VAE prefetch failed: %s\n",
+                    prefetch.error);
+    }
+    if (!denoise_ok) {
         if (!live_preview.failed) h3_set_error(ctx, "%s", detail);
         if (dit_is_cached) {
             ctx->dit = NULL;
@@ -1614,6 +1658,26 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     free(audio);
     audio = NULL;
     if (progress.cancelled) goto cleanup;
+    if (!preview_decoder && !ctx->cache_enabled && prefetch.decoder) {
+        /* Single-shot run: use the prefetched decoder once, freed below. */
+        preview_decoder = prefetch.decoder;
+        decoder_is_cached = 0;
+        prefetch.decoder = NULL;
+        fprintf(stderr, "h3: video VAE prefetched during denoise\n");
+    }
+    if (!preview_decoder && ctx->cache_enabled && prefetch.decoder) {
+        char *key_copy = strdup(decoder_key);
+        if (key_copy) {
+            h3_video_vae_decoder_free(ctx->video_decoder);
+            free(ctx->video_decoder_key);
+            ctx->video_decoder = prefetch.decoder;
+            ctx->video_decoder_key = key_copy;
+            preview_decoder = prefetch.decoder;
+            decoder_is_cached = 1;
+            prefetch.decoder = NULL;
+            fprintf(stderr, "h3: video VAE prefetched during denoise\n");
+        }
+    }
     if (!preview_decoder && ctx->cache_enabled) {
         h3_progress_emit(&progress, "video VAE load", 0, 36);
         preview_decoder = h3_acquire_video_decoder(
@@ -1733,6 +1797,8 @@ cleanup:
     h3_layout_free(&layout);
     if (!dit_is_cached) h3_dit_free(dit);
     if (!decoder_is_cached) h3_video_vae_decoder_free(preview_decoder);
+    if (prefetching) pthread_join(prefetch_thread, NULL);
+    h3_video_vae_decoder_free(prefetch.decoder);
     free(video); free(audio); free(rgb8);
     h3_video_frames_free(&frames);
     h3_audio_waveform_free(&waveform);

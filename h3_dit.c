@@ -563,7 +563,7 @@ static int configure_sparse_attention(h3_dit *dit, char *error,
         fail(error, error_size, "H3_SPARSE_START must not exceed H3_SPARSE_END");
         return 0;
     }
-    double shift = h3_video_sigma_shift();
+    double shift = H3_VIDEO_SIGMA_SHIFT;
     double high = 1.0 - start, low = 1.0 - end;
     dit->sparse_sigma_high =
         (float)(shift * high / (1.0 + (shift - 1.0) * high));

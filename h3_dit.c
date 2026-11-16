@@ -3,6 +3,7 @@
 #include "h3_dit_schedule.h"
 #include "h3_weights.h"
 
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -10,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 enum {
     TEXT_DIM = 5120,
@@ -78,6 +81,11 @@ struct h3_dit {
     int int8_attention_out;
     int keep_bf16_qkv;
     int keep_bf16_attention_out;
+    FILE *int8_cache;       /* per-fold int8 core file, read or written by load_core */
+    int int8_cache_loading;
+    char *int8_cache_path;   /* final cache file; a write lands in int8_cache_temp first */
+    char *int8_cache_temp;
+    const char *weight_directory;  /* set by load_dit; valid during load only */
     int use_slower_row_major_attention_output;
     int use_slower_unfused_int8_inputs;
     int use_slower_unfused_qkv_rope;
@@ -1238,8 +1246,227 @@ static void configure_gate_ranked_blocks(h3_dit *dit) {
     }
 }
 
+/* Per-fold int8 core cache. The int8 weights and f32 scales that quantize_block_* build from the
+ * BF16 checkpoint are fixed per checkpoint, so H3_DIT_INT8_CACHE=<file> writes them once and reads
+ * them on later loads. A file is used only when its header matches this weight directory, the
+ * dimensions and the active blocks, and it is marked complete. */
+#define INT8_CACHE_MAGIC 0x48334938u /* "H3I8" */
+#define INT8_CACHE_VERSION 2u
+#define INT8_CACHE_PATH_BYTES 1024u
+
+typedef struct {
+    uint32_t magic, version, hidden, inner, ffn, blocks;
+    uint64_t active_mask;
+    uint64_t weights_stamp;
+    uint32_t complete;
+    char weight_directory[INT8_CACHE_PATH_BYTES];
+} int8_cache_header;
+
+static uint64_t int8_cache_fnv(uint64_t hash, const void *data, size_t bytes) {
+    const unsigned char *in = data;
+    for (size_t index = 0; index < bytes; index++) {
+        hash ^= in[index];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/* Fingerprint of every safetensors shard in the directory (name, size, mtime). Shards are summed,
+ * so the result does not depend on readdir order. A replaced shard changes the stamp. */
+static int int8_cache_weights_stamp(const char *directory, uint64_t *stamp) {
+    DIR *dir = opendir(directory);
+    if (!dir) return 0;
+    const char suffix[] = ".safetensors";
+    size_t suffix_length = sizeof(suffix) - 1;
+    uint64_t sum = 0;
+    int ok = 1;
+    for (struct dirent *entry; ok && (entry = readdir(dir));) {
+        size_t length = strlen(entry->d_name);
+        if (length <= suffix_length ||
+            strcmp(entry->d_name + length - suffix_length, suffix) != 0)
+            continue;
+        size_t path_bytes = strlen(directory) + length + 2;
+        char *path = malloc(path_bytes);
+        struct stat info;
+        ok = path != NULL;
+        if (ok) {
+            snprintf(path, path_bytes, "%s/%s", directory, entry->d_name);
+            ok = stat(path, &info) == 0;
+        }
+        free(path);
+        if (!ok) break;
+        uint64_t hash = 1469598103934665603ull;
+        hash = int8_cache_fnv(hash, entry->d_name, length);
+        hash = int8_cache_fnv(hash, &info.st_size, sizeof(info.st_size));
+        hash = int8_cache_fnv(hash, &info.st_mtimespec.tv_sec,
+                              sizeof(info.st_mtimespec.tv_sec));
+        hash = int8_cache_fnv(hash, &info.st_mtimespec.tv_nsec,
+                              sizeof(info.st_mtimespec.tv_nsec));
+        sum += hash;
+    }
+    closedir(dir);
+    if (ok) *stamp = sum;
+    return ok;
+}
+
+/* A complete file holds exactly its header plus one record per active block. */
+static int int8_cache_size_ok(FILE *file, uint64_t active_mask) {
+    size_t blocks = 0;
+    for (unsigned index = 0; index < H3_DIT_BLOCKS; index++)
+        blocks += (size_t)((active_mask >> index) & 1u);
+    size_t per_block = (size_t)2 * FFN * HIDDEN + (size_t)HIDDEN * FFN +
+                       (size_t)3 * INNER * HIDDEN + (size_t)HIDDEN * INNER +
+                       ((size_t)2 * FFN + HIDDEN + (size_t)3 * INNER + HIDDEN) * sizeof(float);
+    if (fseek(file, 0, SEEK_END) != 0) return 0;
+    long end = ftell(file);
+    if (fseek(file, (long)sizeof(int8_cache_header), SEEK_SET) != 0) return 0;
+    return end >= 0 && (size_t)end == sizeof(int8_cache_header) + blocks * per_block;
+}
+
+static int path_ends_with(const char *path, const char *suffix) {
+    size_t path_length = strlen(path);
+    size_t suffix_length = strlen(suffix);
+    return path_length >= suffix_length &&
+           !strcmp(path + path_length - suffix_length, suffix);
+}
+
+/* The cache is an optional side file: every failure here leaves dit->int8_cache NULL, so the
+ * load continues uncached. The file is <base>.<pipeline>.<active mask hex>, so Ref2VA and FL2VA
+ * and different block masks never share one. Caller guarantees weight_directory fits
+ * INT8_CACHE_PATH_BYTES. */
+static void int8_cache_open(h3_dit *dit, const char *base) {
+    const char *tag = NULL;
+    if (path_ends_with(dit->weight_directory, "Ref2VA/transformer")) tag = "ref2va";
+    else if (path_ends_with(dit->weight_directory, "FL2VA/transformer")) tag = "fl2va";
+    if (!tag) return;
+
+    int8_cache_header want;
+    memset(&want, 0, sizeof(want));
+    want.magic = INT8_CACHE_MAGIC;
+    want.version = INT8_CACHE_VERSION;
+    want.hidden = HIDDEN;
+    want.inner = INNER;
+    want.ffn = FFN;
+    want.blocks = H3_DIT_BLOCKS;
+    for (unsigned index = 0; index < H3_DIT_BLOCKS; index++)
+        if (dit->block_active[index]) want.active_mask |= 1ull << index;
+    if (!int8_cache_weights_stamp(dit->weight_directory, &want.weights_stamp)) return;
+    strcpy(want.weight_directory, dit->weight_directory);
+
+    size_t path_bytes = strlen(base) + 64;
+    dit->int8_cache_path = malloc(path_bytes);
+    dit->int8_cache_temp = malloc(path_bytes + 32);
+    if (!dit->int8_cache_path || !dit->int8_cache_temp) return;
+    snprintf(dit->int8_cache_path, path_bytes, "%s.%s.%llx", base, tag,
+             (unsigned long long)want.active_mask);
+    snprintf(dit->int8_cache_temp, path_bytes + 32, "%s.%ld.tmp", dit->int8_cache_path,
+             (long)getpid());
+
+    int8_cache_header have;
+    FILE *file = fopen(dit->int8_cache_path, "rb");
+    if (file && fread(&have, sizeof(have), 1, file) == 1 &&
+        memcmp(&have, &want, offsetof(int8_cache_header, complete)) == 0 &&
+        have.complete == 1 &&
+        strcmp(have.weight_directory, want.weight_directory) == 0 &&
+        int8_cache_size_ok(file, have.active_mask)) {
+        dit->int8_cache = file;
+        dit->int8_cache_loading = 1;
+        return;
+    }
+    if (file) fclose(file);
+    file = fopen(dit->int8_cache_temp, "wb");
+    if (!file) return;
+    if (fwrite(&want, sizeof(want), 1, file) != 1) {
+        fclose(file);
+        unlink(dit->int8_cache_temp);
+        return;
+    }
+    dit->int8_cache = file;
+    dit->int8_cache_loading = 0;
+}
+
+/* Gives up on the cache for this load. A read failure removes the bad file so the next load
+ * rebuilds it; a write failure removes the partial temp file. */
+static void int8_cache_drop(h3_dit *dit) {
+    if (!dit->int8_cache) return;
+    fclose(dit->int8_cache);
+    dit->int8_cache = NULL;
+    unlink(dit->int8_cache_loading ? dit->int8_cache_path : dit->int8_cache_temp);
+    dit->int8_cache_loading = 0;
+}
+
+static void int8_cache_finish(h3_dit *dit) {
+    if (!dit->int8_cache) return;
+    if (dit->int8_cache_loading) {
+        fclose(dit->int8_cache);
+        dit->int8_cache = NULL;
+        return;
+    }
+    uint32_t complete = 1;
+    int ok = fseek(dit->int8_cache, (long)offsetof(int8_cache_header, complete),
+                   SEEK_SET) == 0 &&
+             fwrite(&complete, sizeof(complete), 1, dit->int8_cache) == 1;
+    ok = fclose(dit->int8_cache) == 0 && ok;
+    dit->int8_cache = NULL;
+    if (ok) ok = rename(dit->int8_cache_temp, dit->int8_cache_path) == 0;
+    if (!ok) unlink(dit->int8_cache_temp);
+}
+
+/* Writes one block's int8 weights and scales, or reads them back and allocates the GPU tensors. */
+static int int8_cache_block(h3_dit *dit, h3_dit_block *block, int loading) {
+    struct { h3_gpu_tensor **data, **scales; size_t bytes, scale_count; } parts[4] = {
+        {&block->fc1_int8, &block->fc1_scales, 2u * FFN * HIDDEN, FFN * 2u},
+        {&block->fc2_int8, &block->fc2_scales, (size_t)HIDDEN * FFN, HIDDEN},
+        {&block->qkv_int8, &block->qkv_scales, (size_t)3 * INNER * HIDDEN, 3u * INNER},
+        {&block->out_int8, &block->out_scales, (size_t)HIDDEN * INNER, HIDDEN},
+    };
+    int8_t *bytes = malloc(2u * FFN * HIDDEN);
+    float *scales = malloc(FFN * 2u * sizeof(float));
+    int ok = bytes && scales;
+    for (unsigned part = 0; ok && part < 4; part++) {
+        if (loading) {
+            *parts[part].data = h3_gpu_tensor_new_i8(dit->gpu, parts[part].bytes);
+            *parts[part].scales = h3_gpu_tensor_new_f32(dit->gpu, parts[part].scale_count);
+            ok = *parts[part].data && *parts[part].scales &&
+                 fread(bytes, 1, parts[part].bytes, dit->int8_cache) == parts[part].bytes &&
+                 fread(scales, sizeof(float), parts[part].scale_count, dit->int8_cache) ==
+                     parts[part].scale_count &&
+                 h3_gpu_tensor_write_i8(*parts[part].data, bytes, parts[part].bytes) &&
+                 h3_gpu_tensor_write_f32(*parts[part].scales, scales, parts[part].scale_count);
+        } else {
+            ok = *parts[part].data && *parts[part].scales &&
+                 h3_gpu_tensor_read_i8(*parts[part].data, bytes, parts[part].bytes) &&
+                 h3_gpu_tensor_read_f32(*parts[part].scales, scales, parts[part].scale_count) &&
+                 fwrite(bytes, 1, parts[part].bytes, dit->int8_cache) == parts[part].bytes &&
+                 fwrite(scales, sizeof(float), parts[part].scale_count, dit->int8_cache) ==
+                     parts[part].scale_count;
+        }
+    }
+    free(bytes);
+    free(scales);
+    return ok;
+}
+
+static int load_block_uncached(h3_dit *dit, h3_dit_block *block, const char *prefix,
+                               char *error, size_t error_size) {
+    if (!load_block(dit, block, prefix, error, error_size)) return 0;
+    if (dit->int8_mlp &&
+        !quantize_block_mlp(dit, block, error, error_size)) return 0;
+    if (dit->int8_qkv &&
+        !quantize_block_qkv(dit, block, error, error_size)) return 0;
+    if (dit->int8_attention_out &&
+        !quantize_block_attention_out(dit, block, error, error_size)) return 0;
+    return 1;
+}
+
 static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                      char *error, size_t error_size) {
+    const char *cache_base = getenv("H3_DIT_INT8_CACHE");
+    if (cache_base && *cache_base && !dit->ssd_streaming &&
+        dit->int8_mlp && dit->int8_qkv && dit->int8_attention_out &&
+        !dit->keep_bf16_mlp && !dit->keep_bf16_qkv && !dit->keep_bf16_attention_out &&
+        dit->weight_directory && strlen(dit->weight_directory) < INT8_CACHE_PATH_BYTES)
+        int8_cache_open(dit, cache_base);
     for (unsigned index = 0; index < H3_DIT_BLOCKS; index++) {
         if (!dit->block_active[index]) {
             report(progress, opaque, "load transformer core", (int)index + 1,
@@ -1254,21 +1481,27 @@ static int load_core(h3_dit *dit, h3_dit_progress progress, void *opaque,
                 !prepare_stream_layer(dit, index, error, error_size))
                 return 0;
         } else {
-            if (!load_block(dit, &dit->blocks[index], prefix,
-                            error, error_size)) return 0;
-            if (dit->int8_mlp &&
-                !quantize_block_mlp(dit, &dit->blocks[index],
-                                    error, error_size)) return 0;
-            if (dit->int8_qkv &&
-                !quantize_block_qkv(dit, &dit->blocks[index],
-                                    error, error_size)) return 0;
-            if (dit->int8_attention_out &&
-                !quantize_block_attention_out(
-                    dit, &dit->blocks[index], error, error_size)) return 0;
+            int cached = 0;
+            if (dit->int8_cache && dit->int8_cache_loading) {
+                if (!load_block_norms(dit, &dit->blocks[index], prefix,
+                                      error, error_size)) return 0;
+                cached = int8_cache_block(dit, &dit->blocks[index], 1);
+                if (!cached) {  /* unreadable cache is a miss: rebuild this block uncached */
+                    int8_cache_drop(dit);
+                    free_block(&dit->blocks[index]);
+                }
+            }
+            if (!cached) {
+                if (!load_block_uncached(dit, &dit->blocks[index], prefix,
+                                         error, error_size)) return 0;
+                if (dit->int8_cache && !int8_cache_block(dit, &dit->blocks[index], 0))
+                    int8_cache_drop(dit);
+            }
         }
         report(progress, opaque, "load transformer core", (int)index + 1,
                H3_DIT_BLOCKS);
     }
+    int8_cache_finish(dit);
     if (dit->ssd_streaming) {
         if (!allocate_stream_slot(dit, &dit->stream_slots[0],
                                   error, error_size) ||
@@ -1594,6 +1827,7 @@ static h3_dit *load_dit(const char *weight_directory,
         return NULL;
     }
     h3_dit *dit = calloc(1, sizeof(*dit));
+    if (dit) dit->weight_directory = weight_directory;
     if (!dit) {
         fail(error, error_size, "out of memory creating DiT model");
         return NULL;
@@ -2994,6 +3228,12 @@ int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
 
 void h3_dit_free(h3_dit *dit) {
     if (!dit) return;
+    if (dit->int8_cache) {  /* a load that failed mid-cache */
+        fclose(dit->int8_cache);
+        if (!dit->int8_cache_loading) unlink(dit->int8_cache_temp);
+    }
+    free(dit->int8_cache_path);
+    free(dit->int8_cache_temp);
     int steps = h3_dit_schedule_steps(dit->schedule);
     if (dit->row_maps) for (int step = 0; step < steps; step++)
         h3_gpu_tensor_free(dit->row_maps[step]);

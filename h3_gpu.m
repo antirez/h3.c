@@ -136,6 +136,7 @@ typedef struct {
 } h3_attn_tiled_variant;
 
 static const h3_attn_tiled_variant h3_attn_tiled_variants[] = {
+    {"h3_attn_tiled_bf16_tgq_r16s8k32", 16, 8},
     {"h3_attn_tiled_bf16_tg_r16s16k32", 16, 16},
     {"h3_attn_tiled_bf16_r16s4k64", 16, 4},
     {"h3_attn_tiled_bf16_r16s4k32", 16, 4},
@@ -154,7 +155,6 @@ static const h3_attn_tiled_variant h3_attn_tiled_variants[] = {
     {"h3_attn_tiled_bf16_tgqd_r16s16k32", 16, 16},
     {"h3_attn_tiled_bf16_tgqd_r16s32k32", 16, 32},
     {"h3_attn_tiled_bf16_tgq_r16s32k32", 16, 32},
-    {"h3_attn_tiled_bf16_tgq_r16s8k32", 16, 8},
     {"h3_attn_tiled_bf16_tgq_r16s16k64", 16, 16},
     {"h3_attn_tiled_bf16_tgq_r16s16k16", 16, 16},
     {"h3_attn_tiled_bf16_tgq_r16s32k16", 16, 32},

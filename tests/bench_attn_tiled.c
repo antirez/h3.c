@@ -178,8 +178,17 @@ int main(int argc, char **argv) {
                 tiled_times[rep] = run(gpu, 1, 0, out_tiled, q, k, v, seq);
                 graph_times[rep] = run(gpu, 0, 0, out_ref, q, k, v, seq);
             }
+            double ratios[MAX_REPS];
+            for (int rep = 0; rep < reps; rep++)
+                ratios[rep] = tiled_times[rep] / graph_times[rep];
+            double ratio = median(ratios, reps);
             double tiled = median(tiled_times, reps);
             double graph = median(graph_times, reps);
+            printf("seq=%u ratio per-rep median=%.3f min=%.3f max=%.3f "
+                   "tiled min/max=%.4f/%.4f mpsgraph min/max=%.4f/%.4f\n",
+                   seq, ratio, ratios[0], ratios[reps - 1], tiled_times[0],
+                   tiled_times[reps - 1], graph_times[0],
+                   graph_times[reps - 1]);
             double flops = 4.0 * seq * (double)seq * (double)HEADS *
                            (double)HEAD_DIM;
             printf("seq=%u time tiled=%.4fs (%.1f TFLOPS) mpsgraph=%.4fs "

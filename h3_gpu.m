@@ -120,6 +120,9 @@
 @property(nonatomic, strong) id<MTLBuffer> solSummaries;
 @property(nonatomic, strong) id<MTLBuffer> solRoutes;
 @property(nonatomic, strong) id<MTLBuffer> solCounts;
+@property(nonatomic, strong) id<MTLBuffer> solQK8;
+@property(nonatomic) BOOL solQKInt8Skip;
+@property(nonatomic, strong) id<MTLBuffer> solQKScales;
 @property(nonatomic) h3_gpu_stats profileStartStats;
 @property(nonatomic) h3_gpu_stats profileMarkStats;
 @property(nonatomic) double profileStartWall;
@@ -527,6 +530,8 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             [names addObject:@"h3_sol_key_stats"];
             [names addObject:@"h3_sol_route"];
             [names addObject:@"h3_attn_sparse_bf16_r16s8k32"];
+            [names addObject:@"h3_sol_quantize_qk8"];
+            [names addObject:@"h3_attn_sparse_qk8_r16s8k32"];
         }
         NSMutableDictionary *pipelines = [NSMutableDictionary dictionary];
         for (NSString *name in names) {
@@ -1786,10 +1791,18 @@ int h3_gpu_attention_sparse_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
         h3_gpu_pipeline(gpu, @"h3_sol_key_stats");
     id<MTLComputePipelineState> route_pipeline =
         h3_gpu_pipeline(gpu, @"h3_sol_route");
-    id<MTLComputePipelineState> attention_pipeline =
-        h3_gpu_pipeline(gpu, @"h3_attn_sparse_bf16_r16s8k32");
+    const char *qk_int8_env = getenv("H3_SOL_QK_INT8");
+    const BOOL qk_int8 = qk_int8_env && !strcmp(qk_int8_env, "1") &&
+                         !gpu.solQKInt8Skip;
+    gpu.solQKInt8Skip = NO;
+    id<MTLComputePipelineState> attention_pipeline = h3_gpu_pipeline(
+        gpu, qk_int8 ? @"h3_attn_sparse_qk8_r16s8k32" :
+                       @"h3_attn_sparse_bf16_r16s8k32");
+    id<MTLComputePipelineState> quantize_pipeline =
+        qk_int8 ? h3_gpu_pipeline(gpu, @"h3_sol_quantize_qk8") : nil;
     if (!summaries_pipeline || !stats_pipeline || !route_pipeline ||
-        !attention_pipeline || !h3_gpu_require_command(gpu)) return 0;
+        !attention_pipeline || (qk_int8 && !quantize_pipeline) ||
+        !h3_gpu_require_command(gpu)) return 0;
     size_t summary_floats = (size_t)3 * heads * blocks * 128 + (size_t)heads * 256;
     gpu.solSummaries = h3_gpu_sol_buffer(gpu, gpu.solSummaries,
                                          summary_floats * sizeof(float));
@@ -1799,6 +1812,13 @@ int h3_gpu_attention_sparse_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     gpu.solCounts = h3_gpu_sol_buffer(
         gpu, gpu.solCounts, (size_t)heads * tile_groups * sizeof(uint32_t));
     if (!gpu.solSummaries || !gpu.solRoutes || !gpu.solCounts) return 0;
+    if (qk_int8) {
+        gpu.solQK8 = h3_gpu_sol_buffer(gpu, gpu.solQK8,
+                                       2 * count + (size_t)heads * blocks * 128);
+        gpu.solQKScales = h3_gpu_sol_buffer(
+            gpu, gpu.solQKScales, (size_t)3 * heads * blocks * sizeof(float));
+        if (!gpu.solQK8 || !gpu.solQKScales) return 0;
+    }
     uint32_t tail = sequence % H3_SOL_BLOCK;
     struct {
         uint32_t sequence, in_row_stride, in_head_stride, heads, blocks;
@@ -1856,10 +1876,29 @@ int h3_gpu_attention_sparse_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [encoder endEncoding];
 
+        if (qk_int8) {
+            encoder = [gpu.command computeCommandEncoder];
+            [encoder setComputePipelineState:quantize_pipeline];
+            [encoder setBuffer:TENSOR(query).buffer offset:0 atIndex:0];
+            [encoder setBuffer:TENSOR(key).buffer offset:0 atIndex:1];
+            [encoder setBuffer:gpu.solSummaries offset:0 atIndex:2];
+            [encoder setBuffer:gpu.solQK8 offset:0 atIndex:3];
+            [encoder setBuffer:gpu.solQKScales offset:0 atIndex:4];
+            [encoder setBytes:&sol_args length:sizeof(sol_args) atIndex:5];
+            [encoder dispatchThreadgroups:MTLSizeMake(blocks, heads, 3)
+                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [encoder endEncoding];
+        }
+
         encoder = [gpu.command computeCommandEncoder];
         [encoder setComputePipelineState:attention_pipeline];
-        [encoder setBuffer:TENSOR(query).buffer offset:0 atIndex:0];
-        [encoder setBuffer:TENSOR(key).buffer offset:0 atIndex:1];
+        if (qk_int8) {
+            [encoder setBuffer:gpu.solQK8 offset:0 atIndex:0];
+            [encoder setBuffer:gpu.solQKScales offset:0 atIndex:8];
+        } else {
+            [encoder setBuffer:TENSOR(query).buffer offset:0 atIndex:0];
+            [encoder setBuffer:TENSOR(key).buffer offset:0 atIndex:1];
+        }
         [encoder setBuffer:TENSOR(value).buffer offset:0 atIndex:2];
         [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:3];
         [encoder setBytes:&attention_args length:sizeof(attention_args)
@@ -1872,9 +1911,13 @@ int h3_gpu_attention_sparse_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
         [encoder endEncoding];
     }
     h3_gpu_stats stats = gpu.stats;
-    stats.direct_dispatches += 4;
+    stats.direct_dispatches += qk_int8 ? 5 : 4;
     gpu.stats = stats;
     return 1;
+}
+
+void h3_gpu_set_sparse_qk_int8_skip(h3_gpu *opaque, int skip) {
+    if (opaque) GPU(opaque).solQKInt8Skip = skip ? YES : NO;
 }
 
 int h3_gpu_sparse_attention_read(const h3_gpu *opaque, uint32_t sequence,

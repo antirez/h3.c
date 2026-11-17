@@ -517,7 +517,9 @@ int h3_gpu_attention_tiled_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
  * core, same tensor contract as h3_gpu_attention_tiled_bf16. Rows before
  * sink_rows are exact keys for every query and dense query rows. tau sets
  * the routing threshold (mean + tau * std of the block scores, log2 domain);
- * unrouted key blocks are approximated by their key mean and value sum. */
+ * unrouted key blocks are approximated by their key mean and value sum.
+ * H3_SOL_QK_INT8=1 computes QK^T in int8 (per 64-token block scales, keys
+ * smoothed by their per-head mean); softmax stays fp32 and PV bf16. */
 int h3_gpu_attention_sparse_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                                  const h3_gpu_tensor *query,
                                  const h3_gpu_tensor *key,
@@ -526,6 +528,8 @@ int h3_gpu_attention_sparse_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                                  uint32_t head_dim, float scale,
                                  int output_head_major, uint32_t sink_rows,
                                  float tau);
+/* Keep the next sparse call on the bf16 QK^T kernel under H3_SOL_QK_INT8=1. */
+void h3_gpu_set_sparse_qk_int8_skip(h3_gpu *gpu, int skip);
 /* Query rows per routing unit (one attention threadgroup). */
 uint32_t h3_gpu_sparse_attention_tile_rows(void);
 /* After h3_gpu_submit: copy the last sparse call's fp32 summaries

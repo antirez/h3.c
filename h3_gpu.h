@@ -53,6 +53,8 @@ h3_gpu_tensor *h3_gpu_tensor_load_bf16(h3_gpu *gpu, const char *path,
                                        uint64_t file_offset, size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *gpu, const char *path,
                                       uint64_t file_offset, size_t elements);
+h3_gpu_tensor *h3_gpu_tensor_load_i8(h3_gpu *gpu, const char *path,
+                                     uint64_t file_offset, size_t elements);
 /* Fill an existing shared BF16 buffer from a file. The tensor and its
  * accounting are unchanged, so this may run on an I/O thread while another
  * tensor is in flight on the GPU. */
@@ -65,6 +67,11 @@ int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *tensor, const char *path,
 int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *tensor, const char *path,
                                    uint64_t file_offset, size_t elements,
                                    char *error, size_t error_size);
+/* Uncached stream of a whole tensor of any dtype (the packed INT8 SSD path
+ * streams I8 weights and their F32 row scales). */
+int h3_gpu_tensor_stream_file(h3_gpu_tensor *tensor, const char *path,
+                              uint64_t file_offset,
+                              char *error, size_t error_size);
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor);
 size_t h3_gpu_tensor_elements(const h3_gpu_tensor *tensor);
 h3_gpu_dtype h3_gpu_tensor_dtype(const h3_gpu_tensor *tensor);
@@ -75,6 +82,8 @@ int h3_gpu_tensor_read_f32_range(const h3_gpu_tensor *tensor,
                                  size_t elements);
 int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
                             size_t elements);
+int h3_gpu_tensor_read_i8(const h3_gpu_tensor *tensor, int8_t *values,
+                          size_t elements);
 int h3_gpu_tensor_write_f32(h3_gpu_tensor *tensor, const float *values,
                             size_t elements);
 int h3_gpu_tensor_write_f32_range(h3_gpu_tensor *tensor,

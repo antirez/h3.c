@@ -19,13 +19,17 @@ CLI_OBJ := main.o h3_cli.o linenoise.o
 
 .PHONY: all test parity real-parity clean
 
-all: h3 libh3.a
+all: h3 libh3.a h3_pack_int8
 
 h3: $(CLI_OBJ) $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 libh3.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
+
+# Packs a BF16 DiT into <variant>/transformer-int8 (see h3_pack_int8.c).
+h3_pack_int8: h3_pack_int8.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
 
 h3_tests: tests/test_h3.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
@@ -203,7 +207,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 -include $(wildcard *.d tests/*.d)
 
 clean:
-	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
+	rm -f h3 h3_pack_int8 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
 		h3_audio_gpu_tests h3_real_audio_vae_test h3_real_audio_encoder_test \
 		h3_av_mux_test \

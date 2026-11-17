@@ -1,16 +1,21 @@
 #include "h3_dit_schedule.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#define MIN_ROWS(a, b) ((a) < (b) ? (a) : (b))
 
 enum {
     TIME_INPUT = 256,
     TIME_HIDDEN = 5376,
-    BLOCK_OUTPUT = H3_DIT_MODALITIES * H3_DIT_ADALN_SLOTS * H3_DIT_HIDDEN,
-    FINAL_OUTPUT = 2 * H3_DIT_HIDDEN
+    BLOCK_OUTPUT = H3_DIT_ADALN_OUTPUT,
+    FINAL_OUTPUT = H3_DIT_FINAL_ADALN_OUTPUT
 };
 
 struct h3_dit_schedule {
@@ -78,7 +83,7 @@ static void free_tensor(h3_gpu_tensor **tensor) {
 static int prepare_rows(h3_dit_schedule *schedule,
                         const h3_sigma_schedule *sigmas,
                         int visual_condition, int audio_condition,
-                        float **features_out, char *error,
+                        float **times_out, char *error,
                         size_t error_size) {
     schedule->steps = sigmas->steps;
     schedule->video_rows = calloc((size_t)sigmas->steps,
@@ -132,19 +137,23 @@ static int prepare_rows(h3_dit_schedule *schedule,
         return 0;
     }
     float *times = calloc(count, sizeof(*times));
-    float *features = malloc((size_t)count * TIME_INPUT * sizeof(*features));
-    if (!times || !features) {
-        free(times);
-        free(features);
-        fail(error, error_size, "out of memory allocating timestep features");
+    if (!times) {
+        fail(error, error_size, "out of memory allocating timestep rows");
         return 0;
     }
     for (int step = 0; step < sigmas->steps; step++) {
         times[schedule->video_rows[step]] = 1.0f - sigmas->video[step];
         times[schedule->audio_rows[step]] = 1.0f - sigmas->audio[step];
     }
-    if (visual_condition) times[visual_condition_row] = 0.999f;
-    if (audio_condition) times[audio_condition_row] = 1.0f;
+    if (visual_condition) times[visual_condition_row] = H3_DIT_VISUAL_CONDITION_TIME;
+    if (audio_condition) times[audio_condition_row] = H3_DIT_AUDIO_CONDITION_TIME;
+    *times_out = times;
+    return 1;
+}
+
+static float *timestep_features(const float *times, uint32_t count) {
+    float *features = malloc((size_t)count * TIME_INPUT * sizeof(*features));
+    if (!features) return NULL;
     for (uint32_t row = 0; row < count; row++) {
         for (uint32_t index = 0; index < TIME_INPUT / 2; index++) {
             float frequency = expf(-logf(10000.0f) *
@@ -155,9 +164,7 @@ static int prepare_rows(h3_dit_schedule *schedule,
                 sinf(angle);
         }
     }
-    free(times);
-    *features_out = features;
-    return 1;
+    return features;
 }
 
 static h3_gpu_tensor *time_embeddings(const h3_weight_store *weights,
@@ -234,6 +241,204 @@ cleanup:
     return result;
 }
 
+/* Run the block and final AdaLN projections for every row of time. sink
+ * receives each finished table (index H3_DIT_BLOCKS is the final layer) and
+ * takes ownership of it. One projection is resident at a time, as before. */
+typedef h3_dit_schedule_table_sink table_sink;
+
+static int project_tables(const h3_weight_store *weights, h3_gpu *gpu,
+                          const h3_gpu_tensor *time, uint32_t rows,
+                          table_sink sink, void *sink_opaque,
+                          h3_dit_schedule_progress progress,
+                          void *progress_opaque,
+                          char *error, size_t error_size) {
+    for (unsigned block = 0; block <= H3_DIT_BLOCKS; block++) {
+        int final = block == H3_DIT_BLOCKS;
+        uint64_t width = final ? FINAL_OUTPUT : BLOCK_OUTPUT;
+        char weight_name[128], bias_name[128], operation[128];
+        if (final) {
+            snprintf(weight_name, sizeof(weight_name),
+                     "final_layer.adaln_proj.linear.weight");
+            snprintf(bias_name, sizeof(bias_name),
+                     "final_layer.adaln_proj.linear.bias");
+            snprintf(operation, sizeof(operation), "final AdaLN projection");
+        } else {
+            snprintf(weight_name, sizeof(weight_name),
+                     "blocks.%u.adaln_proj.linear.weight", block);
+            snprintf(bias_name, sizeof(bias_name),
+                     "blocks.%u.adaln_proj.linear.bias", block);
+            snprintf(operation, sizeof(operation), "AdaLN block %u", block);
+        }
+        h3_gpu_tensor *weight = weight_bf16_2d(
+            weights, gpu, weight_name, width, H3_DIT_TIME_DIM,
+            error, error_size);
+        h3_gpu_tensor *bias = weight_bf16_1d(
+            weights, gpu, bias_name, width, error, error_size);
+        h3_gpu_tensor *table = h3_gpu_tensor_new_bf16(
+            gpu, (size_t)rows * width);
+        if (!weight || !bias || !table) {
+            if (!error || !*error)
+                fail(error, error_size, "cannot allocate %s: %s", operation,
+                     h3_gpu_error(gpu));
+            free_tensor(&weight);
+            free_tensor(&bias);
+            free_tensor(&table);
+            return 0;
+        }
+        int ok = gpu_op(gpu, h3_gpu_begin(gpu), error, error_size, operation) &&
+            gpu_op(gpu, h3_gpu_linear_bf16(
+                gpu, table, time, weight, bias, rows, H3_DIT_TIME_DIM,
+                (uint32_t)width), error, error_size, operation) &&
+            gpu_op(gpu, h3_gpu_submit(gpu), error, error_size, operation);
+        free_tensor(&weight);
+        free_tensor(&bias);
+        if (!ok) {
+            free_tensor(&table);
+            return 0;
+        }
+        if (!sink(block, table, sink_opaque, error, error_size)) return 0;
+        if (progress && !final) progress((int)block + 1, (int)H3_DIT_BLOCKS,
+                                         progress_opaque);
+    }
+    return 1;
+}
+
+static int schedule_sink(unsigned index, h3_gpu_tensor *table, void *opaque,
+                         char *error, size_t error_size) {
+    (void)error;
+    (void)error_size;
+    h3_dit_schedule *schedule = opaque;
+    if (index == H3_DIT_BLOCKS) schedule->final = table;
+    else schedule->blocks[index] = table;
+    return 1;
+}
+
+/* Packed checkpoints drop the 24 GiB of AdaLN projections and keep only their
+ * output rows, one per timestep, in adaln_table.r<regime>.*. A row depends on
+ * its own timestep and on which kernels ran: h3_gpu_linear_f32/bf16 use direct
+ * tiles below 32 rows and MPS from 32 rows, and the two round differently. So
+ * the rows of each regime are computed in batches of that regime, and gathering
+ * the rows a schedule needs from its regime reproduces the tables computed
+ * above bit for bit (h3_pack_int8 --verify checks every schedule it covers). */
+enum { MPS_ROWS = 32 };
+
+unsigned h3_dit_schedule_table_regime(uint32_t rows) {
+    return rows >= MPS_ROWS ? 1u : 0u;
+}
+
+uint32_t h3_dit_schedule_regime_batch(unsigned regime) {
+    /* Any batch inside the regime selects the same kernels; 40 rows is the
+     * largest MPS batch the 20-step schedules use. */
+    return regime ? 40u : MPS_ROWS - 1u;
+}
+
+static int read_table_rows(const h3_weight_store *weights, const char *name,
+                           uint64_t width, uint64_t table_rows,
+                           const uint32_t *source_rows, uint32_t rows,
+                           h3_gpu_tensor *destination,
+                           char *error, size_t error_size) {
+    const h3_st_header *header = NULL;
+    const h3_st_tensor *tensor = h3_weight_find(weights, name, &header);
+    if (!tensor || !header || tensor->dtype != H3_DTYPE_BF16 ||
+        tensor->ndim != 2 || tensor->shape[0] != table_rows ||
+        tensor->shape[1] != width) {
+        fail(error, error_size, "packed AdaLN table %s is absent or malformed",
+             name);
+        return 0;
+    }
+    size_t row_bytes = (size_t)width * sizeof(uint16_t);
+    uint16_t *row = malloc(row_bytes);
+    int descriptor = row ? open(header->path, O_RDONLY | O_CLOEXEC) : -1;
+    if (descriptor < 0) {
+        free(row);
+        fail(error, error_size, "cannot open packed AdaLN table %s: %s",
+             header->path, strerror(errno));
+        return 0;
+    }
+    int ok = 1;
+    for (uint32_t index = 0; ok && index < rows; index++) {
+        off_t offset = (off_t)(tensor->file_offset +
+                               (uint64_t)source_rows[index] * row_bytes);
+        size_t completed = 0;
+        while (ok && completed < row_bytes) {
+            ssize_t count = pread(descriptor, (unsigned char *)row + completed,
+                                  row_bytes - completed,
+                                  offset + (off_t)completed);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) ok = 0;
+            else completed += (size_t)count;
+        }
+        if (ok) ok = h3_gpu_tensor_write_bf16_range(
+            destination, (size_t)index * width, row, (size_t)width);
+    }
+    close(descriptor);
+    free(row);
+    if (!ok) fail(error, error_size, "cannot read packed AdaLN table %s", name);
+    return ok;
+}
+
+static int restore_tables(h3_dit_schedule *schedule,
+                          const h3_weight_store *weights, const float *times,
+                          char *error, size_t error_size) {
+    const h3_st_header *header = NULL;
+    unsigned regime = h3_dit_schedule_table_regime(schedule->time_rows);
+    char name[64];
+    snprintf(name, sizeof(name), "adaln_table.r%u.times", regime);
+    const h3_st_tensor *tensor = h3_weight_find(weights, name, &header);
+    if (!tensor || !header || tensor->dtype != H3_DTYPE_F32 ||
+        tensor->ndim != 1 || !tensor->shape[0] ||
+        tensor->shape[0] > UINT32_MAX) {
+        fail(error, error_size, "packed AdaLN table %s is absent or malformed",
+             name);
+        return 0;
+    }
+    uint32_t table_rows = (uint32_t)tensor->shape[0];
+    float *table_times = malloc((size_t)table_rows * sizeof(*table_times));
+    uint32_t *source_rows = calloc(schedule->time_rows, sizeof(*source_rows));
+    int ok = table_times && source_rows &&
+        h3_st_read_data(header, tensor, table_times,
+                        (size_t)table_rows * sizeof(*table_times),
+                        error, error_size);
+    for (uint32_t row = 0; ok && row < schedule->time_rows; row++) {
+        uint32_t found = UINT32_MAX;
+        for (uint32_t index = 0; index < table_rows; index++)
+            if (!memcmp(&table_times[index], &times[row], sizeof(float))) {
+                found = index;
+                break;
+            }
+        if (found == UINT32_MAX) {
+            fail(error, error_size,
+                 "the packed DiT has no AdaLN row for timestep %.9g "
+                 "(%d steps); repack it with a larger --max-steps",
+                 (double)times[row], schedule->steps);
+            ok = 0;
+        }
+        source_rows[row] = found;
+    }
+    free(table_times);
+    for (unsigned block = 0; ok && block <= H3_DIT_BLOCKS; block++) {
+        int final = block == H3_DIT_BLOCKS;
+        uint64_t width = final ? FINAL_OUTPUT : BLOCK_OUTPUT;
+        if (final) snprintf(name, sizeof(name), "adaln_table.r%u.final", regime);
+        else snprintf(name, sizeof(name), "adaln_table.r%u.blocks.%u", regime,
+                      block);
+        h3_gpu_tensor *table = h3_gpu_tensor_new_bf16(
+            schedule->gpu, (size_t)schedule->time_rows * width);
+        if (!table) {
+            fail(error, error_size, "cannot allocate AdaLN table: %s",
+                 h3_gpu_error(schedule->gpu));
+            ok = 0;
+            break;
+        }
+        if (final) schedule->final = table;
+        else schedule->blocks[block] = table;
+        ok = read_table_rows(weights, name, width, table_rows, source_rows,
+                             schedule->time_rows, table, error, error_size);
+    }
+    free(source_rows);
+    return ok;
+}
+
 h3_dit_schedule *h3_dit_schedule_precompute(
     const h3_weight_store *weights, h3_gpu *gpu,
     const h3_sigma_schedule *sigmas, int visual_condition,
@@ -252,88 +457,153 @@ h3_dit_schedule *h3_dit_schedule_precompute(
         return NULL;
     }
     schedule->gpu = gpu;
+    float *times = NULL;
     float *features = NULL;
+    h3_gpu_tensor *time = NULL;
     if (!prepare_rows(schedule, sigmas, visual_condition, audio_condition,
-                      &features, error, error_size)) goto failed;
-    h3_gpu_tensor *time = time_embeddings(weights, gpu, schedule->time_rows,
-                                           features, error, error_size);
-    free(features);
-    features = NULL;
-    if (!time) goto failed;
-
-    for (unsigned block = 0; block < H3_DIT_BLOCKS; block++) {
-        char weight_name[128], bias_name[128], operation[128];
-        snprintf(weight_name, sizeof(weight_name),
-                 "blocks.%u.adaln_proj.linear.weight", block);
-        snprintf(bias_name, sizeof(bias_name),
-                 "blocks.%u.adaln_proj.linear.bias", block);
-        h3_gpu_tensor *weight = weight_bf16_2d(
-            weights, gpu, weight_name, BLOCK_OUTPUT, H3_DIT_TIME_DIM,
-            error, error_size);
-        h3_gpu_tensor *bias = weight_bf16_1d(
-            weights, gpu, bias_name, BLOCK_OUTPUT, error, error_size);
-        schedule->blocks[block] = h3_gpu_tensor_new_bf16(
-            gpu, (size_t)schedule->time_rows * BLOCK_OUTPUT);
-        if (!weight || !bias || !schedule->blocks[block]) {
-            if (!error || !*error)
-                fail(error, error_size, "cannot allocate AdaLN block %u: %s",
-                     block, h3_gpu_error(gpu));
-            free_tensor(&weight);
-            free_tensor(&bias);
-            h3_gpu_tensor_free(time);
+                      &times, error, error_size)) goto failed;
+    if (h3_dit_schedule_is_packed(weights)) {
+        if (!restore_tables(schedule, weights, times, error, error_size))
             goto failed;
-        }
-        snprintf(operation, sizeof(operation), "AdaLN block %u", block);
-        int ok = gpu_op(gpu, h3_gpu_begin(gpu), error, error_size, operation) &&
-            gpu_op(gpu, h3_gpu_linear_bf16(
-                gpu, schedule->blocks[block], time, weight, bias,
-                schedule->time_rows, H3_DIT_TIME_DIM, BLOCK_OUTPUT),
-                error, error_size, operation) &&
-            gpu_op(gpu, h3_gpu_submit(gpu), error, error_size, operation);
-        free_tensor(&weight);
-        free_tensor(&bias);
-        if (!ok) {
-            h3_gpu_tensor_free(time);
-            goto failed;
-        }
-        if (progress) progress((int)block + 1, (int)H3_DIT_BLOCKS,
+        free(times);
+        if (progress) progress((int)H3_DIT_BLOCKS, (int)H3_DIT_BLOCKS,
                                progress_opaque);
+        return schedule;
     }
-
-    h3_gpu_tensor *final_w = weight_bf16_2d(
-        weights, gpu, "final_layer.adaln_proj.linear.weight",
-        FINAL_OUTPUT, H3_DIT_TIME_DIM, error, error_size);
-    h3_gpu_tensor *final_b = weight_bf16_1d(
-        weights, gpu, "final_layer.adaln_proj.linear.bias",
-        FINAL_OUTPUT, error, error_size);
-    schedule->final = h3_gpu_tensor_new_bf16(
-        gpu, (size_t)schedule->time_rows * FINAL_OUTPUT);
-    if (!final_w || !final_b || !schedule->final ||
-        !gpu_op(gpu, h3_gpu_begin(gpu), error, error_size,
-                "begin final AdaLN") ||
-        !gpu_op(gpu, h3_gpu_linear_bf16(
-            gpu, schedule->final, time, final_w, final_b, schedule->time_rows,
-            H3_DIT_TIME_DIM, FINAL_OUTPUT), error, error_size,
-            "final AdaLN projection") ||
-        !gpu_op(gpu, h3_gpu_submit(gpu), error, error_size,
-                "submit final AdaLN")) {
-        if ((!error || !*error) && (!final_w || !final_b || !schedule->final))
-            fail(error, error_size, "cannot allocate final AdaLN tensors: %s",
-                 h3_gpu_error(gpu));
-        free_tensor(&final_w);
-        free_tensor(&final_b);
-        h3_gpu_tensor_free(time);
+    features = timestep_features(times, schedule->time_rows);
+    if (!features) {
+        fail(error, error_size, "out of memory allocating timestep features");
         goto failed;
     }
-    free_tensor(&final_w);
-    free_tensor(&final_b);
+    time = time_embeddings(weights, gpu, schedule->time_rows, features,
+                           error, error_size);
+    if (!time || !project_tables(weights, gpu, time, schedule->time_rows,
+                                 schedule_sink, schedule, progress,
+                                 progress_opaque, error, error_size))
+        goto failed;
     h3_gpu_tensor_free(time);
+    free(features);
+    free(times);
     return schedule;
 
 failed:
+    h3_gpu_tensor_free(time);
     free(features);
+    free(times);
     h3_dit_schedule_free(schedule);
     return NULL;
+}
+
+int h3_dit_schedule_is_packed(const h3_weight_store *weights) {
+    return h3_weight_find(weights, "adaln_table.r0.times", NULL) != NULL ||
+           h3_weight_find(weights, "adaln_table.r1.times", NULL) != NULL;
+}
+
+int h3_dit_schedule_timesteps(const h3_sigma_schedule *sigmas,
+                              int visual_condition, int audio_condition,
+                              float **times, uint32_t *count) {
+    if (!sigmas || !times || !count || sigmas->steps < 1 ||
+        sigmas->steps > H3_MAX_STEPS) return 0;
+    h3_dit_schedule schedule = {0};
+    float *values = NULL;
+    int ok = prepare_rows(&schedule, sigmas, visual_condition,
+                          audio_condition, &values, NULL, 0);
+    free(schedule.video_rows);
+    free(schedule.audio_rows);
+    free(schedule.visual_condition_rows);
+    free(schedule.audio_condition_rows);
+    if (!ok) return 0;
+    *times = values;
+    *count = schedule.time_rows;
+    return 1;
+}
+
+int h3_dit_schedule_build_tables(const h3_weight_store *weights, h3_gpu *gpu,
+                                 const float *times, uint32_t count,
+                                 uint32_t batch,
+                                 h3_dit_schedule_table_sink sink,
+                                 void *opaque, char *error,
+                                 size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!weights || !gpu || !times || !count || !batch || !sink ||
+        count > UINT32_MAX / TIME_INPUT) {
+        fail(error, error_size, "invalid AdaLN table arguments");
+        return 0;
+    }
+    /* Every projection runs on full batches (the last one padded with its
+     * final timestep), so all rows go through the kernels of one regime. */
+    uint32_t chunks = (count + batch - 1) / batch;
+    float *padded = malloc((size_t)chunks * batch * sizeof(*padded));
+    h3_gpu_tensor **time = calloc(chunks, sizeof(*time));
+    uint16_t *host = malloc((size_t)batch * BLOCK_OUTPUT * sizeof(*host));
+    int ok = padded && time && host;
+    if (!ok) fail(error, error_size, "out of memory building AdaLN tables");
+    for (size_t index = 0; ok && index < (size_t)chunks * batch; index++)
+        padded[index] = times[index < count ? index : count - 1];
+    for (uint32_t chunk = 0; ok && chunk < chunks; chunk++) {
+        float *features = timestep_features(padded + (size_t)chunk * batch,
+                                            batch);
+        time[chunk] = features ? time_embeddings(weights, gpu, batch, features,
+                                                 error, error_size) : NULL;
+        free(features);
+        ok = time[chunk] != NULL;
+    }
+    for (unsigned block = 0; ok && block <= H3_DIT_BLOCKS; block++) {
+        int final = block == H3_DIT_BLOCKS;
+        uint64_t width = final ? FINAL_OUTPUT : BLOCK_OUTPUT;
+        char weight_name[128], bias_name[128];
+        if (final) {
+            snprintf(weight_name, sizeof(weight_name),
+                     "final_layer.adaln_proj.linear.weight");
+            snprintf(bias_name, sizeof(bias_name),
+                     "final_layer.adaln_proj.linear.bias");
+        } else {
+            snprintf(weight_name, sizeof(weight_name),
+                     "blocks.%u.adaln_proj.linear.weight", block);
+            snprintf(bias_name, sizeof(bias_name),
+                     "blocks.%u.adaln_proj.linear.bias", block);
+        }
+        h3_gpu_tensor *weight = weight_bf16_2d(
+            weights, gpu, weight_name, width, H3_DIT_TIME_DIM,
+            error, error_size);
+        h3_gpu_tensor *bias = weight_bf16_1d(
+            weights, gpu, bias_name, width, error, error_size);
+        h3_gpu_tensor *output = h3_gpu_tensor_new_bf16(gpu, (size_t)batch * width);
+        h3_gpu_tensor *table = h3_gpu_tensor_new_bf16(gpu, (size_t)count * width);
+        ok = weight && bias && output && table;
+        for (uint32_t chunk = 0; ok && chunk < chunks; chunk++) {
+            uint32_t rows = MIN_ROWS(batch, count - chunk * batch);
+            ok = gpu_op(gpu, h3_gpu_begin(gpu), error, error_size,
+                        "AdaLN table") &&
+                gpu_op(gpu, h3_gpu_linear_bf16(
+                    gpu, output, time[chunk], weight, bias, batch,
+                    H3_DIT_TIME_DIM, (uint32_t)width), error, error_size,
+                    "AdaLN table projection") &&
+                gpu_op(gpu, h3_gpu_submit(gpu), error, error_size,
+                       "AdaLN table") &&
+                h3_gpu_tensor_read_bf16(output, host, (size_t)rows * width) &&
+                h3_gpu_tensor_write_bf16_range(
+                    table, (size_t)chunk * batch * width, host,
+                    (size_t)rows * width);
+        }
+        free_tensor(&weight);
+        free_tensor(&bias);
+        free_tensor(&output);
+        if (!ok) {
+            if (!error || !*error)
+                fail(error, error_size, "cannot build AdaLN table %u: %s",
+                     block, h3_gpu_error(gpu));
+            free_tensor(&table);
+            break;
+        }
+        ok = sink(block, table, opaque, error, error_size);
+    }
+    for (uint32_t chunk = 0; time && chunk < chunks; chunk++)
+        h3_gpu_tensor_free(time[chunk]);
+    free(time);
+    free(padded);
+    free(host);
+    return ok;
 }
 
 void h3_dit_schedule_free(h3_dit_schedule *schedule) {

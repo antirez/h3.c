@@ -404,6 +404,23 @@ static int h3_inventory(h3_ctx *ctx, const char *relative,
     return ok;
 }
 
+/* Prefer the packed INT8 DiT (<variant>/transformer-int8, written by
+ * h3_pack_int8) over the BF16 checkpoint. H3_DIT_BF16=1 forces the BF16 one,
+ * which is how the two are compared. */
+static const char *h3_dit_relative(const h3_ctx *ctx, int ref2va) {
+    const char *packed = ref2va ? "Ref2VA/transformer-int8" :
+                                  "FL2VA/transformer-int8";
+    const char *bf16 = ref2va ? "Ref2VA/transformer" : "FL2VA/transformer";
+    const char *forced = getenv("H3_DIT_BF16");
+    if (forced && !strcmp(forced, "1")) return bf16;
+    char relative[64];
+    snprintf(relative, sizeof(relative), "%s/h3-int8-pack.json", packed);
+    char *marker = h3_path(ctx->model_dir, relative);
+    int has_packed = marker && h3_is_file(marker);
+    free(marker);
+    return has_packed ? packed : bf16;
+}
+
 h3_ctx *h3_load_dir(const char *model_dir) {
     h3_global_error[0] = '\0';
     if (!model_dir || !*model_dir) {
@@ -421,10 +438,13 @@ h3_ctx *h3_load_dir(const char *model_dir) {
         free(ctx);
         return NULL;
     }
-    if (!h3_require_file(ctx, "FL2VA/transformer/config.json") ||
+    const char *fl2va_dit = h3_dit_relative(ctx, 0);
+    char fl2va_config[96];
+    snprintf(fl2va_config, sizeof(fl2va_config), "%s/config.json", fl2va_dit);
+    if (!h3_require_file(ctx, fl2va_config) ||
         !h3_require_file(ctx, "FL2VA/tokenizer/tokenizer.json") ||
         !h3_inventory(ctx, "FL2VA/text_encoder", &ctx->model.text_encoder) ||
-        !h3_inventory(ctx, "FL2VA/transformer", &ctx->model.fl2va_transformer) ||
+        !h3_inventory(ctx, fl2va_dit, &ctx->model.fl2va_transformer) ||
         !h3_inventory(ctx, "FL2VA/video_vae/source", &ctx->model.video_vae) ||
         !h3_inventory(ctx, "FL2VA/audio_vae", &ctx->model.audio_vae)) {
         snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
@@ -433,8 +453,11 @@ h3_ctx *h3_load_dir(const char *model_dir) {
     }
     /* Ref2VA is selected only by ordered-reference requests. Keep prompt-only
      * FL2VA usable while that optional 62 GiB checkpoint is not installed. */
-    char *ref_index = h3_path(
-        ctx->model_dir, "Ref2VA/transformer/model.safetensors.index.json");
+    const char *ref2va_dit = h3_dit_relative(ctx, 1);
+    char ref2va_config[96];
+    snprintf(ref2va_config, sizeof(ref2va_config), "%s/config.json",
+             ref2va_dit);
+    char *ref_index = h3_path(ctx->model_dir, ref2va_config);
     if (!ref_index) {
         h3_set_error(ctx, "out of memory resolving optional Ref2VA path");
         snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
@@ -444,7 +467,7 @@ h3_ctx *h3_load_dir(const char *model_dir) {
     int has_ref2va = h3_is_file(ref_index);
     free(ref_index);
     if (has_ref2va && !h3_inventory(
-            ctx, "Ref2VA/transformer", &ctx->model.ref2va_transformer)) {
+            ctx, ref2va_dit, &ctx->model.ref2va_transformer)) {
         snprintf(h3_global_error, sizeof(h3_global_error), "%s", ctx->error);
         h3_free(ctx);
         return NULL;
@@ -922,8 +945,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         "Ref2VA/tokenizer/tokenizer.json" : "FL2VA/tokenizer/tokenizer.json");
     char *text_path = h3_path(ctx->model_dir, ref2va ?
         "Ref2VA/text_encoder" : "FL2VA/text_encoder");
-    char *dit_path = h3_path(ctx->model_dir, ref2va ?
-        "Ref2VA/transformer" : "FL2VA/transformer");
+    char *dit_path = h3_path(ctx->model_dir, h3_dit_relative(ctx, ref2va));
     char *vae_path = h3_path(ctx->model_dir, ref2va ?
         "Ref2VA/video_vae/source" : "FL2VA/video_vae/source");
     char *audio_vae_path = h3_path(ctx->model_dir, ref2va ?

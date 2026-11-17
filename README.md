@@ -554,6 +554,37 @@ interactive DiT is ready for its next denoiser evaluation. Measurements reached
 about 13--14.6 GiB/s from the internal SSD. `H3_PROFILE=1` reports total bytes,
 read throughput, and the part of the read wait that was not hidden by GPU work.
 
+### Packed INT8 DiT (optional, M5)
+
+On the M5 TensorOps path the DiT block matrices run as INT8 with F32 row scales
+that the loader computes from the BF16 checkpoint on every load (about 12-15 s
+for the 62 GiB FL2VA DiT). `h3_pack_int8` does this once, offline:
+
+```sh
+make h3_pack_int8
+./h3_pack_int8 MODEL/FL2VA/transformer MODEL/FL2VA/transformer-int8 --max-steps 20 --verify
+python3 tools/align_int8_pack.py MODEL/FL2VA/transformer-int8
+```
+
+The pack is a set of ordinary safetensors files (about 22 GiB per pipeline):
+`blocks-NN.safetensors` holds each block matrix as `qweight` (I8) and `qscale`
+(F32) from the same GPU quantizer the loader runs, `adaln-table.safetensors`
+holds the AdaLN outputs of every 2..`--max-steps` schedule, and `base` keeps
+the remaining tensors unchanged. `--verify` rebuilds those AdaLN tables from
+both checkpoints and compares them bit for bit; `--verify-only` checks an
+existing pack. `h3-int8-pack.json` is written last and marks a complete pack.
+
+When `<variant>/transformer-int8/h3-int8-pack.json` exists, `h3` loads the pack
+instead of `<variant>/transformer` (`H3_DIT_BF16=1` forces the BF16 checkpoint),
+and the BF16 directory can then be removed. Renders are byte-identical to
+quantizing the BF16 checkpoint on load. `tools/align_int8_pack.py` rewrites the
+files so that every tensor whose size is a whole number of pages starts on a
+page; on M5 those tensors are then mapped zero-copy like the BF16 shards, and
+the small scale and norm tensors are copied. The pack needs the M5 INT8 kernels,
+at least 128 tokens, and at most `--max-steps` denoising passes; the
+`--use-slower-bf16-*` options need the BF16 checkpoint. `--ssd-streaming`
+streams the INT8 matrices and their scales.
+
 ### Metal 4 and TensorOps paths
 
 M5 GPUs automatically use native BF16 Metal 4/TensorOps for the DiT QKV and

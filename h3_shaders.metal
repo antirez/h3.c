@@ -4330,3 +4330,1015 @@ kernel void h3_silu_mul_bf16(device const ushort *gate [[buffer(0)]],
     float other = h3_bf16_to_f32(up[gid]);
     output[gid] = h3_f32_to_bf16(value / (1.0f + exp(-value)) * other);
 }
+
+#ifdef H3_METAL_HAS_TENSOR
+/*
+ * Dense flash attention on M5 TensorOps (no mask), the dense core for a later
+ * block-sparse variant.  Each SIMD group owns RQ query rows of one head and
+ * walks key blocks of BK tokens with an fp32 online softmax; a threadgroup is
+ * NSG such groups over consecutive rows of the same head, so they share K/V
+ * blocks through the cache.  The key loop body is per-(query-group, key-block)
+ * so a routed key-block list can replace the dense range later.
+ *
+ * Probed TensorOps layout for execution_simdgroup bf16xbf16->f32 destinations
+ * (M5, macOS 27): rows are held in 16-row bands; within a band each lane owns
+ * rows r and r+8, four columns per 16-column group.  Element i of an N-wide
+ * destination therefore belongs to the lane's row slot
+ * (i / (N / 2)) * 2 + ((i >> 2) & 1), which is also the index order of the
+ * row-reduction tensor.  Lanes {l, l^1, l^8, l^9} share a row.
+ */
+struct h3_attn_tiled_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint out_row_stride;
+    uint out_head_stride;
+    float scale_log2;
+};
+
+constexpr inline int h3_attn_row_slot(int element, int width) {
+    return (element / (width / 2)) * 2 + ((element >> 2) & 1);
+}
+
+
+/* One (query group, key block) step: S = Q K^T, online-softmax update of the
+ * fp32 running max m / partial sum l, O = alpha O + P V. valid < BK masks the
+ * final partial key block. */
+template <int RQ, int BK, bool RELAX, typename QOperand, typename KSlice,
+          typename VSlice, typename Accumulator>
+inline void h3_attn_tiled_step(thread QOperand &q, thread KSlice &ks,
+                               thread VSlice &vs, thread Accumulator &acc,
+                               thread float *m, thread float *l, float c,
+                               int valid) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, RELAX);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, RELAX,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto scores = qk.template get_destination_cooperative_tensor<
+        QOperand, KSlice, float>();
+    auto probs = qk.template get_destination_cooperative_tensor<
+        QOperand, KSlice, bfloat>();
+    auto row_max = qk.template get_row_reduction_destination_cooperative_tensor<
+        QOperand, KSlice, float>();
+    qk.run(q, ks, scores);
+    if (valid < BK) {
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < scores.get_capacity(); i++) {
+            auto index = scores.get_multidimensional_index(i);
+            if (index[0] >= valid) scores[i] = -1.0e30f;
+        }
+    }
+    reduce_rows(scores, row_max, reduction_operation::max, -INFINITY);
+    float alpha[SLOTS];
+    float offset[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float next = max(m[s], row_max[s]);
+        alpha[s] = fast::exp2((m[s] - next) * c);
+        m[s] = next;
+        offset[s] = next * c;
+        l[s] *= alpha[s];
+    }
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < scores.get_capacity(); i++) {
+        const int s = h3_attn_row_slot(i, BK);
+        float p = fast::exp2(fma(scores[i], c, -offset[s]));
+        l[s] += p;
+        probs[i] = (bfloat)p;
+    }
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++)
+        acc[i] *= alpha[h3_attn_row_slot(i, D)];
+    auto left = pv.template get_left_input_cooperative_tensor<
+        bfloat, bfloat, float>(probs);
+    pv.run(left, vs, acc);
+}
+
+template <int RQ, int NSG, int BK, bool RELAX>
+kernel void h3_attn_tiled_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_tiled_args &args [[buffer(4)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    if (q0 >= sequence) return;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto kt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        key + in_head, extents, in_strides);
+    auto vt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        value + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, RELAX,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto qs = qt.slice(0, q0);
+    auto vs0 = vt.slice(0, 0);
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vs0), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    /* Full key blocks use static slices (no bounds checks); the final partial
+     * block uses checked slices and a column mask. */
+    const int full_blocks = sequence / BK;
+    for (int block = 0; block < full_blocks; block++) {
+        auto ks = kt.template slice<D, BK>(0, block * BK);
+        auto vs = vt.template slice<D, BK>(0, block * BK);
+        h3_attn_tiled_step<RQ, BK, RELAX>(qs, ks, vs, acc, m, l, c, BK);
+    }
+    if (full_blocks * BK < sequence) {
+        auto ks = kt.slice(0, full_blocks * BK);
+        auto vs = vt.slice(0, full_blocks * BK);
+        h3_attn_tiled_step<RQ, BK, RELAX>(qs, ks, vs, acc, m, l, c,
+                                          sequence - full_blocks * BK);
+    }
+
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vs0), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+/* Same step, but the threadgroup stages each K/V block once in threadgroup
+ * memory and all SIMD groups read it from there. */
+template <int RQ, int NSG, int BK>
+kernel void h3_attn_tiled_tg_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_tiled_args &args [[buffer(4)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort tid [[thread_index_in_threadgroup]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr int THREADS = NSG * 32;
+    constexpr int VECTORS = BK * D / 8;
+    threadgroup bfloat k_tile[BK * D];
+    threadgroup bfloat v_tile[BK * D];
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    const bool active = q0 < sequence;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    device bfloat *kh = key + in_head;
+    device bfloat *vh = value + in_head;
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+    auto kts = tensor(k_tile, dextents<int32_t, 2>(D, BK));
+    auto vts = tensor(v_tile, dextents<int32_t, 2>(D, BK));
+
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto qs = qt.slice(0, min(q0, sequence - 1));
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vts), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    const int key_blocks = (sequence + BK - 1) / BK;
+    for (int block = 0; block < key_blocks; block++) {
+        const int k0 = block * BK;
+        const int valid = min(BK, sequence - k0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int vector = tid; vector < VECTORS; vector += THREADS) {
+            const int row = vector / (D / 8);
+            const int column = (vector % (D / 8)) * 8;
+            uint4 kv = 0, vv = 0;
+            if (row < valid) {
+                const ulong offset = (ulong)(k0 + row) * args.in_row_stride +
+                                     column;
+                kv = *(device const uint4 *)(kh + offset);
+                vv = *(device const uint4 *)(vh + offset);
+            }
+            *(threadgroup uint4 *)(k_tile + row * D + column) = kv;
+            *(threadgroup uint4 *)(v_tile + row * D + column) = vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (active)
+            h3_attn_tiled_step<RQ, BK, false>(qs, kts, vts, acc, m, l, c,
+                                              valid);
+    }
+    if (!active) return;
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vts), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_tiled_tg_bf16_impl<16, 8, 64>) h3_attn_tiled_tg_bf16_t;
+template [[host_name("h3_attn_tiled_bf16_tg_r16s8k64")]]
+kernel h3_attn_tiled_tg_bf16_t h3_attn_tiled_tg_bf16_impl<16, 8, 64>;
+template [[host_name("h3_attn_tiled_bf16_tg_r16s16k64")]]
+kernel h3_attn_tiled_tg_bf16_t h3_attn_tiled_tg_bf16_impl<16, 16, 64>;
+template [[host_name("h3_attn_tiled_bf16_tg_r16s16k32")]]
+kernel h3_attn_tiled_tg_bf16_t h3_attn_tiled_tg_bf16_impl<16, 16, 32>;
+template [[host_name("h3_attn_tiled_bf16_tg_r16s32k32")]]
+kernel h3_attn_tiled_tg_bf16_t h3_attn_tiled_tg_bf16_impl<16, 32, 32>;
+
+/* Staged kernel with optional Q held in a left-input cooperative tensor
+ * (QREG) and double-buffered K/V blocks (DBUF, one barrier per block). */
+template <int RQ, int NSG, int BK, bool QREG, bool DBUF>
+kernel void h3_attn_tiled_tg2_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_tiled_args &args [[buffer(4)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort tid [[thread_index_in_threadgroup]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr int THREADS = NSG * 32;
+    constexpr int VECTORS = BK * D / 8;
+    constexpr int BUFFERS = DBUF ? 2 : 1;
+    threadgroup bfloat k_tile[BUFFERS * BK * D];
+    threadgroup bfloat v_tile[BUFFERS * BK * D];
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    const bool active = q0 < sequence;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    device bfloat *kh = key + in_head;
+    device bfloat *vh = value + in_head;
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+    auto kts0 = tensor(k_tile, dextents<int32_t, 2>(D, BK));
+    auto vts0 = tensor(v_tile, dextents<int32_t, 2>(D, BK));
+    auto kts1 = tensor(k_tile + (BUFFERS - 1) * BK * D,
+                       dextents<int32_t, 2>(D, BK));
+    auto vts1 = tensor(v_tile + (BUFFERS - 1) * BK * D,
+                       dextents<int32_t, 2>(D, BK));
+
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, false);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto qs = qt.slice(0, min(q0, sequence - 1));
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vts0), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+    auto qreg = qk.template get_left_input_cooperative_tensor<
+        bfloat, bfloat, float>();
+    if (QREG) qreg.load(qs);
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    auto stage = [&](int block, int buffer) {
+        const int k0 = block * BK;
+        const int valid = min(BK, sequence - k0);
+        threadgroup bfloat *kd = k_tile + buffer * BK * D;
+        threadgroup bfloat *vd = v_tile + buffer * BK * D;
+        for (int vector = tid; vector < VECTORS; vector += THREADS) {
+            const int row = vector / (D / 8);
+            const int column = (vector % (D / 8)) * 8;
+            uint4 kv = 0, vv = 0;
+            if (row < valid) {
+                const ulong offset = (ulong)(k0 + row) * args.in_row_stride +
+                                     column;
+                kv = *(device const uint4 *)(kh + offset);
+                vv = *(device const uint4 *)(vh + offset);
+            }
+            *(threadgroup uint4 *)(kd + row * D + column) = kv;
+            *(threadgroup uint4 *)(vd + row * D + column) = vv;
+        }
+    };
+    auto compute = [&](int block, int buffer) {
+        const int valid = min(BK, sequence - block * BK);
+        if (buffer == 0) {
+            if (QREG) h3_attn_tiled_step<RQ, BK, false>(qreg, kts0, vts0, acc,
+                                                       m, l, c, valid);
+            else h3_attn_tiled_step<RQ, BK, false>(qs, kts0, vts0, acc,
+                                                  m, l, c, valid);
+        } else {
+            if (QREG) h3_attn_tiled_step<RQ, BK, false>(qreg, kts1, vts1, acc,
+                                                       m, l, c, valid);
+            else h3_attn_tiled_step<RQ, BK, false>(qs, kts1, vts1, acc,
+                                                  m, l, c, valid);
+        }
+    };
+
+    const int key_blocks = (sequence + BK - 1) / BK;
+    if (DBUF) {
+        stage(0, 0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int block = 0; block < key_blocks; block++) {
+            if (block + 1 < key_blocks) stage(block + 1, (block + 1) & 1);
+            compute(block, block & 1);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    } else {
+        for (int block = 0; block < key_blocks; block++) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            stage(block, 0);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            compute(block, 0);
+        }
+    }
+    if (!active) return;
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(vts0), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_tiled_tg2_bf16_impl<16, 16, 32, true, true>)
+    h3_attn_tiled_tg2_bf16_t;
+#define H3_ATTN_TILED_TG2(NAME, RQ, NSG, BK, QREG, DBUF) \
+    template [[host_name(NAME)]] kernel h3_attn_tiled_tg2_bf16_t \
+        h3_attn_tiled_tg2_bf16_impl<RQ, NSG, BK, QREG, DBUF>;
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s16k32", 16, 16, 32, true, false)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgd_r16s16k32", 16, 16, 32, false, true)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgqd_r16s16k32", 16, 16, 32, true, true)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgqd_r16s32k32", 16, 32, 32, true, true)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s32k32", 16, 32, 32, true, false)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s8k32", 16, 8, 32, true, false)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s16k64", 16, 16, 64, true, false)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s16k16", 16, 16, 16, true, false)
+H3_ATTN_TILED_TG2("h3_attn_tiled_bf16_tgq_r16s32k16", 16, 32, 16, true, false)
+
+typedef decltype(h3_attn_tiled_bf16_impl<16, 4, 64, false>) h3_attn_tiled_bf16_t;
+#define H3_ATTN_TILED_INSTANCE(NAME, RQ, NSG, BK, RELAX) \
+    template [[host_name(NAME)]] kernel h3_attn_tiled_bf16_t \
+        h3_attn_tiled_bf16_impl<RQ, NSG, BK, RELAX>;
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s4k64", 16, 4, 64, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s4k32", 16, 4, 32, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r32s4k64", 32, 4, 64, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s8k64", 16, 8, 64, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r32s8k64", 32, 8, 64, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s4k128", 16, 4, 128, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s16k64", 16, 16, 64, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s8k128", 16, 8, 128, false)
+H3_ATTN_TILED_INSTANCE("h3_attn_tiled_bf16_r16s8k64_relaxed", 16, 8, 64, true)
+
+/*
+ * Sol-Attn block-sparse attention (arXiv 2607.24027), opt-in via H3_SPARSE_ATTN.
+ * Blocks are 64 tokens.  The summary buffer holds, in fp32,
+ *   [0][head][block][128] query means, [1][...] key means, [2][...] value sums,
+ * followed by per-head key-mean statistics [head][mean, variance][128].
+ * Routing is decided per attention threadgroup (tile_rows query rows, i.e.
+ * tile_rows / 64 query blocks; their routes are OR-ed) and written as a list
+ * per (head, threadgroup): routed blocks ascending in [0, count), unrouted
+ * blocks in [count, blocks).  The sparse kernel walks unrouted blocks as
+ * "virtual keys" (key mean, value sum) first and routed blocks exactly after,
+ * all through the single h3_attn_tiled_step call site.
+ */
+struct h3_sol_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint heads;
+    uint blocks;
+    uint tile_groups;
+    uint tile_rows;
+    uint sink_blocks;
+    uint forced_block;     /* partial last block, always exact; blocks if none */
+    float scale_log2;
+    float tau;
+};
+
+kernel void h3_sol_summaries_bf16(device const bfloat *query [[buffer(0)]],
+                                  device const bfloat *key [[buffer(1)]],
+                                  device const bfloat *value [[buffer(2)]],
+                                  device float *summaries [[buffer(3)]],
+                                  constant h3_sol_args &args [[buffer(4)]],
+                                  uint2 group [[threadgroup_position_in_grid]],
+                                  ushort dim [[thread_index_in_threadgroup]]) {
+    const uint block = group.x;
+    const uint head = group.y;
+    const uint start = block * 64;
+    const uint length = min(64u, args.sequence - start);
+    const ulong base = (ulong)head * args.in_head_stride + dim;
+    float q_sum = 0.0f, k_sum = 0.0f, v_sum = 0.0f;
+    for (uint row = 0; row < length; row++) {
+        const ulong offset = base + (ulong)(start + row) * args.in_row_stride;
+        q_sum += (float)query[offset];
+        k_sum += (float)key[offset];
+        v_sum += (float)value[offset];
+    }
+    const ulong plane = (ulong)args.heads * args.blocks * 128;
+    const ulong out = ((ulong)head * args.blocks + block) * 128 + dim;
+    summaries[out] = q_sum / (float)length;
+    summaries[plane + out] = k_sum / (float)length;
+    summaries[2 * plane + out] = v_sum;
+}
+
+kernel void h3_sol_key_stats(device float *summaries [[buffer(0)]],
+                             constant h3_sol_args &args [[buffer(1)]],
+                             uint head [[threadgroup_position_in_grid]],
+                             ushort dim [[thread_index_in_threadgroup]]) {
+    const ulong plane = (ulong)args.heads * args.blocks * 128;
+    device const float *centroids =
+        summaries + plane + (ulong)head * args.blocks * 128 + dim;
+    float sum = 0.0f;
+    for (uint block = 0; block < args.blocks; block++)
+        sum += centroids[(ulong)block * 128];
+    const float mean = sum / (float)args.blocks;
+    float squares = 0.0f;
+    for (uint block = 0; block < args.blocks; block++) {
+        const float delta = centroids[(ulong)block * 128] - mean;
+        squares += delta * delta;
+    }
+    device float *stats = summaries + 3 * plane + (ulong)head * 256;
+    stats[dim] = mean;
+    stats[128 + dim] = squares / (float)args.blocks;
+}
+
+/* One threadgroup (256 threads) per (attention threadgroup, head). */
+kernel void h3_sol_route(device const float *summaries [[buffer(0)]],
+                         device ushort *routes [[buffer(1)]],
+                         device uint *counts [[buffer(2)]],
+                         constant h3_sol_args &args [[buffer(3)]],
+                         uint2 group [[threadgroup_position_in_grid]],
+                         ushort tid [[thread_index_in_threadgroup]],
+                         ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                         ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int THREADS = 256;
+    constexpr int MAX_QUERY_BLOCKS = 4;
+    threadgroup float query_means[MAX_QUERY_BLOCKS][128];
+    threadgroup float thresholds[MAX_QUERY_BLOCKS];
+    threadgroup uint simd_totals[THREADS / 32];
+    const uint tile = group.x;
+    const uint head = group.y;
+    const uint blocks = args.blocks;
+    const int query_blocks = (int)(args.tile_rows / 64);
+    const int first_query = (int)(tile * (uint)query_blocks);
+    const int live_queries = min(query_blocks, (int)blocks - first_query);
+    const ulong plane = (ulong)args.heads * blocks * 128;
+    device const float *qc = summaries + (ulong)head * blocks * 128;
+    device const float *kc = summaries + plane + (ulong)head * blocks * 128;
+    device const float *stats = summaries + 3 * plane + (ulong)head * 256;
+    for (int index = tid; index < query_blocks * 128; index += THREADS) {
+        const int qb = index / 128;
+        query_means[qb][index % 128] = qb < live_queries ?
+            qc[(ulong)(first_query + qb) * 128 + index % 128] : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float c = args.scale_log2;
+    if (simdgroup < query_blocks) {
+        float mean = 0.0f, variance = 0.0f;
+        for (int d = lane; d < 128; d += 32) {
+            const float q = query_means[simdgroup][d];
+            mean += q * stats[d];
+            variance += q * q * stats[128 + d];
+        }
+        mean = simd_sum(mean);
+        variance = simd_sum(variance);
+        if (lane == 0)
+            thresholds[simdgroup] = mean * c +
+                args.tau * sqrt(max(variance * c * c, 0.0f) + 1.0e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const bool query_sink = (uint)first_query < args.sink_blocks;
+    device ushort *list =
+        routes + ((ulong)head * args.tile_groups + tile) * blocks;
+    uint routed_base = 0, unrouted_base = 0;
+    for (uint start = 0; start < blocks; start += THREADS) {
+        const uint block = start + tid;
+        uint flag = 0;
+        if (block < blocks) {
+            flag = query_sink || block < args.sink_blocks ||
+                   block == args.forced_block;
+            for (int qb = 0; qb < live_queries; qb++)
+                flag |= abs((int)block - (first_query + qb)) <= 1;
+            if (!flag) {
+                device const float *k = kc + (ulong)block * 128;
+                float score[MAX_QUERY_BLOCKS] = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (int d = 0; d < 128; d++) {
+                    const float kd = k[d];
+                    for (int qb = 0; qb < live_queries; qb++)
+                        score[qb] += query_means[qb][d] * kd;
+                }
+                for (int qb = 0; qb < live_queries; qb++)
+                    flag |= score[qb] * c > thresholds[qb];
+            }
+        }
+        const uint prefix = simd_prefix_exclusive_sum(flag);
+        if (lane == 31) simd_totals[simdgroup] = prefix + flag;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint offset = 0, total = 0;
+        for (int s = 0; s < THREADS / 32; s++) {
+            const uint value = simd_totals[s];
+            offset += s < simdgroup ? value : 0u;
+            total += value;
+        }
+        if (block < blocks) {
+            const uint routed_before = offset + prefix;
+            if (flag)
+                list[routed_base + routed_before] = (ushort)block;
+            else
+                list[blocks - 1 - (unrouted_base + tid - routed_before)] =
+                    (ushort)block;
+        }
+        routed_base += total;
+        unrouted_base += min((uint)THREADS, blocks - start) - total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) counts[(ulong)head * args.tile_groups + tile] = routed_base;
+}
+
+struct h3_attn_sparse_args {
+    uint sequence;
+    uint in_row_stride;
+    uint in_head_stride;
+    uint out_row_stride;
+    uint out_head_stride;
+    float scale_log2;
+    uint heads;
+    uint blocks;
+    uint tile_groups;
+    uint skipped_tail_tiles;  /* empty BK tiles of the partial last block */
+};
+
+/* The staged tgq kernel with Q in registers, walking a routed key list. */
+template <int RQ, int NSG, int BK>
+kernel void h3_attn_sparse_bf16_impl(
+                           device bfloat *query [[buffer(0)]],
+                           device bfloat *key [[buffer(1)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_sparse_args &args [[buffer(4)]],
+                           device const float *summaries [[buffer(5)]],
+                           device const ushort *routes [[buffer(6)]],
+                           device const uint *counts [[buffer(7)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort tid [[thread_index_in_threadgroup]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr int THREADS = NSG * 32;
+    constexpr int VECTORS = BK * D / 8;
+    constexpr int HALVES = 64 / BK;
+    threadgroup bfloat k_tile[BK * D];
+    threadgroup bfloat v_tile[BK * D];
+    const int sequence = (int)args.sequence;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    const ulong in_head = (ulong)group.y * args.in_head_stride;
+    const ulong out_head = (ulong)group.y * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    device bfloat *kh = key + in_head;
+    device bfloat *vh = value + in_head;
+    auto qt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        query + in_head, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+    auto kts = tensor(k_tile, dextents<int32_t, 2>(D, BK));
+    auto vts = tensor(v_tile, dextents<int32_t, 2>(D, BK));
+
+    const ulong plane = (ulong)args.heads * args.blocks * D;
+    device const float *key_means =
+        summaries + plane + (ulong)group.y * args.blocks * D;
+    device const float *value_sums = key_means + plane;
+    const ulong route_index = (ulong)group.y * args.tile_groups + group.x;
+    device const ushort *list = routes + route_index * args.blocks;
+    const int routed = (int)counts[route_index];
+    const int unrouted = (int)args.blocks - routed;
+    const int virtual_tiles = (unrouted + BK - 1) / BK;
+    const int tiles = virtual_tiles + routed * HALVES -
+                      (int)args.skipped_tail_tiles;
+
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, false);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto qs = qt.slice(0, min(q0, sequence - 1));
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(kts), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+    auto qreg = qk.template get_left_input_cooperative_tensor<
+        bfloat, bfloat, float>();
+    qreg.load(qs);
+    const float c = args.scale_log2;
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    for (int t = 0; t < tiles; t++) {
+        int valid;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t < virtual_tiles) {
+            /* Unrouted blocks as virtual keys: key mean, value sum. */
+            const int first = routed + t * BK;
+            valid = min(BK, unrouted - t * BK);
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                float4 k_lo = 0.0f, k_hi = 0.0f, v_lo = 0.0f, v_hi = 0.0f;
+                if (row < valid) {
+                    const ulong offset = (ulong)list[first + row] * D + column;
+                    k_lo = *(device const float4 *)(key_means + offset);
+                    k_hi = *(device const float4 *)(key_means + offset + 4);
+                    v_lo = *(device const float4 *)(value_sums + offset);
+                    v_hi = *(device const float4 *)(value_sums + offset + 4);
+                }
+                threadgroup bfloat *kd = k_tile + row * D + column;
+                threadgroup bfloat *vd = v_tile + row * D + column;
+                *(threadgroup bfloat4 *)kd = bfloat4(k_lo);
+                *(threadgroup bfloat4 *)(kd + 4) = bfloat4(k_hi);
+                *(threadgroup bfloat4 *)vd = bfloat4(v_lo);
+                *(threadgroup bfloat4 *)(vd + 4) = bfloat4(v_hi);
+            }
+        } else {
+            const int exact = t - virtual_tiles;
+            const int k0 = (int)list[exact / HALVES] * 64 +
+                           (exact % HALVES) * BK;
+            valid = min(BK, sequence - k0);
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                uint4 kv = 0, vv = 0;
+                if (row < valid) {
+                    const ulong offset = (ulong)(k0 + row) * args.in_row_stride +
+                                         column;
+                    kv = *(device const uint4 *)(kh + offset);
+                    vv = *(device const uint4 *)(vh + offset);
+                }
+                *(threadgroup uint4 *)(k_tile + row * D + column) = kv;
+                *(threadgroup uint4 *)(v_tile + row * D + column) = vv;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        h3_attn_tiled_step<RQ, BK, false>(qreg, kts, vts, acc, m, l, c, valid);
+        /* Every unrouted block holds 64 tokens: weight its virtual key's
+         * denominator mass by 64 (the value sums already carry it). */
+        if (t + 1 == virtual_tiles) {
+            #pragma clang loop unroll(full)
+            for (int s = 0; s < SLOTS; s++) l[s] *= 64.0f;
+        }
+    }
+    if (q0 >= sequence) return;
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(qs), decltype(kts), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_sparse_bf16_impl<16, 8, 32>) h3_attn_sparse_bf16_t;
+template [[host_name("h3_attn_sparse_bf16_r16s8k32")]]
+kernel h3_attn_sparse_bf16_t h3_attn_sparse_bf16_impl<16, 8, 32>;
+
+/* H3_SOL_QK_INT8: per (64-token block, head) int8 Q and mean-smoothed K for
+ * the sparse kernel's QK^T, plus the virtual keys (unrouted block key means)
+ * with the same smoothing. The per-head key mean from h3_sol_key_stats is
+ * subtracted from every key; it shifts each query row's scores by a constant,
+ * which cancels in softmax. Layout: [q8 | k8] head-major [head][row][128],
+ * then virtual keys [head][block][128]; scales [q | k | virtual][head][block]. */
+kernel void h3_sol_quantize_qk8(device const bfloat *query [[buffer(0)]],
+                                device const bfloat *key [[buffer(1)]],
+                                device const float *summaries [[buffer(2)]],
+                                device int8_t *quantized [[buffer(3)]],
+                                device float *scales [[buffer(4)]],
+                                constant h3_sol_args &args [[buffer(5)]],
+                                uint3 group [[threadgroup_position_in_grid]],
+                                ushort dim [[thread_index_in_threadgroup]],
+                                ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                                ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[4];
+    const uint block = group.x, head = group.y, kind = group.z;
+    const ulong plane = (ulong)args.heads * args.blocks * 128;
+    const ulong head_block = (ulong)head * args.blocks + block;
+    const float mean = kind == 0 ? 0.0f :
+        summaries[3 * plane + (ulong)head * 256 + dim];
+    const uint start = block * 64;
+    const uint length = kind == 2 ? 1u : min(64u, args.sequence - start);
+    device const bfloat *source = (kind == 0 ? query : key) +
+        (ulong)head * args.in_head_stride + dim;
+    device const float *centroid = summaries + plane + head_block * 128 + dim;
+    float peak = 0.0f;
+    for (uint row = 0; row < length; row++) {
+        const float x = kind == 2 ? *centroid - mean :
+            (float)source[(ulong)(start + row) * args.in_row_stride] - mean;
+        peak = max(peak, fabs(x));
+    }
+    peak = simd_max(peak);
+    if (lane == 0) partial[simdgroup] = peak;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    peak = max(max(partial[0], partial[1]), max(partial[2], partial[3]));
+    const float inverse = peak > 0.0f ? 127.0f / peak : 0.0f;
+    const ulong count = (ulong)args.sequence * args.heads * 128;
+    device int8_t *destination = kind == 2 ?
+        quantized + 2 * count + head_block * 128 + dim :
+        quantized + (kind == 1 ? count : 0) +
+            ((ulong)head * args.sequence + start) * 128 + dim;
+    for (uint row = 0; row < length; row++) {
+        const float x = kind == 2 ? *centroid - mean :
+            (float)source[(ulong)(start + row) * args.in_row_stride] - mean;
+        destination[(ulong)row * 128] =
+            (int8_t)clamp(rint(x * inverse), -127.0f, 127.0f);
+    }
+    if (dim == 0)
+        scales[(ulong)kind * args.heads * args.blocks + head_block] =
+            peak / 127.0f;
+}
+
+/* h3_attn_sparse_bf16_impl with int8 QK^T (int32 accumulate, per-block
+ * scales); softmax state stays fp32 and PV stays bf16. */
+template <int RQ, int NSG, int BK>
+kernel void h3_attn_sparse_qk8_impl(
+                           device int8_t *quantized [[buffer(0)]],
+                           device bfloat *value [[buffer(2)]],
+                           device bfloat *output [[buffer(3)]],
+                           constant h3_attn_sparse_args &args [[buffer(4)]],
+                           device const float *summaries [[buffer(5)]],
+                           device const ushort *routes [[buffer(6)]],
+                           device const uint *counts [[buffer(7)]],
+                           device const float *scales [[buffer(8)]],
+                           uint2 group [[threadgroup_position_in_grid]],
+                           ushort tid [[thread_index_in_threadgroup]],
+                           ushort simdgroup [[simdgroup_index_in_threadgroup]],
+                           ushort lane [[thread_index_in_simdgroup]]) {
+    constexpr int D = 128;
+    constexpr int SLOTS = RQ / 8;
+    constexpr int THREADS = NSG * 32;
+    constexpr int VECTORS = BK * D / 8;
+    constexpr int K_VECTORS = BK * D / 16;
+    constexpr int HALVES = 64 / BK;
+    threadgroup int8_t k_tile[BK * D];
+    threadgroup bfloat v_tile[BK * D];
+    threadgroup float k_scale[BK];
+    const int sequence = (int)args.sequence;
+    const uint head = group.y;
+    const ulong head_blocks = (ulong)head * args.blocks;
+    const ulong count = (ulong)args.sequence * args.heads * D;
+    const int q0 = (int)group.x * (RQ * NSG) + (int)simdgroup * RQ;
+    const ulong in_head = (ulong)head * args.in_head_stride;
+    const ulong out_head = (ulong)head * args.out_head_stride;
+    const array<int32_t, 2> in_strides = {1, (int)args.in_row_stride};
+    const array<int32_t, 2> out_strides = {1, (int)args.out_row_stride};
+    const dextents<int32_t, 2> extents(D, sequence);
+    device const int8_t *q8 = quantized + (ulong)head * args.sequence * D;
+    device const int8_t *k8 = quantized + count + (ulong)head * args.sequence * D;
+    device const int8_t *virtual_keys = quantized + 2 * count + head_blocks * D;
+    device const float *q_scales = scales + head_blocks;
+    device const float *k_scales = scales + (ulong)args.heads * args.blocks +
+                                   head_blocks;
+    device const float *virtual_scales = k_scales +
+                                         (ulong)args.heads * args.blocks;
+    device bfloat *vh = value + in_head;
+    auto qt = tensor<device int8_t, dextents<int32_t, 2>, tensor_inline>(
+        (device int8_t *)q8, extents);
+    auto vt = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        vh, extents, in_strides);
+    auto ot = tensor<device bfloat, dextents<int32_t, 2>, tensor_inline>(
+        output + out_head, extents, out_strides);
+    auto kts = tensor(k_tile, dextents<int32_t, 2>(D, BK));
+    auto vts = tensor(v_tile, dextents<int32_t, 2>(D, BK));
+
+    const ulong plane = (ulong)args.heads * args.blocks * D;
+    device const float *value_sums = summaries + 2 * plane + head_blocks * D;
+    const ulong route_index = (ulong)head * args.tile_groups + group.x;
+    device const ushort *list = routes + route_index * args.blocks;
+    const int routed = (int)counts[route_index];
+    const int unrouted = (int)args.blocks - routed;
+    const int virtual_tiles = (unrouted + BK - 1) / BK;
+    const int tiles = virtual_tiles + routed * HALVES -
+                      (int)args.skipped_tail_tiles;
+
+    constexpr auto qk_desc = matmul2d_descriptor(RQ, BK, D, false, true, false);
+    constexpr auto pv_desc = matmul2d_descriptor(RQ, D, BK, false, false, false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qk_desc, execution_simdgroup> qk;
+    matmul2d<qk_desc, execution_simdgroup> qk_float;
+    matmul2d<pv_desc, execution_simdgroup> pv;
+    auto vs_any = vt.slice(0, 0);
+    auto acc = pv.template get_destination_cooperative_tensor<
+        decltype(vs_any), decltype(vts), float>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); i++) acc[i] = 0.0f;
+    auto qreg = qk.template get_left_input_cooperative_tensor<
+        int8_t, int8_t, int32_t>();
+    qreg.load(qt.slice(0, min(q0, sequence - 1)));
+    using QOperand = remove_addrspace_t<decltype(qreg)>;
+    using BOperand = decltype(qk_float.template get_left_input_cooperative_tensor<
+        bfloat, bfloat, float>());
+    const float c = args.scale_log2;
+    const float q_scale = q_scales[min((uint)q0 / 64u, args.blocks - 1)];
+    float m[SLOTS];
+    float l[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) { m[s] = -1.0e30f; l[s] = 0.0f; }
+
+    for (int t = 0; t < tiles; t++) {
+        int valid;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (t < virtual_tiles) {
+            const int first = routed + t * BK;
+            valid = min(BK, unrouted - t * BK);
+            for (int vector = tid; vector < K_VECTORS; vector += THREADS) {
+                const int row = vector / (D / 16);
+                const int column = (vector % (D / 16)) * 16;
+                uint4 kv = 0;
+                if (row < valid)
+                    kv = *(device const uint4 *)(virtual_keys +
+                        (ulong)list[first + row] * D + column);
+                *(threadgroup uint4 *)(k_tile + row * D + column) = kv;
+            }
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                float4 v_lo = 0.0f, v_hi = 0.0f;
+                if (row < valid) {
+                    const ulong offset = (ulong)list[first + row] * D + column;
+                    v_lo = *(device const float4 *)(value_sums + offset);
+                    v_hi = *(device const float4 *)(value_sums + offset + 4);
+                }
+                threadgroup bfloat *vd = v_tile + row * D + column;
+                *(threadgroup bfloat4 *)vd = bfloat4(v_lo);
+                *(threadgroup bfloat4 *)(vd + 4) = bfloat4(v_hi);
+            }
+            if (tid < BK)
+                k_scale[tid] = (int)tid < valid ?
+                    virtual_scales[list[first + tid]] : 0.0f;
+        } else {
+            const int exact = t - virtual_tiles;
+            const int block = (int)list[exact / HALVES];
+            const int k0 = block * 64 + (exact % HALVES) * BK;
+            valid = min(BK, sequence - k0);
+            for (int vector = tid; vector < K_VECTORS; vector += THREADS) {
+                const int row = vector / (D / 16);
+                const int column = (vector % (D / 16)) * 16;
+                uint4 kv = 0;
+                if (row < valid)
+                    kv = *(device const uint4 *)(k8 + (ulong)(k0 + row) * D +
+                                                 column);
+                *(threadgroup uint4 *)(k_tile + row * D + column) = kv;
+            }
+            for (int vector = tid; vector < VECTORS; vector += THREADS) {
+                const int row = vector / (D / 8);
+                const int column = (vector % (D / 8)) * 8;
+                uint4 vv = 0;
+                if (row < valid)
+                    vv = *(device const uint4 *)(vh + (ulong)(k0 + row) *
+                                                 args.in_row_stride + column);
+                *(threadgroup uint4 *)(v_tile + row * D + column) = vv;
+            }
+            if (tid < BK) k_scale[tid] = k_scales[block];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        auto raw = qk.template get_destination_cooperative_tensor<
+            QOperand, decltype(kts), int32_t>();
+        auto scores = qk_float.template get_destination_cooperative_tensor<
+            BOperand, decltype(vts), float>();
+        auto probs = qk_float.template get_destination_cooperative_tensor<
+            BOperand, decltype(vts), bfloat>();
+        auto row_max = qk_float.template
+            get_row_reduction_destination_cooperative_tensor<
+                BOperand, decltype(vts), float>();
+        qk.run(qreg, kts, raw);
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < scores.get_capacity(); i++) {
+            const int column = scores.get_multidimensional_index(i)[0];
+            scores[i] = column < valid ?
+                (float)raw[i] * (q_scale * k_scale[column]) : -1.0e30f;
+        }
+        reduce_rows(scores, row_max, reduction_operation::max, -INFINITY);
+        float alpha[SLOTS];
+        float offset[SLOTS];
+        #pragma clang loop unroll(full)
+        for (int s = 0; s < SLOTS; s++) {
+            float next = max(m[s], row_max[s]);
+            alpha[s] = fast::exp2((m[s] - next) * c);
+            m[s] = next;
+            offset[s] = next * c;
+            l[s] *= alpha[s];
+        }
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < scores.get_capacity(); i++) {
+            const int s = h3_attn_row_slot(i, BK);
+            float p = fast::exp2(fma(scores[i], c, -offset[s]));
+            l[s] += p;
+            probs[i] = (bfloat)p;
+        }
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); i++)
+            acc[i] *= alpha[h3_attn_row_slot(i, D)];
+        auto left = pv.template get_left_input_cooperative_tensor<
+            bfloat, bfloat, float>(probs);
+        pv.run(left, vts, acc);
+        if (t + 1 == virtual_tiles) {
+            #pragma clang loop unroll(full)
+            for (int s = 0; s < SLOTS; s++) l[s] *= 64.0f;
+        }
+    }
+    if (q0 >= sequence) return;
+    float inverse[SLOTS];
+    #pragma clang loop unroll(full)
+    for (int s = 0; s < SLOTS; s++) {
+        float total = l[s];
+        total += simd_shuffle_xor(total, (ushort)1);
+        total += simd_shuffle_xor(total, (ushort)8);
+        inverse[s] = 1.0f / total;
+    }
+    auto result = pv.template get_destination_cooperative_tensor<
+        decltype(vs_any), decltype(vts), bfloat>();
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < result.get_capacity(); i++)
+        result[i] = (bfloat)(acc[i] * inverse[h3_attn_row_slot(i, D)]);
+    auto os = ot.slice(0, q0);
+    result.store(os);
+}
+
+typedef decltype(h3_attn_sparse_qk8_impl<16, 8, 32>) h3_attn_sparse_qk8_t;
+template [[host_name("h3_attn_sparse_qk8_r16s8k32")]]
+kernel h3_attn_sparse_qk8_t h3_attn_sparse_qk8_impl<16, 8, 32>;
+#endif

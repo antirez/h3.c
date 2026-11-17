@@ -28,3 +28,4 @@ h3_real_video_vae_test
 h3_semantic_vae_test
 libh3.a
 .DS_Store
+h3_pack_int8

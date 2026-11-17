@@ -613,9 +613,18 @@ static h3_gpu_tensor *h3_gpu_tensor_load_file(h3_gpu *opaque, const char *path,
     size_t bytes = elements * item_size;
     if ((uint64_t)bytes > (uint64_t)INT64_MAX - file_offset) return NULL;
     const char *zero_copy = getenv("H3_ZERO_COPY_WEIGHTS");
-    int transformer_weight = strstr(path, "/transformer/") != NULL;
+    /* The BF16 DiT, and the packed INT8 DiT written by h3_pack_int8. */
+    int packed_weight = strstr(path, "/transformer-int8/") != NULL;
+    int transformer_weight = strstr(path, "/transformer/") != NULL ||
+                             packed_weight;
     int m5 = [gpu.device.name rangeOfString:@"M5"].location != NSNotFound;
-    int map_weight = bytes &&
+    size_t page = (size_t)getpagesize();
+    /* A packed tensor is mapped only when it starts on a page and is a whole
+     * number of pages (tools/align_int8_pack.py lays the files out that way);
+     * its small row scales and norms are copied. */
+    int mappable = bytes && (!packed_weight ||
+                             (file_offset % page == 0 && bytes % page == 0));
+    int map_weight = mappable &&
         ((zero_copy && !strcmp(zero_copy, "1")) ||
          (transformer_weight &&
           ((zero_copy && !strcmp(zero_copy, "transformer")) ||
@@ -627,7 +636,6 @@ static h3_gpu_tensor *h3_gpu_tensor_load_file(h3_gpu *opaque, const char *path,
                              strerror(errno));
             return NULL;
         }
-        size_t page = (size_t)getpagesize();
         uint64_t aligned_offset = file_offset - file_offset % page;
         size_t delta = (size_t)(file_offset - aligned_offset);
         if (bytes > SIZE_MAX - delta) {
@@ -719,24 +727,27 @@ h3_gpu_tensor *h3_gpu_tensor_load_f32(h3_gpu *opaque, const char *path,
                                    sizeof(float), H3_GPU_F32, "F32");
 }
 
-static int h3_gpu_tensor_read_file_bf16_mode(
+h3_gpu_tensor *h3_gpu_tensor_load_i8(h3_gpu *opaque, const char *path,
+                                     uint64_t file_offset, size_t elements) {
+    return h3_gpu_tensor_load_file(opaque, path, file_offset, elements,
+                                   sizeof(int8_t), H3_GPU_I8, "I8");
+}
+
+static int h3_gpu_tensor_read_file_mode(
                                  h3_gpu_tensor *opaque, const char *path,
-                                 uint64_t file_offset, size_t elements,
+                                 uint64_t file_offset, size_t bytes,
                                  int uncached,
                                  char *error, size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!opaque || !path || !*path ||
-        TENSOR(opaque).dtype != H3_GPU_BF16 ||
-        elements != TENSOR(opaque).elements ||
-        elements > SIZE_MAX / sizeof(uint16_t) || file_offset > INT64_MAX) {
+    if (!opaque || !path || !*path || bytes != TENSOR(opaque).bytes ||
+        file_offset > INT64_MAX) {
         if (error && error_size)
-            snprintf(error, error_size, "invalid BF16 file read request");
+            snprintf(error, error_size, "invalid tensor file read request");
         return 0;
     }
-    size_t bytes = elements * sizeof(uint16_t);
     if ((uint64_t)bytes > (uint64_t)INT64_MAX - file_offset) {
         if (error && error_size)
-            snprintf(error, error_size, "BF16 file read range overflows");
+            snprintf(error, error_size, "tensor file read range overflows");
         return 0;
     }
     int descriptor = open(path, O_RDONLY | O_CLOEXEC);
@@ -761,7 +772,7 @@ static int h3_gpu_tensor_read_file_bf16_mode(
         if (count <= 0) {
             int detail = count < 0 ? errno : 0;
             if (error && error_size) {
-                snprintf(error, error_size, "cannot read BF16 payload from %s: %s",
+                snprintf(error, error_size, "cannot read tensor payload from %s: %s",
                          path, detail ? strerror(detail) :
                                         "unexpected end of file");
             }
@@ -772,6 +783,23 @@ static int h3_gpu_tensor_read_file_bf16_mode(
     }
     close(descriptor);
     return 1;
+}
+
+static int h3_gpu_tensor_read_file_bf16_mode(
+                                 h3_gpu_tensor *opaque, const char *path,
+                                 uint64_t file_offset, size_t elements,
+                                 int uncached,
+                                 char *error, size_t error_size) {
+    if (!opaque || TENSOR(opaque).dtype != H3_GPU_BF16 ||
+        elements != TENSOR(opaque).elements ||
+        elements > SIZE_MAX / sizeof(uint16_t)) {
+        if (error && error_size)
+            snprintf(error, error_size, "invalid BF16 file read request");
+        return 0;
+    }
+    return h3_gpu_tensor_read_file_mode(opaque, path, file_offset,
+                                        elements * sizeof(uint16_t), uncached,
+                                        error, error_size);
 }
 
 int h3_gpu_tensor_read_file_bf16(h3_gpu_tensor *opaque, const char *path,
@@ -786,6 +814,19 @@ int h3_gpu_tensor_stream_file_bf16(h3_gpu_tensor *opaque, const char *path,
                                    char *error, size_t error_size) {
     return h3_gpu_tensor_read_file_bf16_mode(
         opaque, path, file_offset, elements, 1, error, error_size);
+}
+
+int h3_gpu_tensor_stream_file(h3_gpu_tensor *opaque, const char *path,
+                              uint64_t file_offset,
+                              char *error, size_t error_size) {
+    if (!opaque) {
+        if (error && error_size)
+            snprintf(error, error_size, "invalid tensor file read request");
+        return 0;
+    }
+    return h3_gpu_tensor_read_file_mode(opaque, path, file_offset,
+                                        TENSOR(opaque).bytes, 1,
+                                        error, error_size);
 }
 
 void h3_gpu_tensor_free(h3_gpu_tensor *tensor) {
@@ -834,6 +875,14 @@ int h3_gpu_tensor_read_bf16(const h3_gpu_tensor *tensor, uint16_t *values,
     if (!tensor || !values || TENSOR(tensor).dtype != H3_GPU_BF16 ||
         elements > TENSOR(tensor).elements) return 0;
     memcpy(values, TENSOR(tensor).buffer.contents, elements * sizeof(uint16_t));
+    return 1;
+}
+
+int h3_gpu_tensor_read_i8(const h3_gpu_tensor *tensor, int8_t *values,
+                          size_t elements) {
+    if (!tensor || !values || TENSOR(tensor).dtype != H3_GPU_I8 ||
+        elements > TENSOR(tensor).elements) return 0;
+    memcpy(values, TENSOR(tensor).buffer.contents, elements);
     return 1;
 }
 

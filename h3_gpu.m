@@ -2837,17 +2837,21 @@ static H3MLP *h3_gpu_mlp_graph(H3GPU *gpu, uint32_t rows,
                                                dataType:MPSDataTypeBFloat16 name:nil];
         mlp.fc2Weight = [mlp.graph placeholderWithShape:mlp.fc2Shape
                                                dataType:MPSDataTypeBFloat16 name:nil];
+        /* The fused MLP keeps BF16 operands. Its SwiGLU intermediate is the
+         * product of two unbounded projections: on the released checkpoint at
+         * 512x512 it reaches 9.7e6 and about a third of its elements lie
+         * outside FP16's +-65504 range, which turns the decode black. The
+         * linear and SDPA graphs only see RMS-normalized activations and
+         * attention outputs, measured below 128 here, so they keep the
+         * faster operands. */
         MPSGraphTensor *inputOp = h3_gpu_mps_operand(mlp.graph, mlp.input,
-                                                     MPSDataTypeBFloat16,
-                                                     gpu.fp16Linear);
+                                                     MPSDataTypeBFloat16, NO);
         MPSGraphTensor *fc1Op = h3_gpu_mps_operand(mlp.graph,
                                                    mlp.fc1Weight,
-                                                   MPSDataTypeBFloat16,
-                                                   gpu.fp16Linear);
+                                                   MPSDataTypeBFloat16, NO);
         MPSGraphTensor *fc2Op = h3_gpu_mps_operand(mlp.graph,
                                                    mlp.fc2Weight,
-                                                   MPSDataTypeBFloat16,
-                                                   gpu.fp16Linear);
+                                                   MPSDataTypeBFloat16, NO);
         MPSGraphTensor *fc1Transposed =
             [mlp.graph transposeTensor:fc1Op dimension:1
                          withDimension:2 name:nil];
@@ -2868,9 +2872,6 @@ static H3MLP *h3_gpu_mlp_graph(H3GPU *gpu, uint32_t rows,
             [mlp.graph transposeTensor:fc2Op dimension:1
                          withDimension:2 name:nil];
         MPSGraphTensor *fc2Input = activated;
-        if (gpu.fp16Linear)
-            fc2Input = [mlp.graph castTensor:activated
-                                      toType:MPSDataTypeFloat16 name:nil];
         MPSGraphTensor *result =
             [mlp.graph matrixMultiplicationWithPrimaryTensor:fc2Input
                                              secondaryTensor:fc2Transposed name:nil];

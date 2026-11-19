@@ -392,21 +392,27 @@ int main(void) {
         mlp_fc2[i] = float_to_bf16(random_value() * 0.05f);
     uint16_t *bf16_mlp = run_mlp(&bf16, mlp_input, mlp_fc1, mlp_fc2);
     uint16_t *fp16_mlp = run_mlp(&fp16, mlp_input, mlp_fc1, mlp_fc2);
+    /* The fused MLP keeps BF16 operands in both contexts on purpose: its
+     * SwiGLU intermediate is the product of two unbounded projections and on
+     * the released checkpoint it reaches values two orders of magnitude
+     * above FP16's +-65504 range. The two contexts must therefore agree bit
+     * for bit here, which is what pins the MLP to BF16. */
     size_t mlp_count = (size_t)MLP_ROWS * MLP_OUT;
-    energy = 0;
-    error = 0;
+    size_t mlp_differences = 0;
+    double mlp_worst = 0;
     for (size_t i = 0; i < mlp_count; i++) {
-        double reference = bf16_to_float(bf16_mlp[i]);
-        double delta = reference - bf16_to_float(fp16_mlp[i]);
-        energy += reference * reference;
-        error += delta * delta;
+        if (bf16_mlp[i] != fp16_mlp[i]) mlp_differences++;
+        double delta = fabs(bf16_to_float(bf16_mlp[i]) -
+                            bf16_to_float(fp16_mlp[i]));
+        if (delta > mlp_worst) mlp_worst = delta;
     }
-    relative = energy > 0 ? sqrt(error / energy) : 0;
-    printf("mlp: relative L2 difference %.3e\n", relative);
-    require(relative < 0.01, "the FP16 operand MLP path diverged");
+    printf("mlp: %zu of %zu results differ, max delta %.3e\n",
+           mlp_differences, mlp_count, mlp_worst);
+    require(mlp_differences == 0,
+            "the MLP followed the operand selection instead of staying BF16");
 
-    /* Both MLP paths are compared against a double precision reference, so
-     * the FP16 operands cannot quietly be less accurate than the BF16 ones. */
+    /* The MLP is compared against a double precision reference of the same
+     * inputs, so a regression in the BF16 graph itself cannot pass either. */
     {
         double *activated = malloc((size_t)MLP_ROWS * MLP_HIDDEN *
                                    sizeof(double));
@@ -427,7 +433,7 @@ int main(void) {
                 activated[(size_t)r * MLP_HIDDEN + h] = silu * up;
             }
         }
-        double reference_energy = 0, bf16_error = 0, fp16_error = 0;
+        double reference_energy = 0, bf16_error = 0;
         for (int r = 0; r < MLP_ROWS; r++) {
             for (int o = 0; o < MLP_OUT; o++) {
                 double expected = 0;
@@ -435,18 +441,13 @@ int main(void) {
                     expected += activated[(size_t)r * MLP_HIDDEN + h] *
                         bf16_to_float(mlp_fc2[(size_t)o * MLP_HIDDEN + h]);
                 double b = bf16_to_float(bf16_mlp[(size_t)r * MLP_OUT + o]);
-                double f = bf16_to_float(fp16_mlp[(size_t)r * MLP_OUT + o]);
                 reference_energy += expected * expected;
                 bf16_error += (b - expected) * (b - expected);
-                fp16_error += (f - expected) * (f - expected);
             }
         }
         double bf16_relative = sqrt(bf16_error / reference_energy);
-        double fp16_relative = sqrt(fp16_error / reference_energy);
-        printf("mlp vs double reference: BF16 %.3e, FP16 %.3e\n",
-               bf16_relative, fp16_relative);
-        require(fp16_relative <= bf16_relative * 1.05,
-                "the FP16 operand MLP path is less accurate than the BF16 one");
+        printf("mlp vs double reference: BF16 %.3e\n", bf16_relative);
+        require(bf16_relative < 0.01, "the MLP diverged from the reference");
         free(activated);
     }
     free(bf16_mlp);

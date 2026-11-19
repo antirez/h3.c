@@ -2646,8 +2646,11 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
         if (has_bias) {
             linear.bias = [linear.graph placeholderWithShape:linear.biasShape
                                                     dataType:dataType name:nil];
+            MPSGraphTensor *biasOp = h3_gpu_mps_operand(linear.graph,
+                                                        linear.bias, dataType,
+                                                        gpu.fp16Linear);
             output = [linear.graph additionWithPrimaryTensor:output
-                                             secondaryTensor:linear.bias name:nil];
+                                             secondaryTensor:biasOp name:nil];
         }
         linear.output = [linear.graph castTensor:output toType:dataType name:nil];
         gpu.linearCache[key] = linear;

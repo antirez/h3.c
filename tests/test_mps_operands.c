@@ -131,6 +131,41 @@ static void run_linear(operands *value) {
     if (!h3_gpu_submit(value->gpu)) fail("cannot submit the command stream");
 }
 
+/* The bias is added inside the same graph, so it has to follow the operand
+ * format of the product: MPSGraph rejects an addition whose operands differ.
+ * The DiT passes no bias, but the video VAE decoder's MLP does. */
+static uint16_t *run_linear_biased(operands *value, uint16_t *input_values,
+                                   uint16_t *weight_values,
+                                   uint16_t *bias_values) {
+    size_t input_count = (size_t)ROWS * K_DIM;
+    size_t weight_count = (size_t)N_DIM * K_DIM;
+    size_t output_count = (size_t)ROWS * N_DIM;
+    h3_gpu_tensor *input = allocate_bf16(value->gpu, input_count);
+    h3_gpu_tensor *weight = allocate_bf16(value->gpu, weight_count);
+    h3_gpu_tensor *bias = allocate_bf16(value->gpu, N_DIM);
+    h3_gpu_tensor *output = allocate_bf16(value->gpu, output_count);
+    if (!input || !weight || !bias || !output)
+        fail("cannot allocate the biased linear tensors");
+    require(h3_gpu_tensor_write_bf16(input, input_values, input_count),
+            "cannot write the biased linear input");
+    require(h3_gpu_tensor_write_bf16(weight, weight_values, weight_count),
+            "cannot write the biased linear weight");
+    require(h3_gpu_tensor_write_bf16(bias, bias_values, N_DIM),
+            "cannot write the biased linear bias");
+    if (!h3_gpu_begin(value->gpu)) fail("cannot begin the command stream");
+    if (!h3_gpu_linear_bf16(value->gpu, output, input, weight, bias,
+                            ROWS, K_DIM, N_DIM))
+        fail(h3_gpu_error(value->gpu));
+    if (!h3_gpu_submit(value->gpu)) fail("cannot submit the command stream");
+    uint16_t *result = malloc(output_count * sizeof(uint16_t));
+    if (!result) fail("out of memory");
+    require(h3_gpu_tensor_read_bf16(output, result, output_count),
+            "cannot read the biased linear result");
+    h3_gpu_tensor_free(input); h3_gpu_tensor_free(weight);
+    h3_gpu_tensor_free(bias); h3_gpu_tensor_free(output);
+    return result;
+}
+
 /* The fused fc1 -> SwiGLU -> fc2 graph. Its intermediate is cast to the
  * operand format before the second product, so the two paths are compared
  * rather than assumed identical. */
@@ -240,6 +275,32 @@ int main(void) {
            differences, output_count, worst);
     require(differences == 0,
             "the FP16 operand linear path is not bit identical");
+
+    /* The same comparison with a bias, which the graph adds to the product
+     * and which therefore has to follow the same operand format. */
+    uint16_t *bias_values = malloc(N_DIM * sizeof(uint16_t));
+    if (!bias_values) fail("out of memory");
+    for (size_t i = 0; i < N_DIM; i++)
+        bias_values[i] = float_to_bf16(random_value() * 0.5f);
+    uint16_t *bf16_biased = run_linear_biased(&bf16, input_values,
+                                              weight_values, bias_values);
+    uint16_t *fp16_biased = run_linear_biased(&fp16, input_values,
+                                              weight_values, bias_values);
+    size_t biased_differences = 0;
+    double biased_worst = 0;
+    for (size_t i = 0; i < output_count; i++) {
+        if (bf16_biased[i] != fp16_biased[i]) biased_differences++;
+        double delta = fabs(bf16_to_float(bf16_biased[i]) -
+                            bf16_to_float(fp16_biased[i]));
+        if (delta > biased_worst) biased_worst = delta;
+    }
+    printf("linear with bias: %zu of %zu results differ, max delta %.3e\n",
+           biased_differences, output_count, biased_worst);
+    require(biased_differences == 0,
+            "the FP16 operand biased linear path is not bit identical");
+    free(bf16_biased);
+    free(fp16_biased);
+    free(bias_values);
 
     /* The attention weights are rounded to FP16 before the kernel runs, so
      * the two paths agree to the precision of the format instead of bit

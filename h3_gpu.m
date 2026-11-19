@@ -412,16 +412,44 @@ static MPSGraph *h3_gpu_calibration_linear(BOOL castToFP16,
     return graph;
 }
 
+static void h3_gpu_measure_operands(H3GPU *gpu);
+
 /* Pick the faster MPSGraph operand format for the BF16 matmul and SDPA
  * kernels. The decision is taken once per device, by measuring both
  * variants of the real graph shapes, so a GPU with native BF16 tensor
  * operations keeps the current path untouched. */
+/* The device is fixed for the lifetime of the process, so the measurement
+ * is taken once and every later Metal context reuses the decision. A run
+ * creates a context per model phase. */
+static dispatch_once_t h3_operand_calibration_once;
+static BOOL h3_operand_fp16_linear;
+static BOOL h3_operand_fp16_sdpa;
+static double h3_operand_timings[4];
+
 static void h3_gpu_calibrate_operands(H3GPU *gpu) {
     const char *override = getenv("H3_FP16_OPERANDS");
     if (override && *override && !strcmp(override, "0")) return;
-    int forced = override && *override && !strcmp(override, "1");
+    if (override && *override && !strcmp(override, "1")) {
+        gpu.fp16Linear = YES;
+        gpu.fp16SDPA = YES;
+        return;
+    }
     /* M5 implements the BF16 kernels in hardware: leave that path alone. */
-    if (gpu.tensorOpsEnabled && !forced) return;
+    if (gpu.tensorOpsEnabled) return;
+    dispatch_once(&h3_operand_calibration_once, ^{
+        h3_gpu_measure_operands(gpu);
+    });
+    gpu.fp16Linear = h3_operand_fp16_linear;
+    gpu.fp16SDPA = h3_operand_fp16_sdpa;
+    if (getenv("H3_PROFILE")) {
+        fprintf(stderr, "h3: MPS operand calibration: matmul BF16 %.3f ms "
+                "FP16 %.3f ms, SDPA BF16 %.3f ms FP16 %.3f ms\n",
+                h3_operand_timings[0] * 1000, h3_operand_timings[1] * 1000,
+                h3_operand_timings[2] * 1000, h3_operand_timings[3] * 1000);
+    }
+}
+
+static void h3_gpu_measure_operands(H3GPU *gpu) {
     @autoreleasepool {
         /* Matmul: the same operand layout the linear and MLP graphs use,
          * at a size that keeps the measurement in the same regime as the
@@ -523,14 +551,15 @@ static void h3_gpu_calibrate_operands(H3GPU *gpu) {
                 @{qt: qData, kt: kData, vt: vData}, @{result: sData}, 4);
             if (cast) sdpaFP16 = elapsed; else sdpaBF16 = elapsed;
         }
-        gpu.fp16Linear = forced || (bf16 > 0 && fp16 > 0 && fp16 < bf16 * 0.95);
-        gpu.fp16SDPA = forced || (sdpaBF16 > 0 && sdpaFP16 > 0 &&
-                                  sdpaFP16 < sdpaBF16 * 0.95);
-        if (getenv("H3_PROFILE")) {
-            fprintf(stderr, "h3: MPS operand calibration: matmul BF16 %.3f ms "
-                    "FP16 %.3f ms, SDPA BF16 %.3f ms FP16 %.3f ms\n",
-                    bf16 * 1000, fp16 * 1000, sdpaBF16 * 1000, sdpaFP16 * 1000);
-        }
+        /* Keep the faster variant, with a margin so measurement noise does
+         * not flip the selection on a machine where the two tie. */
+        h3_operand_fp16_linear = bf16 > 0 && fp16 > 0 && fp16 < bf16 * 0.95;
+        h3_operand_fp16_sdpa = sdpaBF16 > 0 && sdpaFP16 > 0 &&
+                               sdpaFP16 < sdpaBF16 * 0.95;
+        h3_operand_timings[0] = bf16;
+        h3_operand_timings[1] = fp16;
+        h3_operand_timings[2] = sdpaBF16;
+        h3_operand_timings[3] = sdpaFP16;
     }
 }
 

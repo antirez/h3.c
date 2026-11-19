@@ -617,7 +617,9 @@ magnitude below that limit.
 
 `H3_FP16_OPERANDS=0` keeps the BF16 operands, `H3_FP16_OPERANDS=1` forces the
 FP16 ones, and the default measures both. `H3_PROFILE=1` prints the two
-timings.
+timings. The `--use-slower-*` close-reference oracles follow the same operand
+selection, so pin `H3_FP16_OPERANDS=0` when an A/B needs the exact previous
+BF16 arithmetic.
 
 ### Specialized projection kernels
 

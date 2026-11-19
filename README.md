@@ -584,6 +584,36 @@ while an otherwise identical macOS 26.5 M5 Max gained 1.4% in a same-context
 forward A/B. The resulting 50-block velocities were close (1.9% video and 2.4%
 audio relative L2), but not byte-identical.
 
+### MPSGraph operand formats
+
+Apple Silicon GPUs that do not implement the BF16 matrix kernels in hardware
+run the MPSGraph BF16 matmul and SDPA on an emulated path that is slower than
+the FP16 one. The engine measures both variants of the real graphs once per
+device, when the Metal context is created, and keeps the faster one. On an M2
+Ultra the BF16 linear and MLP graphs run about 1.7x faster with FP16 operands,
+and the full attention about 3.4x faster, because the emulated BF16 kernels
+convert and widen every operand while the FP16 ones feed the same pipeline
+directly.
+
+The cast lives inside the MPSGraph, so there is no extra buffer, no host copy
+and no duplicated weight set: the placeholders keep their BF16 type and the
+graph casts them to FP16 before the matrix product. BF16 carries eight
+significand bits and FP16 carries eleven, so every BF16 operand converts
+exactly and both graphs accumulate in FP32. The linear and MLP results are
+therefore bit identical to the BF16 path, which `make test` checks with the
+`h3_mps_operands_test` probe. The attention weights are rounded to FP16
+before the kernel runs, so the attention output moves by a relative L2 of
+about 1.5e-3, the same order as the BF16 rounding itself.
+
+FP16 has a narrower exponent range than BF16: values above 65,504 overflow and
+values below 6.1e-5 lose precision. The operands of these graphs are
+RMS-normalized activations and their AdaLN modulation, which stay orders of
+magnitude below that limit.
+
+`H3_FP16_OPERANDS=0` keeps the BF16 operands, `H3_FP16_OPERANDS=1` forces the
+FP16 ones, and the default measures both. `H3_PROFILE=1` prints the two
+timings.
+
 ### Specialized projection kernels
 
 The narrow DiT audio/video output heads convert their small released F32

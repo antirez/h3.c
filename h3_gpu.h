@@ -38,6 +38,10 @@ void h3_gpu_free(h3_gpu *gpu);
 int h3_gpu_is_m5(const h3_gpu *gpu);
 int h3_gpu_has_nax_mlp(const h3_gpu *gpu);
 int h3_gpu_has_int8_mlp(const h3_gpu *gpu);
+/* Report the MPSGraph operand format selected for this device: 1 when the
+ * BF16 graphs run with FP16 operands, 0 when they keep BF16. */
+int h3_gpu_uses_fp16_linear(const h3_gpu *gpu);
+int h3_gpu_uses_fp16_sdpa(const h3_gpu *gpu);
 
 h3_gpu_tensor *h3_gpu_tensor_new_f32(h3_gpu *gpu, size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_new_bf16(h3_gpu *gpu, size_t elements);

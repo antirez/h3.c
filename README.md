@@ -584,6 +584,45 @@ while an otherwise identical macOS 26.5 M5 Max gained 1.4% in a same-context
 forward A/B. The resulting 50-block velocities were close (1.9% video and 2.4%
 audio relative L2), but not byte-identical.
 
+### MPSGraph operand formats
+
+Apple Silicon GPUs that do not implement the BF16 matrix kernels in hardware
+run the MPSGraph BF16 matmul and SDPA on an emulated path that is slower than
+the FP16 one. The engine measures both variants of the real graphs once per
+device, when the Metal context is created, and keeps the faster one. On an M2
+Ultra the BF16 linear graphs run about 1.7x faster with FP16 operands and the
+full attention about 3.4x faster, because the emulated BF16 kernels convert
+and widen every operand while the FP16 ones feed the same pipeline directly.
+
+The cast lives inside the MPSGraph, so there is no extra buffer, no host copy
+and no duplicated weight set: the placeholders keep their BF16 type and the
+graph casts them to FP16 before the matrix product. BF16 carries eight
+significand bits and FP16 carries eleven, so every BF16 operand converts
+exactly and both graphs accumulate in FP32. The linear results are therefore
+bit identical to the BF16 path.
+
+The fused MLP keeps BF16 operands even when the calibration picks FP16. Its
+SwiGLU intermediate is the product of two unbounded projections: measured on
+the released checkpoint at 512x512 it reaches 9.7e6, and about a third of its
+elements lie outside FP16's +-65504 range, so an FP16 MLP overflows to
+infinity and the decode comes out black. The linear and SDPA operands are
+RMS-normalized activations and attention outputs, measured below 128 on the
+same run, which stays three orders of magnitude inside the FP16 range.
+
+The attention rounds its weights to the operand format, so it is not bit
+identical. Measured against a double precision reference of the same inputs it
+matches the BF16 path (1.75e-3 against 1.72e-3 relative), because the attention
+output is stored as BF16 either way. `make test` checks the linear, the biased
+linear, the attention and the MLP with the `h3_mps_operands_test` probe; the
+MLP check asserts bit identity between a BF16 and an FP16 context, which is
+what pins the MLP to BF16.
+
+`H3_FP16_OPERANDS=0` keeps the BF16 operands, `H3_FP16_OPERANDS=1` forces the
+FP16 ones on the graphs that may use them, and the default measures both.
+`H3_PROFILE=1` prints the two timings. The `--use-slower-*` close-reference
+oracles follow the same operand selection, so pin `H3_FP16_OPERANDS=0` when an
+A/B needs the exact previous BF16 arithmetic.
+
 ### Specialized projection kernels
 
 The narrow DiT audio/video output heads convert their small released F32

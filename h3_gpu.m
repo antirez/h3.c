@@ -117,6 +117,10 @@
 @property(nonatomic) BOOL tensorOpsEnabled;
 @property(nonatomic) NSUInteger tensorOpsMode;
 @property(nonatomic) BOOL headMajorSDPAInputs;
+/* Set when MPSGraph runs BF16 operands faster after an in-graph cast to
+ * FP16. See h3_gpu_calibrate_operands(). */
+@property(nonatomic) BOOL fp16Linear;
+@property(nonatomic) BOOL fp16SDPA;
 @property(nonatomic) h3_gpu_stats profileStartStats;
 @property(nonatomic) h3_gpu_stats profileMarkStats;
 @property(nonatomic) double profileStartWall;
@@ -325,6 +329,240 @@ static int h3_gpu_dispatch_rows(H3GPU *gpu, NSString *name, uint32_t rows,
     return 1;
 }
 
+/* Time a cached MPSGraph the way the DiT uses it: several encodes into a
+ * single command buffer, so the measurement reflects kernel throughput
+ * instead of graph construction. Returns the best wall time in seconds. */
+static double h3_gpu_time_mps_graph(H3GPU *gpu, MPSGraph *graph,
+                                    NSDictionary *feeds,
+                                    NSDictionary *results,
+                                    int iterations) {
+    @autoreleasepool {
+        id<MTLCommandBuffer> warmup = [gpu.queue commandBuffer];
+        MPSCommandBuffer *warmupCommand =
+            [MPSCommandBuffer commandBufferWithCommandBuffer:warmup];
+        [graph encodeToCommandBuffer:warmupCommand feeds:feeds
+                   targetOperations:nil resultsDictionary:results
+                   executionDescriptor:nil];
+        [warmupCommand commit];
+        [warmupCommand waitUntilCompleted];
+        double best = 0;
+        for (int round = 0; round < 3; round++) {
+            double start = h3_gpu_now();
+            @autoreleasepool {
+                id<MTLCommandBuffer> metal = [gpu.queue commandBuffer];
+                MPSCommandBuffer *command =
+                    [MPSCommandBuffer commandBufferWithCommandBuffer:metal];
+                for (int i = 0; i < iterations; i++) {
+                    [graph encodeToCommandBuffer:command feeds:feeds
+                               targetOperations:nil resultsDictionary:results
+                               executionDescriptor:nil];
+                }
+                [command commit];
+                [command waitUntilCompleted];
+            }
+            double elapsed = h3_gpu_now() - start;
+            if (best == 0 || elapsed < best) best = elapsed;
+        }
+        return best;
+    }
+}
+
+/* Build the operand cast used by the MPSGraph BF16 paths. Apple Silicon
+ * GPUs without native BF16 tensor operations emulate the format in
+ * software: MPSGraph then runs the BF16 matmul and SDPA kernels on a
+ * slower path than the FP16 ones. BF16 values carry eight significand
+ * bits and FP16 carries eleven, so every BF16 value inside the FP16
+ * exponent range converts exactly and the FP16 graph computes the same
+ * product with the same FP32 accumulation. The cast lives inside the
+ * graph, so no extra buffer or copy is needed on the host side. */
+static MPSGraphTensor *h3_gpu_mps_operand(MPSGraph *graph,
+                                          MPSGraphTensor *tensor,
+                                          MPSDataType dataType,
+                                          BOOL castToFP16) {
+    if (!castToFP16 || dataType != MPSDataTypeBFloat16) return tensor;
+    return [graph castTensor:tensor toType:MPSDataTypeFloat16 name:nil];
+}
+
+static MPSGraph *h3_gpu_calibration_linear(BOOL castToFP16,
+                                           uint32_t rows, uint32_t k,
+                                           uint32_t n,
+                                           MPSGraphTensor **aOut,
+                                           MPSGraphTensor **bOut,
+                                           MPSGraphTensor **outOut) {
+    MPSGraph *graph = [[MPSGraph alloc] init];
+    NSArray<NSNumber *> *aShape = @[@1, @(rows), @(k)];
+    NSArray<NSNumber *> *bShape = @[@1, @(n), @(k)];
+    MPSGraphTensor *a = [graph placeholderWithShape:aShape
+                                           dataType:MPSDataTypeBFloat16 name:nil];
+    MPSGraphTensor *b = [graph placeholderWithShape:bShape
+                                           dataType:MPSDataTypeBFloat16 name:nil];
+    MPSGraphTensor *aOp = h3_gpu_mps_operand(graph, a,
+                                              MPSDataTypeBFloat16, castToFP16);
+    MPSGraphTensor *bOp = h3_gpu_mps_operand(graph, b,
+                                              MPSDataTypeBFloat16, castToFP16);
+    MPSGraphTensor *bt = [graph transposeTensor:bOp dimension:1
+                                 withDimension:2 name:nil];
+    MPSGraphTensor *out = [graph matrixMultiplicationWithPrimaryTensor:aOp
+                                                        secondaryTensor:bt
+                                                                   name:nil];
+    out = [graph castTensor:out toType:MPSDataTypeFloat32 name:nil];
+    *aOut = a;
+    *bOut = b;
+    *outOut = out;
+    return graph;
+}
+
+static void h3_gpu_measure_operands(H3GPU *gpu);
+
+/* Pick the faster MPSGraph operand format for the BF16 matmul and SDPA
+ * kernels. The decision is taken once per device, by measuring both
+ * variants of the real graph shapes, so a GPU with native BF16 tensor
+ * operations keeps the current path untouched. */
+/* The device is fixed for the lifetime of the process, so the measurement
+ * is taken once and every later Metal context reuses the decision. A run
+ * creates a context per model phase. */
+static dispatch_once_t h3_operand_calibration_once;
+static BOOL h3_operand_fp16_linear;
+static BOOL h3_operand_fp16_sdpa;
+static double h3_operand_timings[4];
+
+static void h3_gpu_calibrate_operands(H3GPU *gpu) {
+    const char *override = getenv("H3_FP16_OPERANDS");
+    if (override && *override && !strcmp(override, "0")) return;
+    if (override && *override && !strcmp(override, "1")) {
+        gpu.fp16Linear = YES;
+        gpu.fp16SDPA = YES;
+        return;
+    }
+    /* M5 implements the BF16 kernels in hardware: leave that path alone. */
+    if (gpu.tensorOpsEnabled) return;
+    dispatch_once(&h3_operand_calibration_once, ^{
+        h3_gpu_measure_operands(gpu);
+    });
+    gpu.fp16Linear = h3_operand_fp16_linear;
+    gpu.fp16SDPA = h3_operand_fp16_sdpa;
+    if (getenv("H3_PROFILE")) {
+        fprintf(stderr, "h3: MPS operand calibration: matmul BF16 %.3f ms "
+                "FP16 %.3f ms, SDPA BF16 %.3f ms FP16 %.3f ms\n",
+                h3_operand_timings[0] * 1000, h3_operand_timings[1] * 1000,
+                h3_operand_timings[2] * 1000, h3_operand_timings[3] * 1000);
+    }
+}
+
+static void h3_gpu_measure_operands(H3GPU *gpu) {
+    @autoreleasepool {
+        /* Matmul: the same operand layout the linear and MLP graphs use,
+         * at a size that keeps the measurement in the same regime as the
+         * DiT blocks without paying for a full forward. */
+        const uint32_t rows = 1024, k = 2048, n = 2048;
+        /* MPSGraph refuses buffers that are smaller than the temporaries of
+         * the graph it encodes, so every buffer gets a generous size. */
+        const NSUInteger minimum = 8 * 1024 * 1024;
+        id<MTLBuffer> a = [gpu.device newBufferWithLength:
+            MAX((NSUInteger)rows * k * 2, minimum)
+            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> b = [gpu.device newBufferWithLength:
+            MAX((NSUInteger)n * k * 2, minimum)
+            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> out = [gpu.device newBufferWithLength:
+            MAX((NSUInteger)rows * n * 4, minimum)
+            options:MTLResourceStorageModeShared];
+        memset(a.contents, 0x3c, a.length);
+        memset(b.contents, 0x3c, b.length);
+        NSArray<NSNumber *> *aShape = @[@1, @(rows), @(k)];
+        NSArray<NSNumber *> *bShape = @[@1, @(n), @(k)];
+        NSArray<NSNumber *> *outShape = @[@1, @(rows), @(n)];
+        MPSGraphTensorData *aData = [[MPSGraphTensorData alloc]
+            initWithMTLBuffer:a shape:aShape dataType:MPSDataTypeBFloat16];
+        MPSGraphTensorData *bData = [[MPSGraphTensorData alloc]
+            initWithMTLBuffer:b shape:bShape dataType:MPSDataTypeBFloat16];
+        MPSGraphTensorData *outData = [[MPSGraphTensorData alloc]
+            initWithMTLBuffer:out shape:outShape dataType:MPSDataTypeFloat32];
+        double bf16 = 0, fp16 = 0;
+        for (int cast = 0; cast < 2; cast++) {
+            MPSGraphTensor *aTensor = nil, *bTensor = nil, *outTensor = nil;
+            MPSGraph *graph = h3_gpu_calibration_linear(cast, rows, k, n,
+                                                        &aTensor, &bTensor,
+                                                        &outTensor);
+            double elapsed = h3_gpu_time_mps_graph(gpu, graph,
+                @{aTensor: aData, bTensor: bData},
+                @{outTensor: outData}, 4);
+            if (cast) fp16 = elapsed; else bf16 = elapsed;
+        }
+        /* SDPA: the non causal attention the DiT runs on every block. */
+        const uint32_t seq = 256, heads = 8, dim = 128;
+        NSArray<NSNumber *> *qShape = @[@1, @(seq), @(heads), @(dim)];
+        NSUInteger bytes = (NSUInteger)seq * heads * dim * 2;
+        bytes = MAX(bytes, (NSUInteger)(8 * 1024 * 1024));
+        id<MTLBuffer> qBuffer = [gpu.device newBufferWithLength:bytes
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> kBuffer = [gpu.device newBufferWithLength:bytes
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> vBuffer = [gpu.device newBufferWithLength:bytes
+                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> sBuffer = [gpu.device newBufferWithLength:bytes
+                                                    options:MTLResourceStorageModeShared];
+        memset(qBuffer.contents, 0x3c, bytes);
+        memset(kBuffer.contents, 0x3c, bytes);
+        memset(vBuffer.contents, 0x3c, bytes);
+        double sdpaBF16 = 0, sdpaFP16 = 0;
+        for (int cast = 0; cast < 2; cast++) {
+            MPSGraph *graph = [[MPSGraph alloc] init];
+            MPSGraphTensor *qt = [graph placeholderWithShape:qShape
+                                                    dataType:MPSDataTypeBFloat16
+                                                        name:nil];
+            MPSGraphTensor *kt = [graph placeholderWithShape:qShape
+                                                    dataType:MPSDataTypeBFloat16
+                                                        name:nil];
+            MPSGraphTensor *vt = [graph placeholderWithShape:qShape
+                                                    dataType:MPSDataTypeBFloat16
+                                                        name:nil];
+            MPSGraphTensor *qo = h3_gpu_mps_operand(graph, qt,
+                                                     MPSDataTypeBFloat16, cast);
+            MPSGraphTensor *ko = h3_gpu_mps_operand(graph, kt,
+                                                     MPSDataTypeBFloat16, cast);
+            MPSGraphTensor *vo = h3_gpu_mps_operand(graph, vt,
+                                                     MPSDataTypeBFloat16, cast);
+            MPSGraphTensor *q2 = [graph transposeTensor:qo dimension:1
+                                          withDimension:2 name:nil];
+            MPSGraphTensor *k2 = [graph transposeTensor:ko dimension:1
+                                          withDimension:2 name:nil];
+            MPSGraphTensor *v2 = [graph transposeTensor:vo dimension:1
+                                          withDimension:2 name:nil];
+            MPSGraphTensor *attention = [graph
+                scaledDotProductAttentionWithQueryTensor:q2 keyTensor:k2
+                valueTensor:v2 scale:0.088388f name:nil];
+            MPSGraphTensor *result = [graph castTensor:attention
+                                                 toType:MPSDataTypeFloat32
+                                                     name:nil];
+            MPSGraphTensorData *qData = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:qBuffer shape:qShape
+                           dataType:MPSDataTypeBFloat16];
+            MPSGraphTensorData *kData = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:kBuffer shape:qShape
+                           dataType:MPSDataTypeBFloat16];
+            MPSGraphTensorData *vData = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:vBuffer shape:qShape
+                           dataType:MPSDataTypeBFloat16];
+            MPSGraphTensorData *sData = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:sBuffer shape:qShape
+                           dataType:MPSDataTypeFloat32];
+            double elapsed = h3_gpu_time_mps_graph(gpu, graph,
+                @{qt: qData, kt: kData, vt: vData}, @{result: sData}, 4);
+            if (cast) sdpaFP16 = elapsed; else sdpaBF16 = elapsed;
+        }
+        /* Keep the faster variant, with a margin so measurement noise does
+         * not flip the selection on a machine where the two tie. */
+        h3_operand_fp16_linear = bf16 > 0 && fp16 > 0 && fp16 < bf16 * 0.95;
+        h3_operand_fp16_sdpa = sdpaBF16 > 0 && sdpaFP16 > 0 &&
+                               sdpaFP16 < sdpaBF16 * 0.95;
+        h3_operand_timings[0] = bf16;
+        h3_operand_timings[1] = fp16;
+        h3_operand_timings[2] = sdpaBF16;
+        h3_operand_timings[3] = sdpaFP16;
+    }
+}
+
 h3_gpu *h3_gpu_create(const char *shader_source_path,
                       char *error, size_t error_size) {
     @autoreleasepool {
@@ -500,6 +738,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             pipelines[name] = pipeline;
         }
         gpu.pipelines = pipelines;
+        h3_gpu_calibrate_operands(gpu);
         return (__bridge_retained h3_gpu *)gpu;
     }
 }
@@ -532,6 +771,20 @@ int h3_gpu_is_m5(const h3_gpu *opaque) {
     if (!opaque) return 0;
     H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
     return [gpu.device.name rangeOfString:@"M5"].location != NSNotFound;
+}
+
+/* Report the MPSGraph operand format selected for this device: 1 when the
+ * BF16 graphs run with FP16 operands, 0 when they keep BF16. */
+int h3_gpu_uses_fp16_linear(const h3_gpu *opaque) {
+    if (!opaque) return 0;
+    H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
+    return gpu.fp16Linear ? 1 : 0;
+}
+
+int h3_gpu_uses_fp16_sdpa(const h3_gpu *opaque) {
+    if (!opaque) return 0;
+    H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
+    return gpu.fp16SDPA ? 1 : 0;
 }
 
 int h3_gpu_has_nax_mlp(const h3_gpu *opaque) {
@@ -1473,12 +1726,18 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
                                                dataType:dataType name:nil];
         MPSGraphTensor *v = [graph placeholderWithShape:inputShape
                                                dataType:dataType name:nil];
-        MPSGraphTensor *qt = headMajor ? q :
-            [graph transposeTensor:q dimension:1 withDimension:2 name:nil];
-        MPSGraphTensor *kt = headMajor ? k :
-            [graph transposeTensor:k dimension:1 withDimension:2 name:nil];
-        MPSGraphTensor *vt = headMajor ? v :
-            [graph transposeTensor:v dimension:1 withDimension:2 name:nil];
+        MPSGraphTensor *qOp = h3_gpu_mps_operand(graph, q, dataType,
+                                                 gpu.fp16SDPA);
+        MPSGraphTensor *kOp = h3_gpu_mps_operand(graph, k, dataType,
+                                                 gpu.fp16SDPA);
+        MPSGraphTensor *vOp = h3_gpu_mps_operand(graph, v, dataType,
+                                                 gpu.fp16SDPA);
+        MPSGraphTensor *qt = headMajor ? qOp :
+            [graph transposeTensor:qOp dimension:1 withDimension:2 name:nil];
+        MPSGraphTensor *kt = headMajor ? kOp :
+            [graph transposeTensor:kOp dimension:1 withDimension:2 name:nil];
+        MPSGraphTensor *vt = headMajor ? vOp :
+            [graph transposeTensor:vOp dimension:1 withDimension:2 name:nil];
         if (![graph respondsToSelector:@selector(scaledDotProductAttentionWithQueryTensor:keyTensor:valueTensor:scale:name:)]) {
             h3_gpu_set_error(gpu, @"native MPSGraph SDPA is unavailable");
             return nil;
@@ -1509,6 +1768,11 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
         result.query = q;
         result.key = k;
         result.value = v;
+        /* The FP16 attention produces FP16 results: restore the graph
+         * operand type so the caller's buffer keeps its own dtype. */
+        if (gpu.fp16SDPA && dataType == MPSDataTypeBFloat16)
+            attention = [graph castTensor:attention
+                                   toType:MPSDataTypeBFloat16 name:nil];
         result.output = outputHeadMajor ? attention :
             [graph transposeTensor:attention dimension:1 withDimension:2
              name:nil];
@@ -2367,17 +2631,26 @@ static H3Linear *h3_gpu_linear_graph(H3GPU *gpu, uint32_t rows,
                                                  dataType:dataType name:nil];
         linear.weight = [linear.graph placeholderWithShape:linear.weightShape
                                                   dataType:dataType name:nil];
+        MPSGraphTensor *inputOp = h3_gpu_mps_operand(linear.graph,
+                                                     linear.input, dataType,
+                                                     gpu.fp16Linear);
+        MPSGraphTensor *weightOp = h3_gpu_mps_operand(linear.graph,
+                                                      linear.weight, dataType,
+                                                      gpu.fp16Linear);
         MPSGraphTensor *transposed =
-            [linear.graph transposeTensor:linear.weight dimension:1
+            [linear.graph transposeTensor:weightOp dimension:1
                             withDimension:2 name:nil];
         MPSGraphTensor *output =
-            [linear.graph matrixMultiplicationWithPrimaryTensor:linear.input
+            [linear.graph matrixMultiplicationWithPrimaryTensor:inputOp
                                                 secondaryTensor:transposed name:nil];
         if (has_bias) {
             linear.bias = [linear.graph placeholderWithShape:linear.biasShape
                                                     dataType:dataType name:nil];
+            MPSGraphTensor *biasOp = h3_gpu_mps_operand(linear.graph,
+                                                        linear.bias, dataType,
+                                                        gpu.fp16Linear);
             output = [linear.graph additionWithPrimaryTensor:output
-                                             secondaryTensor:linear.bias name:nil];
+                                             secondaryTensor:biasOp name:nil];
         }
         linear.output = [linear.graph castTensor:output toType:dataType name:nil];
         gpu.linearCache[key] = linear;
@@ -2564,11 +2837,26 @@ static H3MLP *h3_gpu_mlp_graph(H3GPU *gpu, uint32_t rows,
                                                dataType:MPSDataTypeBFloat16 name:nil];
         mlp.fc2Weight = [mlp.graph placeholderWithShape:mlp.fc2Shape
                                                dataType:MPSDataTypeBFloat16 name:nil];
+        /* The fused MLP keeps BF16 operands. Its SwiGLU intermediate is the
+         * product of two unbounded projections: on the released checkpoint at
+         * 512x512 it reaches 9.7e6 and about a third of its elements lie
+         * outside FP16's +-65504 range, which turns the decode black. The
+         * linear and SDPA graphs only see RMS-normalized activations and
+         * attention outputs, measured below 128 here, so they keep the
+         * faster operands. */
+        MPSGraphTensor *inputOp = h3_gpu_mps_operand(mlp.graph, mlp.input,
+                                                     MPSDataTypeBFloat16, NO);
+        MPSGraphTensor *fc1Op = h3_gpu_mps_operand(mlp.graph,
+                                                   mlp.fc1Weight,
+                                                   MPSDataTypeBFloat16, NO);
+        MPSGraphTensor *fc2Op = h3_gpu_mps_operand(mlp.graph,
+                                                   mlp.fc2Weight,
+                                                   MPSDataTypeBFloat16, NO);
         MPSGraphTensor *fc1Transposed =
-            [mlp.graph transposeTensor:mlp.fc1Weight dimension:1
+            [mlp.graph transposeTensor:fc1Op dimension:1
                          withDimension:2 name:nil];
         MPSGraphTensor *fused =
-            [mlp.graph matrixMultiplicationWithPrimaryTensor:mlp.input
+            [mlp.graph matrixMultiplicationWithPrimaryTensor:inputOp
                                              secondaryTensor:fc1Transposed name:nil];
         NSArray<MPSGraphTensor *> *halves =
             [mlp.graph splitTensor:fused numSplits:2 axis:2 name:nil];
@@ -2581,10 +2869,11 @@ static H3MLP *h3_gpu_mlp_graph(H3GPU *gpu, uint32_t rows,
             [mlp.graph multiplicationWithPrimaryTensor:silu
                                        secondaryTensor:halves[1] name:nil];
         MPSGraphTensor *fc2Transposed =
-            [mlp.graph transposeTensor:mlp.fc2Weight dimension:1
+            [mlp.graph transposeTensor:fc2Op dimension:1
                          withDimension:2 name:nil];
+        MPSGraphTensor *fc2Input = activated;
         MPSGraphTensor *result =
-            [mlp.graph matrixMultiplicationWithPrimaryTensor:activated
+            [mlp.graph matrixMultiplicationWithPrimaryTensor:fc2Input
                                              secondaryTensor:fc2Transposed name:nil];
         mlp.output = [mlp.graph castTensor:result
                                     toType:MPSDataTypeBFloat16 name:nil];

@@ -225,16 +225,6 @@ int main(void) {
     free(bf16_attention);
     free(fp16_attention);
 
-    /* The automatic selection must pick the faster variant on this
-     * device. Both variants are measured when the context is created, so
-     * the choice follows the hardware rather than a hard coded rule. */
-    unsetenv("H3_FP16_OPERANDS");
-    operands automatic = make_operands("", input_values, weight_values);
-    printf("automatic selection: linear %s, attention %s\n",
-           h3_gpu_uses_fp16_linear(automatic.gpu) ? "FP16" : "BF16",
-           h3_gpu_uses_fp16_sdpa(automatic.gpu) ? "FP16" : "BF16");
-    free_operands(&automatic);
-
     free(bf16_output);
     free(fp16_output);
     free_operands(&bf16);

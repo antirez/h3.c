@@ -131,6 +131,41 @@ static void run_linear(operands *value) {
     if (!h3_gpu_submit(value->gpu)) fail("cannot submit the command stream");
 }
 
+/* The fused fc1 -> SwiGLU -> fc2 graph. Its intermediate is cast to the
+ * operand format before the second product, so the two paths are compared
+ * rather than assumed identical. */
+static uint16_t *run_mlp(operands *value, uint16_t *input_values,
+                         uint16_t *fc1_values, uint16_t *fc2_values) {
+    enum { MLP_ROWS = 128, MLP_IN = 512, MLP_HIDDEN = 256, MLP_OUT = 512 };
+    size_t input_count = (size_t)MLP_ROWS * MLP_IN;
+    size_t fc1_count = (size_t)MLP_HIDDEN * 2 * MLP_IN;
+    size_t fc2_count = (size_t)MLP_OUT * MLP_HIDDEN;
+    size_t output_count = (size_t)MLP_ROWS * MLP_OUT;
+    h3_gpu_tensor *input = allocate_bf16(value->gpu, input_count);
+    h3_gpu_tensor *fc1 = allocate_bf16(value->gpu, fc1_count);
+    h3_gpu_tensor *fc2 = allocate_bf16(value->gpu, fc2_count);
+    h3_gpu_tensor *output = allocate_bf16(value->gpu, output_count);
+    if (!input || !fc1 || !fc2 || !output) fail("cannot allocate the MLP tensors");
+    require(h3_gpu_tensor_write_bf16(input, input_values, input_count),
+            "cannot write the MLP input");
+    require(h3_gpu_tensor_write_bf16(fc1, fc1_values, fc1_count),
+            "cannot write the MLP fc1 weight");
+    require(h3_gpu_tensor_write_bf16(fc2, fc2_values, fc2_count),
+            "cannot write the MLP fc2 weight");
+    if (!h3_gpu_begin(value->gpu)) fail("cannot begin the command stream");
+    if (!h3_gpu_mlp_bf16(value->gpu, output, input, fc1, fc2, MLP_ROWS,
+                         MLP_IN, MLP_HIDDEN, MLP_OUT))
+        fail(h3_gpu_error(value->gpu));
+    if (!h3_gpu_submit(value->gpu)) fail("cannot submit the command stream");
+    uint16_t *result = malloc(output_count * sizeof(uint16_t));
+    if (!result) fail("out of memory");
+    require(h3_gpu_tensor_read_bf16(output, result, output_count),
+            "cannot read the MLP result");
+    h3_gpu_tensor_free(input); h3_gpu_tensor_free(fc1);
+    h3_gpu_tensor_free(fc2); h3_gpu_tensor_free(output);
+    return result;
+}
+
 static uint16_t *run_sdpa(operands *value, uint16_t *values) {
     size_t count = (size_t)SEQ * HEADS * HEAD_DIM;
     h3_gpu_tensor *q = allocate_bf16(value->gpu, count);
@@ -222,8 +257,142 @@ int main(void) {
     double relative = energy > 0 ? sqrt(error / energy) : 0;
     printf("attention: relative L2 difference %.3e\n", relative);
     require(relative < 0.01, "the FP16 operand attention path diverged");
+
+    /* The same comparison against a double precision attention reference
+     * shows that the spread above is the rounding of the BF16 path rather
+     * than error introduced by the FP16 one. */
+    {
+        double bf16_sq = 0, fp16_sq = 0, reference_sq = 0;
+        double scale = 1.0 / sqrt((double)HEAD_DIM);
+        double *scores = malloc((size_t)SEQ * sizeof(double));
+        if (!scores) fail("out of memory");
+        for (int head = 0; head < HEADS; head++) {
+            for (int row = 0; row < SEQ; row++) {
+                double maximum = -1e30, total = 0;
+                for (int column = 0; column < SEQ; column++) {
+                    double dot = 0;
+                    for (int d = 0; d < HEAD_DIM; d++)
+                        dot += bf16_to_float(attention_values[
+                                   ((size_t)row * HEADS + head) * HEAD_DIM + d]) *
+                               bf16_to_float(attention_values[
+                                   ((size_t)column * HEADS + head) * HEAD_DIM + d]);
+                    scores[column] = dot * scale;
+                    if (scores[column] > maximum) maximum = scores[column];
+                }
+                for (int column = 0; column < SEQ; column++) {
+                    scores[column] = exp(scores[column] - maximum);
+                    total += scores[column];
+                }
+                for (int d = 0; d < HEAD_DIM; d++) {
+                    double expected = 0;
+                    for (int column = 0; column < SEQ; column++)
+                        expected += (scores[column] / total) *
+                            bf16_to_float(attention_values[
+                                ((size_t)column * HEADS + head) * HEAD_DIM + d]);
+                    double b = bf16_to_float(bf16_attention[
+                        ((size_t)row * HEADS + head) * HEAD_DIM + d]);
+                    double f = bf16_to_float(fp16_attention[
+                        ((size_t)row * HEADS + head) * HEAD_DIM + d]);
+                    reference_sq += expected * expected;
+                    bf16_sq += (b - expected) * (b - expected);
+                    fp16_sq += (f - expected) * (f - expected);
+                }
+            }
+        }
+        free(scores);
+        double bf16_relative = sqrt(bf16_sq / reference_sq);
+        double fp16_relative = sqrt(fp16_sq / reference_sq);
+        printf("attention vs double reference: BF16 %.3e, FP16 %.3e\n",
+               bf16_relative, fp16_relative);
+        require(fp16_relative <= bf16_relative * 1.05,
+                "the FP16 operand attention path is less accurate than the "
+                "BF16 one");
+    }
     free(bf16_attention);
     free(fp16_attention);
+
+    /* The MLP intermediate is cast to the operand format before the second
+     * product, which keeps more significand bits than the BF16 cast. */
+    /* Both contexts must see the same MLP weights, so they are generated
+     * once here instead of inside the run. */
+    enum { MLP_ROWS = 128, MLP_IN = 512, MLP_HIDDEN = 256, MLP_OUT = 512 };
+    size_t mlp_input_count = (size_t)MLP_ROWS * MLP_IN;
+    size_t mlp_fc1_count = (size_t)MLP_HIDDEN * 2 * MLP_IN;
+    size_t mlp_fc2_count = (size_t)MLP_OUT * MLP_HIDDEN;
+    uint16_t *mlp_input = malloc(mlp_input_count * sizeof(uint16_t));
+    uint16_t *mlp_fc1 = malloc(mlp_fc1_count * sizeof(uint16_t));
+    uint16_t *mlp_fc2 = malloc(mlp_fc2_count * sizeof(uint16_t));
+    if (!mlp_input || !mlp_fc1 || !mlp_fc2) fail("out of memory");
+    for (size_t i = 0; i < mlp_input_count; i++)
+        mlp_input[i] = float_to_bf16(random_value() * 0.25f);
+    for (size_t i = 0; i < mlp_fc1_count; i++)
+        mlp_fc1[i] = float_to_bf16(random_value() * 0.05f);
+    for (size_t i = 0; i < mlp_fc2_count; i++)
+        mlp_fc2[i] = float_to_bf16(random_value() * 0.05f);
+    uint16_t *bf16_mlp = run_mlp(&bf16, mlp_input, mlp_fc1, mlp_fc2);
+    uint16_t *fp16_mlp = run_mlp(&fp16, mlp_input, mlp_fc1, mlp_fc2);
+    size_t mlp_count = (size_t)MLP_ROWS * MLP_OUT;
+    energy = 0;
+    error = 0;
+    for (size_t i = 0; i < mlp_count; i++) {
+        double reference = bf16_to_float(bf16_mlp[i]);
+        double delta = reference - bf16_to_float(fp16_mlp[i]);
+        energy += reference * reference;
+        error += delta * delta;
+    }
+    relative = energy > 0 ? sqrt(error / energy) : 0;
+    printf("mlp: relative L2 difference %.3e\n", relative);
+    require(relative < 0.01, "the FP16 operand MLP path diverged");
+
+    /* Both MLP paths are compared against a double precision reference, so
+     * the FP16 operands cannot quietly be less accurate than the BF16 ones. */
+    {
+        double *activated = malloc((size_t)MLP_ROWS * MLP_HIDDEN *
+                                   sizeof(double));
+        if (!activated) fail("out of memory");
+        for (int r = 0; r < MLP_ROWS; r++) {
+            for (int h = 0; h < MLP_HIDDEN; h++) {
+                double gate = 0, up = 0;
+                for (int i = 0; i < MLP_IN; i++) {
+                    double input_value =
+                        bf16_to_float(mlp_input[(size_t)r * MLP_IN + i]);
+                    gate += input_value *
+                        bf16_to_float(mlp_fc1[(size_t)h * MLP_IN + i]);
+                    up += input_value *
+                        bf16_to_float(mlp_fc1[
+                            (size_t)(h + MLP_HIDDEN) * MLP_IN + i]);
+                }
+                double silu = gate / (1.0 + exp(-gate));
+                activated[(size_t)r * MLP_HIDDEN + h] = silu * up;
+            }
+        }
+        double reference_energy = 0, bf16_error = 0, fp16_error = 0;
+        for (int r = 0; r < MLP_ROWS; r++) {
+            for (int o = 0; o < MLP_OUT; o++) {
+                double expected = 0;
+                for (int h = 0; h < MLP_HIDDEN; h++)
+                    expected += activated[(size_t)r * MLP_HIDDEN + h] *
+                        bf16_to_float(mlp_fc2[(size_t)o * MLP_HIDDEN + h]);
+                double b = bf16_to_float(bf16_mlp[(size_t)r * MLP_OUT + o]);
+                double f = bf16_to_float(fp16_mlp[(size_t)r * MLP_OUT + o]);
+                reference_energy += expected * expected;
+                bf16_error += (b - expected) * (b - expected);
+                fp16_error += (f - expected) * (f - expected);
+            }
+        }
+        double bf16_relative = sqrt(bf16_error / reference_energy);
+        double fp16_relative = sqrt(fp16_error / reference_energy);
+        printf("mlp vs double reference: BF16 %.3e, FP16 %.3e\n",
+               bf16_relative, fp16_relative);
+        require(fp16_relative <= bf16_relative * 1.05,
+                "the FP16 operand MLP path is less accurate than the BF16 one");
+        free(activated);
+    }
+    free(bf16_mlp);
+    free(fp16_mlp);
+    free(mlp_input);
+    free(mlp_fc1);
+    free(mlp_fc2);
 
     free(bf16_output);
     free(fp16_output);

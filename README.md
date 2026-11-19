@@ -599,11 +599,16 @@ The cast lives inside the MPSGraph, so there is no extra buffer, no host copy
 and no duplicated weight set: the placeholders keep their BF16 type and the
 graph casts them to FP16 before the matrix product. BF16 carries eight
 significand bits and FP16 carries eleven, so every BF16 operand converts
-exactly and both graphs accumulate in FP32. The linear and MLP results are
-therefore bit identical to the BF16 path, which `make test` checks with the
-`h3_mps_operands_test` probe. The attention weights are rounded to FP16
-before the kernel runs, so the attention output moves by a relative L2 of
-about 1.5e-3, the same order as the BF16 rounding itself.
+exactly and both graphs accumulate in FP32. The linear results are therefore
+bit identical to the BF16 path.
+
+The fused MLP and the attention round their intermediate to the operand format
+instead, so they are not bit identical. Measured against a double precision
+reference of the same inputs, the FP16 MLP is about twice as accurate as the
+BF16 one (1.7e-3 against 3.3e-3 relative) and the attention matches it
+(1.75e-3 against 1.72e-3), because the attention output is stored as BF16
+either way. `make test` checks all three with the `h3_mps_operands_test`
+probe.
 
 FP16 has a narrower exponent range than BF16: values above 65,504 overflow and
 values below 6.1e-5 lose precision. The operands of these graphs are

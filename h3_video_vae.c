@@ -123,10 +123,14 @@ static void free_tensor(h3_gpu_tensor **tensor) {
     *tensor = NULL;
 }
 
-/* The decoder runs in BF16 by default so the MPS matmul and SDPA paths can
- * use the Apple tensor cores. H3_VAE_PRECISION=f32 restores the original
- * float32 path for A/B comparisons and regression runs. */
-static int vae_prefers_bf16(void) {
+/* MPS matmul and SDPA reach the tensor cores in BF16 only on M5-class GPUs,
+ * the same device-name check as h3_gpu_is_m5(). Earlier GPUs emulate BF16,
+ * and that path is slower than FP32 SIMD, so FP32 stays the default there.
+ * tensorOpsEnabled is the wrong gate: h3_gpu_create() also clears it when
+ * H3_NAX=0 or the TensorOps library fails to compile, and the decoder does
+ * not use those kernels. BF16 still halves decoder residency everywhere.
+ * H3_VAE_PRECISION=bf16 or =f32 (also fp32/float32/bfloat16) overrides this. */
+static int vae_prefers_bf16(const h3_gpu *gpu) {
     const char *value = getenv("H3_VAE_PRECISION");
     if (value && *value) {
         if (strcasecmp(value, "f32") == 0 || strcasecmp(value, "fp32") == 0 ||
@@ -134,7 +138,7 @@ static int vae_prefers_bf16(void) {
         if (strcasecmp(value, "bf16") == 0 ||
             strcasecmp(value, "bfloat16") == 0) return 1;
     }
-    return 1;
+    return h3_gpu_is_m5(gpu);
 }
 
 static h3_gpu_tensor *alloc_activation(vae_context *vae, size_t elements) {
@@ -1098,7 +1102,6 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
         fprintf(stderr, "h3: resident video VAE tiles %dx%d at %d pixels\n",
                 decoder->x_axis.count, decoder->y_axis.count, tile_pixels);
     vae_context *vae = &decoder->vae;
-    vae->bf16 = vae_prefers_bf16();
     if (ok) {
         vae->latent_h = decoder->y_axis.length / SPATIAL_RATIO;
         vae->latent_w = decoder->x_axis.length / SPATIAL_RATIO;
@@ -1111,8 +1114,10 @@ h3_video_vae_decoder *h3_video_vae_decoder_load(
                                              error, error_size);
         if (vae->weights)
             vae->gpu = h3_gpu_create(shader_source_path, error, error_size);
-        if (vae->gpu)
+        if (vae->gpu) {
+            vae->bf16 = vae_prefers_bf16(vae->gpu);
             h3_gpu_profile_set_label(vae->gpu, "resident video VAE decoder");
+        }
         ok = vae->weights && vae->gpu &&
              load_resident_weights(vae, progress, progress_opaque,
                                    error, error_size) &&
@@ -1247,7 +1252,6 @@ static int decode_chunked(const char *weight_directory,
                 x_axis.count, y_axis.count, tile_pixels);
     vae_context vae;
     memset(&vae, 0, sizeof(vae));
-    vae.bf16 = vae_prefers_bf16();
     vae.latent_h = y_axis.length / SPATIAL_RATIO;
     vae.latent_w = x_axis.length / SPATIAL_RATIO;
     vae.latent_t = CHUNK_LATENT_TIME;
@@ -1257,8 +1261,10 @@ static int decode_chunked(const char *weight_directory,
     vae.weights = h3_weight_store_open(weight_directory, error, error_size);
     if (vae.weights)
         vae.gpu = h3_gpu_create(shader_source_path, error, error_size);
-    if (vae.gpu)
+    if (vae.gpu) {
+        vae.bf16 = vae_prefers_bf16(vae.gpu);
         h3_gpu_profile_set_label(vae.gpu, "video VAE decoder");
+    }
     ok = vae.weights && vae.gpu &&
          load_resident_weights(&vae, progress, progress_opaque,
                                error, error_size) &&
@@ -1381,7 +1387,6 @@ int h3_video_vae_decode(const char *weight_directory,
     }
     vae_context vae;
     memset(&vae, 0, sizeof(vae));
-    vae.bf16 = vae_prefers_bf16();
     vae.latent_h = latent_height;
     vae.latent_w = latent_width;
     vae.latent_t = latent_time;
@@ -1414,8 +1419,10 @@ int h3_video_vae_decode(const char *weight_directory,
     vae.weights = h3_weight_store_open(weight_directory, error, error_size);
     if (!vae.weights) return 0;
     vae.gpu = h3_gpu_create(shader_source_path, error, error_size);
-    if (vae.gpu)
+    if (vae.gpu) {
+        vae.bf16 = vae_prefers_bf16(vae.gpu);
         h3_gpu_profile_set_label(vae.gpu, "video VAE decoder");
+    }
     int ok = vae.gpu &&
         load_input_weights(&vae, error, error_size) &&
         prepare_input(&vae, normalized_latent, latent_mean, latent_std,

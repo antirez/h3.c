@@ -1,9 +1,9 @@
 /* A/B comparison of the video VAE decoder in its two supported precisions.
  *
- * The decoder normally runs in BF16 so that the MPS matmul and SDPA paths
- * can use the Apple tensor cores. H3_VAE_PRECISION=f32 keeps the original
- * float32 path. This test decodes the same fixed pseudo-random latent with
- * both paths and reports the timing and the numerical difference.
+ * The default is hardware-aware: BF16 on M5-class GPUs, where MPS matmul
+ * and SDPA reach the tensor cores, and FP32 elsewhere, where emulated BF16
+ * is slower. H3_VAE_PRECISION=bf16 or =f32 overrides that choice. This test
+ * forces both paths, so the comparison does not depend on the machine.
  *
  * Usage:
  *   h3_video_vae_tests [model_root] [shader] [latent_h] [latent_w]

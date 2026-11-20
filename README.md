@@ -529,6 +529,11 @@ The video VAE automatically chooses a 256-320 pixel spatial tile from the
 requested canvas geometry, minimizing repeated overlap work while keeping peak
 storage bounded. `H3_VAE_TILE_PIXELS=256` restores the original conservative
 tile plan for close-reference diagnosis.
+The decoder defaults to BF16 on M5-class GPUs, where MPS matmul and SDPA
+reach the tensor cores, and to FP32 on earlier GPUs, where emulated BF16 is
+slower than the FP32 SIMD path. BF16 still halves decoder weight residency
+on every device. `H3_VAE_PRECISION=bf16` or `H3_VAE_PRECISION=f32` selects
+a precision explicitly.
 
 ### Weight residency and streamed prompt encoding
 
